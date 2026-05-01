@@ -1,0 +1,10 @@
+.idea
+data
+logs
+*.txt
+.env
+.venv
+*.prof
+*.gob
+bin
+pkg/grpc/*

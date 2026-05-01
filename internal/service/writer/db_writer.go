@@ -1,0 +1,248 @@
+package writer
+
+import (
+	"context"
+	"sync"
+	"time"
+
+	"gidh-backend/internal/service/models"
+	"gidh-backend/pkg/logger"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+type DBWriter struct {
+	pool          *pgxpool.Pool
+	config        *DBWriterConfig
+	tickBatch     []models.TickData
+	depthBatch    []DepthRecord
+	batchSize     int
+	flushInterval time.Duration
+	mu            sync.Mutex
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+}
+
+type DepthRecord struct {
+	Timestamp       time.Time
+	InstrumentToken uint32
+	StockName       string
+	Side            string
+	Price           float64
+	Quantity        int64
+	Orders          int
+}
+
+type DBWriterConfig struct {
+	Pool               *pgxpool.Pool
+	SkipDatabaseInsert bool
+	BatchSize          int           // Number of rows per batch (default: 5000)
+	FlushInterval      time.Duration // Flush interval (default: 5 seconds)
+}
+
+func NewDBWriter(cfg *DBWriterConfig) *DBWriter {
+	if cfg.BatchSize <= 0 {
+		cfg.BatchSize = 5000
+	}
+	if cfg.FlushInterval <= 0 {
+		cfg.FlushInterval = 5 * time.Second
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	writer := &DBWriter{
+		pool:          cfg.Pool,
+		config:        cfg,
+		tickBatch:     make([]models.TickData, 0, cfg.BatchSize),
+		depthBatch:    make([]DepthRecord, 0, cfg.BatchSize),
+		batchSize:     cfg.BatchSize,
+		flushInterval: cfg.FlushInterval,
+		ctx:           ctx,
+		cancel:        cancel,
+	}
+
+	// Start flush timer
+	writer.wg.Add(1)
+	go writer.flushTimer()
+
+	return writer
+}
+
+func (w *DBWriter) AddTick(tick models.TickData) {
+
+	w.mu.Lock()
+	w.tickBatch = append(w.tickBatch, tick)
+
+	if len(w.tickBatch) >= w.batchSize {
+		// Swap the batch and flush in background
+		batch := w.tickBatch
+		w.tickBatch = make([]models.TickData, 0, w.batchSize)
+		w.mu.Unlock() // Release lock immediately
+
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.insertTicksBatch(batch)
+		}()
+	} else {
+		w.mu.Unlock()
+	}
+}
+
+func (w *DBWriter) AddDepth(timestamp time.Time, token uint32, stockName string, side string, depth models.DepthLevel) {
+
+	w.mu.Lock()
+	w.depthBatch = append(w.depthBatch, DepthRecord{
+		Timestamp:       timestamp,
+		InstrumentToken: token,
+		StockName:       stockName,
+		Side:            side,
+		Price:           depth.Price,
+		Quantity:        depth.Quantity,
+		Orders:          depth.Orders,
+	})
+
+	if len(w.depthBatch) >= w.batchSize {
+		// Swap the batch and flush in background
+		batch := w.depthBatch
+		w.depthBatch = make([]DepthRecord, 0, w.batchSize)
+		w.mu.Unlock() // Release lock immediately
+
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.insertDepthBatch(batch)
+		}()
+	} else {
+		w.mu.Unlock()
+	}
+}
+
+func (w *DBWriter) flushTimer() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(w.flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			w.mu.Lock()
+			tBatch := w.tickBatch
+			dBatch := w.depthBatch
+
+			// Reset batch
+			w.tickBatch = make([]models.TickData, 0, w.batchSize)
+			w.depthBatch = make([]DepthRecord, 0, w.batchSize)
+
+			w.mu.Unlock()
+
+			if len(tBatch) > 0 {
+				w.wg.Add(1)
+				go func() {
+					defer w.wg.Done()
+					w.insertTicksBatch(tBatch)
+				}()
+			}
+			if len(dBatch) > 0 {
+				w.wg.Add(1)
+				go func() {
+					defer w.wg.Done()
+					w.insertDepthBatch(dBatch)
+				}()
+			}
+
+		case <-w.ctx.Done():
+			return
+		}
+	}
+}
+
+func (w *DBWriter) insertTicksBatch(batch []models.TickData) {
+
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	copyCount, err := w.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{"live_ticks"},
+		[]string{
+			"timestamp", "instrument_token", "stock_name", "last_price",
+			"last_traded_quantity", "average_traded_price", "volume_traded",
+			"total_buy_quantity", "total_sell_quantity", "open", "high",
+			"low", "close", "change",
+		},
+		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
+			tick := batch[i]
+			return []any{
+				tick.Timestamp, tick.InstrumentToken, tick.StockName, tick.LastPrice,
+				tick.LastTradedQuantity, tick.AverageTradedPrice, tick.CumulativeVolume,
+				tick.TotalBuyQuantity, tick.TotalSellQuantity, tick.Open,
+				tick.High, tick.Low, tick.Close, tick.Change,
+			}, nil
+		}),
+	)
+
+	if err != nil {
+		logger.Errorf("Failed to insert ticks: %v", err)
+	} else {
+		logger.Debugf("Inserted %d ticks (background)", copyCount)
+	}
+}
+
+func (w *DBWriter) insertDepthBatch(batch []DepthRecord) {
+
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	copyCount, err := w.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{"live_order_depth"},
+		[]string{"timestamp", "instrument_token", "stock_name", "side", "price", "quantity", "orders"},
+		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
+			record := batch[i]
+			return []any{
+				record.Timestamp, record.InstrumentToken, record.StockName,
+				record.Side, record.Price, record.Quantity, record.Orders,
+			}, nil
+		}),
+	)
+
+	if err != nil {
+		logger.Errorf("Failed to insert depth: %v", err)
+	} else {
+		logger.Debugf("Inserted %d depth records (background)", copyCount)
+	}
+}
+
+func (w *DBWriter) Close() {
+	logger.Info("Closing DB writer, flushing remaining data...")
+
+	w.cancel() // Stop the timer
+
+	// Final sync flush for remaining data
+	w.mu.Lock()
+	tBatch := w.tickBatch
+	dBatch := w.depthBatch
+
+	w.mu.Unlock()
+
+	if len(tBatch) > 0 {
+		w.insertTicksBatch(tBatch)
+	}
+	if len(dBatch) > 0 {
+		w.insertDepthBatch(dBatch)
+	}
+
+	w.wg.Wait() // Wait for all background goroutines to finish
+	logger.Info("DB writer closed")
+}
