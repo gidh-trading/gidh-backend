@@ -2,6 +2,10 @@ package app
 
 import (
 	"context"
+	"fmt"
+	"gidh-backend/internal/service/ws"
+	"log"
+	"net/http"
 	"sync"
 	"time"
 
@@ -110,6 +114,21 @@ func NewApp(cfg *config.Config) (*App, error) {
 
 	if dnaMap == nil {
 		dnaMap = make(map[uint32]*models.MarketDNA)
+	}
+
+	hub := ws.NewHub()
+
+	go hub.Run()
+
+	http.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
+		ws.ServeWs(hub, w, r)
+	})
+
+	port := fmt.Sprintf(":%s", config.AppConfig.Port)
+	log.Printf("Server starting on %s", port)
+
+	if err := http.ListenAndServe(port, nil); err != nil {
+		log.Fatal("ListenAndServe:", err)
 	}
 
 	for _, c := range app.instrumentList {
