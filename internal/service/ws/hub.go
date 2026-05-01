@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"gidh-backend/pkg/logger"
 	"sync"
 )
 
@@ -87,5 +88,17 @@ func (h *Hub) Run() {
 func (h *Hub) removeClient(c *Client) {
 	delete(h.clients, c)
 	close(c.send)
-	// Additional logic to prune empty subscription keys can go here
+}
+
+func (h *Hub) Stop() {
+	// 1. Close the register/unregister channels to stop new activity
+	// 2. Loop through active clients and close their send channels
+	h.mu.Lock() // Ensure you have a mutex on your client map
+	defer h.mu.Unlock()
+
+	for client := range h.clients {
+		close(client.send)
+		delete(h.clients, client)
+	}
+	logger.Info("WebSocket Hub stopped: all client connections closed.")
 }

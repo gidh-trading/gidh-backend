@@ -10,24 +10,24 @@ import (
 
 // createDataSource handles the factory logic for selecting the source type.
 // It now utilizes the global AppConfig to determine the mode.
-func (app *App) createDataSource() (stream.TickDataSource, error) {
+func (a *App) createDataSource() (stream.TickDataSource, error) {
 	if config.AppConfig.Mode == "live" {
-		return app.createLiveSource()
+		return a.createLiveSource()
 	}
-	return app.createBacktestSource()
+	return a.createBacktestSource()
 }
 
-func (app *App) createLiveSource() (stream.TickDataSource, error) {
+func (a *App) createLiveSource() (stream.TickDataSource, error) {
 	// Passing app.orderMgr so the LiveTickSource can trigger HandleOrderUpdate on WebSocket fills
 	return stream.NewLiveSource(&stream.LiveSourceConfig{
 		APIKey:        config.AppConfig.KiteAPIKey,
 		AccessToken:   config.AppConfig.KiteAccessToken,
-		InstrumentMap: app.tokenToName,
-		Instruments:   app.extractTokens(),
+		InstrumentMap: a.tokenToName,
+		Instruments:   a.extractTokens(),
 	})
 }
 
-func (app *App) createBacktestSource() (stream.TickDataSource, error) {
+func (a *App) createBacktestSource() (stream.TickDataSource, error) {
 	// Validation using the global configuration
 	if config.AppConfig.BacktestDate == "" {
 		return nil, errors.New("BACKTEST_DATE is required for mode=backtest in .env")
@@ -43,9 +43,9 @@ func (app *App) createBacktestSource() (stream.TickDataSource, error) {
 	instruments := make([]struct {
 		Name  string
 		Token uint32
-	}, len(app.instrumentList))
+	}, len(a.instrumentList))
 
-	for i, inst := range app.instrumentList {
+	for i, inst := range a.instrumentList {
 		instruments[i].Name = inst.Name
 		instruments[i].Token = inst.Token
 	}
@@ -56,13 +56,13 @@ func (app *App) createBacktestSource() (stream.TickDataSource, error) {
 		Date:        d,
 		SpeedFactor: config.AppConfig.BacktestSpeedFactor,
 		Instruments: instruments,
-		NameToToken: app.nameToToken,
+		NameToToken: a.nameToToken,
 	}), nil
 }
 
-func (app *App) extractTokens() []uint32 {
-	tokens := make([]uint32, len(app.instrumentList))
-	for i, inst := range app.instrumentList {
+func (a *App) extractTokens() []uint32 {
+	tokens := make([]uint32, len(a.instrumentList))
+	for i, inst := range a.instrumentList {
 		tokens[i] = inst.Token
 	}
 	return tokens

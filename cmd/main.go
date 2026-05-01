@@ -1,4 +1,3 @@
-// cmd/main.go
 package main
 
 import (
@@ -14,36 +13,42 @@ import (
 )
 
 func main() {
+	// Load environment variables[cite: 3]
 	if err := env.Load(".env"); err != nil {
-		// Just a warning, as env vars might be injected via Docker
 		logger.Warnf("No .env file found: %v", err)
 	}
 
-	// Initialize global singleton
+	// Initialize global configuration and logger[cite: 3]
 	config.Load()
 	logger.Init(config.AppConfig.LogLevel)
 
-	// 1. Initialize the Application
+	// 1. Create a context that listens for the interrupt signals (Ctrl+C, SIGTERM)
+	// This replaces the manual channel management in your previous version[cite: 3]
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	// 2. Initialize the Application
 	application, err := app.NewApp(config.AppConfig)
 	if err != nil {
 		logger.Errorf("Failed to initialize app: %v", err)
 		os.Exit(1)
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// 2. Start the Application
+	// 3. Start the Application
+	// This will now launch the HTTP server and Data Stream in a non-blocking way
 	if err := application.Start(ctx); err != nil {
 		logger.Errorf("Fatal application error: %v", err)
 		os.Exit(1)
 	}
 
-	// 3. Listen for OS Shutdown Signals (Ctrl+C, Docker stop)
-	c := make(chan os.Signal, 1)
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
-	<-c // Blocks the main thread until a signal is received
+	// 4. Block the main thread until the context is canceled (signal received)
+	<-ctx.Done()
 
 	logger.Info("Termination signal received, shutting down gracefully...")
+
+	// 5. Trigger the graceful shutdown sequence defined in app.go
+	// This will shut down the server, close WebSocket clients, and flush the DB
 	application.Stop()
+
+	logger.Info("Gidh Backend exited cleanly.")
 }
