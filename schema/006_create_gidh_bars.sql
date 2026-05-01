@@ -2,19 +2,19 @@ CREATE TABLE IF NOT EXISTS gidh_bars
 (
     timestamp        TIMESTAMPTZ      NOT NULL,
     instrument_token INTEGER          NOT NULL,
-    stock_name       TEXT,
+    stock_name       TEXT             NOT NULL,
     timeframe        TEXT             NOT NULL,
     open             DOUBLE PRECISION NOT NULL,
     high             DOUBLE PRECISION NOT NULL,
     low              DOUBLE PRECISION NOT NULL,
     close            DOUBLE PRECISION NOT NULL,
     volume           BIGINT           NOT NULL,
-    vwap             DOUBLE PRECISION,
-    poc              DOUBLE PRECISION,
-    vah              DOUBLE PRECISION,
-    val              DOUBLE PRECISION,
-    vol_energy       DOUBLE PRECISION,
-    rng_energy       DOUBLE PRECISION,
+    vwap             DOUBLE PRECISION NOT NULL,
+    poc              DOUBLE PRECISION NOT NULL,
+    vah              DOUBLE PRECISION NOT NULL,
+    val              DOUBLE PRECISION NOT NULL,
+    vol_energy       DOUBLE PRECISION NOT NULL,
+    rng_energy       DOUBLE PRECISION NOT NULL,
 
     PRIMARY KEY (timestamp, stock_name, timeframe)
 );

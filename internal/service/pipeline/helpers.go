@@ -8,7 +8,7 @@ func newBar(ts time.Time, price float64) *Bar {
 		High:      price,
 		Low:       price,
 		Close:     price,
-		Start:     ts,
+		Timestamp: ts,
 		VolEnergy: 0,
 		RngEnergy: 0,
 	}

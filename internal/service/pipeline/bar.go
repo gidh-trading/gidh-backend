@@ -129,7 +129,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	b1 := s.bar1m[token]
 	updateBar(b1, price, vol)
 
-	if ts.Minute() != b1.Start.Minute() {
+	if ts.Minute() != b1.Timestamp.Minute() {
 		// ✅ ONLY 1m updates session
 		session.Update(b1.Volume, b1.High-b1.Low)
 
@@ -143,7 +143,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	b5 := s.bar5m[token]
 	updateBar(b5, price, vol)
 
-	if (ts.Minute() / 5) != (b5.Start.Minute() / 5) {
+	if (ts.Minute() / 5) != (b5.Timestamp.Minute() / 5) {
 		s.bar5m[token] = newBar(ts, price)
 		b5 = s.bar5m[token]
 	}
