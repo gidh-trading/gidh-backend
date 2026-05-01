@@ -42,7 +42,7 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 2. STAGE 1: ENRICHMENT ...[cite: 4]
+	// 2. STAGE 1: ENRICHMENT
 	enrichedTick := &models.EnrichedTick{Raw: rawTick}
 	if err := p.enrichment.Process(enrichedTick); err != nil {
 		return err
@@ -55,7 +55,7 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 4. STAGE 3: VOLUME PROFILE ...[cite: 4]
+	// 4. STAGE 3: VOLUME PROFILE
 	if p.vpStage != nil {
 		if err := p.vpStage.Process(enrichedTick); err != nil {
 			log.Printf("Pipeline Error: Failed to process volume profile: %v", err)

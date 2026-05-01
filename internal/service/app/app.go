@@ -74,7 +74,7 @@ func (a *App) initDatabase(ctx context.Context) error {
 	}
 
 	if err := db.InitDB(ctx, dbURL); err != nil {
-		logger.Errorf("Database connection failed: %v", err)
+		logger.Fatalf("Database connection failed: %v", err)
 	}
 	a.pool = db.GetPool()
 
