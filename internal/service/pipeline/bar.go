@@ -7,48 +7,6 @@ import (
 	"time"
 )
 
-// -------------------------------
-// ROLLING ENTRY
-// -------------------------------
-type rollingEntry struct {
-	ts    time.Time
-	price float64
-	vol   float64
-}
-
-type RollingState struct {
-	queue []rollingEntry
-
-	Volume float64
-	Open   float64
-	High   float64
-	Low    float64
-	Close  float64
-}
-
-// -------------------------------
-// BAR
-// -------------------------------
-type Bar struct {
-	Open      float64
-	High      float64
-	Low       float64
-	Close     float64
-	Volume    float64
-	VolEnergy float64
-	RngEnergy float64
-	Start     time.Time
-}
-
-// -------------------------------
-// SESSION STATE
-// -------------------------------
-type SessionState struct {
-	TotalVolume float64
-	TotalRange  float64
-	Count       int
-}
-
 func (s *SessionState) Update(vol, rng float64) {
 	s.TotalVolume += vol
 	s.TotalRange += rng
@@ -62,9 +20,6 @@ func (s *SessionState) AvgRange() float64 {
 	return s.TotalRange / float64(s.Count)
 }
 
-// -------------------------------
-// BAR BUILDER
-// -------------------------------
 type BarBuilderStage struct {
 	loc *time.Location
 
@@ -91,9 +46,6 @@ func NewBarBuilderStage() *BarBuilderStage {
 	}
 }
 
-// -------------------------------
-// MAIN PROCESS
-// -------------------------------
 func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -287,30 +239,4 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	return nil
-}
-
-// -------------------------------
-// HELPERS
-// -------------------------------
-func newBar(ts time.Time, price float64) *Bar {
-	return &Bar{
-		Open:      price,
-		High:      price,
-		Low:       price,
-		Close:     price,
-		Start:     ts,
-		VolEnergy: 0,
-		RngEnergy: 0,
-	}
-}
-
-func updateBar(b *Bar, price, vol float64) {
-	if price > b.High {
-		b.High = price
-	}
-	if price < b.Low {
-		b.Low = price
-	}
-	b.Close = price
-	b.Volume += vol
 }
