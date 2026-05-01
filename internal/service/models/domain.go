@@ -104,6 +104,9 @@ type TradeStats struct {
 	// --- Z-scores (core signal inputs) ---
 	VolumeZ float64
 	RangeZ  float64
+
+	VolEnergy float64
+	RngEnergy float64
 }
 
 type EnrichedTick struct {

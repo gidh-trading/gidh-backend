@@ -2,12 +2,13 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
+	"math"
 	"sync"
 	"time"
 )
 
 // -------------------------------
-// ROLLING ENTRY (for O(1))
+// ROLLING ENTRY
 // -------------------------------
 type rollingEntry struct {
 	ts    time.Time
@@ -25,15 +26,23 @@ type RollingState struct {
 	Close  float64
 }
 
+// -------------------------------
+// BAR
+// -------------------------------
 type Bar struct {
-	Open   float64
-	High   float64
-	Low    float64
-	Close  float64
-	Volume float64
-	Start  time.Time
+	Open      float64
+	High      float64
+	Low       float64
+	Close     float64
+	Volume    float64
+	VolEnergy float64
+	RngEnergy float64
+	Start     time.Time
 }
 
+// -------------------------------
+// SESSION STATE
+// -------------------------------
 type SessionState struct {
 	TotalVolume float64
 	TotalRange  float64
@@ -53,6 +62,9 @@ func (s *SessionState) AvgRange() float64 {
 	return s.TotalRange / float64(s.Count)
 }
 
+// -------------------------------
+// BAR BUILDER
+// -------------------------------
 type BarBuilderStage struct {
 	loc *time.Location
 
@@ -60,6 +72,8 @@ type BarBuilderStage struct {
 	bar1m   map[uint32]*Bar
 	bar5m   map[uint32]*Bar
 	session map[uint32]*SessionState
+
+	lastTs map[uint32]time.Time // 🔥 for dt
 
 	mu sync.RWMutex
 }
@@ -73,9 +87,13 @@ func NewBarBuilderStage() *BarBuilderStage {
 		bar1m:   make(map[uint32]*Bar),
 		bar5m:   make(map[uint32]*Bar),
 		session: make(map[uint32]*SessionState),
+		lastTs:  make(map[uint32]time.Time),
 	}
 }
 
+// -------------------------------
+// MAIN PROCESS
+// -------------------------------
 func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -89,7 +107,9 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 		return nil
 	}
 
-	// init
+	// -------------------------
+	// INIT
+	// -------------------------
 	if s.rolling[token] == nil {
 		s.rolling[token] = &RollingState{}
 	}
@@ -107,20 +127,18 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	session := s.session[token]
 
 	// -------------------------
-	// 1. UPDATE ROLLING (O(1))
+	// 1. ROLLING WINDOW UPDATE
 	// -------------------------
 	entry := rollingEntry{ts, price, vol}
 	r.queue = append(r.queue, entry)
 	r.Volume += vol
 
-	// init open
 	if len(r.queue) == 1 {
 		r.Open = price
 		r.High = price
 		r.Low = price
 	}
 
-	// update OHLC
 	if price > r.High {
 		r.High = price
 	}
@@ -131,18 +149,15 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	// remove old entries
 	cutoff := ts.Add(-60 * time.Second)
-
 	for len(r.queue) > 0 && r.queue[0].ts.Before(cutoff) {
 		old := r.queue[0]
 		r.queue = r.queue[1:]
 		r.Volume -= old.vol
 	}
 
-	// recompute high/low only when needed (cheap amortized)
+	// recompute high/low (acceptable for v1)
 	if len(r.queue) > 0 {
 		r.Open = r.queue[0].price
-
-		// lazy recompute only if needed
 		r.High = r.queue[0].price
 		r.Low = r.queue[0].price
 
@@ -163,7 +178,9 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	updateBar(b1, price, vol)
 
 	if ts.Minute() != b1.Start.Minute() {
+		// ✅ ONLY 1m updates session
 		session.Update(b1.Volume, b1.High-b1.Low)
+
 		s.bar1m[token] = newBar(ts, price)
 		b1 = s.bar1m[token]
 	}
@@ -175,13 +192,12 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	updateBar(b5, price, vol)
 
 	if (ts.Minute() / 5) != (b5.Start.Minute() / 5) {
-		session.Update(b5.Volume, b5.High-b5.Low)
 		s.bar5m[token] = newBar(ts, price)
 		b5 = s.bar5m[token]
 	}
 
 	// -------------------------
-	// 4. COMPUTE STATS
+	// 4. NORMALIZATION
 	// -------------------------
 	if session.TotalVolume == 0 || session.AvgRange() == 0 {
 		return nil
@@ -191,7 +207,9 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	normVol := r.Volume / session.TotalVolume
 	normRange := range1m / session.AvgRange()
 
-	// minute index
+	// -------------------------
+	// 5. DNA LOOKUP
+	// -------------------------
 	marketOpen := time.Date(ts.Year(), ts.Month(), ts.Day(), 9, 15, 0, 0, s.loc)
 	minuteIndex := int(ts.Sub(marketOpen).Minutes())
 
@@ -201,11 +219,47 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	bucket := tick.DNA.TimeBuckets[minuteIndex]
 
-	volumeZ := (normVol - bucket.VolumeMean) / bucket.VolumeStd
-	rangeZ := (normRange - bucket.RangeMean) / bucket.RangeStd
+	// -------------------------
+	// 6. Z-SCORE
+	// -------------------------
+	var volumeZ float64
+	if bucket.VolumeStd > 1e-6 {
+		volumeZ = (normVol - bucket.VolumeMean) / bucket.VolumeStd
+	}
+
+	var rangeZ float64
+	if bucket.RangeStd > 1e-6 {
+		rangeZ = (normRange - bucket.RangeMean) / bucket.RangeStd
+	}
 
 	// -------------------------
-	// 5. ASSIGN STATS
+	// 7. TIME DELTA (dt)
+	// -------------------------
+	var dt float64 = 1.0
+	if last, ok := s.lastTs[token]; ok {
+		dt = ts.Sub(last).Seconds()
+		if dt <= 0 || dt > 2 {
+			dt = 1.0 // clamp (protect against gaps)
+		}
+	}
+	s.lastTs[token] = ts
+
+	// -------------------------
+	// 8. ENERGY ACCUMULATION
+	// -------------------------
+	threshold := 1.5
+
+	vEnergy := math.Max(0, volumeZ-threshold)
+	rEnergy := math.Max(0, rangeZ-threshold)
+
+	b1.VolEnergy += vEnergy * dt
+	b1.RngEnergy += rEnergy * dt
+
+	b5.VolEnergy += vEnergy * dt
+	b5.RngEnergy += rEnergy * dt
+
+	// -------------------------
+	// 9. ASSIGN STATS
 	// -------------------------
 	tick.Stats = &models.TradeStats{
 		MinuteIndex: minuteIndex,
@@ -227,6 +281,9 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 		VolumeZ: volumeZ,
 		RangeZ:  rangeZ,
+
+		VolEnergy: b1.VolEnergy,
+		RngEnergy: b1.RngEnergy,
 	}
 
 	return nil
@@ -237,11 +294,13 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 // -------------------------------
 func newBar(ts time.Time, price float64) *Bar {
 	return &Bar{
-		Open:  price,
-		High:  price,
-		Low:   price,
-		Close: price,
-		Start: ts,
+		Open:      price,
+		High:      price,
+		Low:       price,
+		Close:     price,
+		Start:     ts,
+		VolEnergy: 0,
+		RngEnergy: 0,
 	}
 }
 
