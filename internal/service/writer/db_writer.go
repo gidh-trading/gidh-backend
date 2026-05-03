@@ -2,7 +2,6 @@ package writer
 
 import (
 	"context"
-	"gidh-backend/internal/service/pipeline"
 	"sync"
 	"time"
 
@@ -18,7 +17,7 @@ type DBWriter struct {
 	config        *DBWriterConfig
 	tickBatch     []models.TickData
 	depthBatch    []DepthRecord
-	barBatch      []pipeline.Bar
+	barBatch      []models.Bar
 	batchSize     int
 	flushInterval time.Duration
 	mu            sync.Mutex
@@ -59,7 +58,7 @@ func NewDBWriter(cfg *DBWriterConfig) *DBWriter {
 		config:        cfg,
 		tickBatch:     make([]models.TickData, 0, cfg.BatchSize),
 		depthBatch:    make([]DepthRecord, 0, cfg.BatchSize),
-		barBatch:      make([]pipeline.Bar, 0, cfg.BatchSize),
+		barBatch:      make([]models.Bar, 0, cfg.BatchSize),
 		batchSize:     cfg.BatchSize,
 		flushInterval: cfg.FlushInterval,
 		ctx:           ctx,
@@ -123,13 +122,13 @@ func (w *DBWriter) AddDepth(timestamp time.Time, token uint32, stockName string,
 	}
 }
 
-func (w *DBWriter) AddBar(bar pipeline.Bar) {
+func (w *DBWriter) AddBar(bar models.Bar) {
 	w.mu.Lock()
 	w.barBatch = append(w.barBatch, bar)
 
 	if len(w.barBatch) >= w.batchSize {
 		batch := w.barBatch
-		w.barBatch = make([]pipeline.Bar, 0, w.batchSize)
+		w.barBatch = make([]models.Bar, 0, w.batchSize)
 		w.mu.Unlock()
 
 		w.wg.Add(1)
@@ -158,7 +157,7 @@ func (w *DBWriter) flushTimer() {
 			// Reset batch
 			w.tickBatch = make([]models.TickData, 0, w.batchSize)
 			w.depthBatch = make([]DepthRecord, 0, w.batchSize)
-			w.barBatch = make([]pipeline.Bar, 0, w.batchSize)
+			w.barBatch = make([]models.Bar, 0, w.batchSize)
 
 			w.mu.Unlock()
 
@@ -255,7 +254,7 @@ func (w *DBWriter) insertDepthBatch(batch []DepthRecord) {
 	}
 }
 
-func (w *DBWriter) insertBarsBatch(batch []pipeline.Bar) {
+func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 	if w.config.SkipDatabaseInsert {
 		return
 	}

@@ -5,8 +5,8 @@ import (
 	"time"
 )
 
-func newBar(ts time.Time, price float64, token uint32, name string, timeframe string) *Bar {
-	return &Bar{
+func newBar(ts time.Time, price float64, token uint32, name string, timeframe string) *models.Bar {
+	return &models.Bar{
 		Timestamp:       ts,
 		InstrumentToken: int32(token),
 		StockName:       name,
@@ -17,11 +17,11 @@ func newBar(ts time.Time, price float64, token uint32, name string, timeframe st
 		Close:           price,
 		VolEnergy:       0,
 		RngEnergy:       0,
-		Ticks:           make([]models.TickData, 0, 60), // Pre-allocate for the 60-tick burst
+		Ticks:           make([]models.TickData, 0, 60),
 	}
 }
 
-func updateBar(b *Bar, price, vol float64) {
+func updateBar(b *models.Bar, price, vol float64) {
 	if price > b.High {
 		b.High = price
 	}

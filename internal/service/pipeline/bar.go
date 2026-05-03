@@ -25,8 +25,8 @@ type BarBuilderStage struct {
 	loc *time.Location
 
 	rolling map[uint32]*RollingState
-	bar1m   map[uint32]*Bar
-	bar5m   map[uint32]*Bar
+	bar1m   map[uint32]*models.Bar
+	bar5m   map[uint32]*models.Bar
 	session map[uint32]*SessionState
 
 	lastTs map[uint32]time.Time
@@ -41,8 +41,8 @@ func NewBarBuilderStage(w *writer.DBWriter) *BarBuilderStage {
 	return &BarBuilderStage{
 		loc:     loc,
 		rolling: make(map[uint32]*RollingState),
-		bar1m:   make(map[uint32]*Bar),
-		bar5m:   make(map[uint32]*Bar),
+		bar1m:   make(map[uint32]*models.Bar),
+		bar5m:   make(map[uint32]*models.Bar),
 		session: make(map[uint32]*SessionState),
 		lastTs:  make(map[uint32]time.Time),
 		writer:  w,
