@@ -2,6 +2,7 @@ package writer
 
 import (
 	"context"
+	"gidh-backend/internal/service/pipeline"
 	"sync"
 	"time"
 
@@ -17,6 +18,7 @@ type DBWriter struct {
 	config        *DBWriterConfig
 	tickBatch     []models.TickData
 	depthBatch    []DepthRecord
+	barBatch      []pipeline.Bar
 	batchSize     int
 	flushInterval time.Duration
 	mu            sync.Mutex
@@ -57,6 +59,7 @@ func NewDBWriter(cfg *DBWriterConfig) *DBWriter {
 		config:        cfg,
 		tickBatch:     make([]models.TickData, 0, cfg.BatchSize),
 		depthBatch:    make([]DepthRecord, 0, cfg.BatchSize),
+		barBatch:      make([]pipeline.Bar, 0, cfg.BatchSize),
 		batchSize:     cfg.BatchSize,
 		flushInterval: cfg.FlushInterval,
 		ctx:           ctx,
@@ -120,6 +123,25 @@ func (w *DBWriter) AddDepth(timestamp time.Time, token uint32, stockName string,
 	}
 }
 
+func (w *DBWriter) AddBar(bar pipeline.Bar) {
+	w.mu.Lock()
+	w.barBatch = append(w.barBatch, bar)
+
+	if len(w.barBatch) >= w.batchSize {
+		batch := w.barBatch
+		w.barBatch = make([]pipeline.Bar, 0, w.batchSize)
+		w.mu.Unlock()
+
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.insertBarsBatch(batch)
+		}()
+	} else {
+		w.mu.Unlock()
+	}
+}
+
 func (w *DBWriter) flushTimer() {
 	defer w.wg.Done()
 	ticker := time.NewTicker(w.flushInterval)
@@ -131,10 +153,12 @@ func (w *DBWriter) flushTimer() {
 			w.mu.Lock()
 			tBatch := w.tickBatch
 			dBatch := w.depthBatch
+			bBatch := w.barBatch
 
 			// Reset batch
 			w.tickBatch = make([]models.TickData, 0, w.batchSize)
 			w.depthBatch = make([]DepthRecord, 0, w.batchSize)
+			w.barBatch = make([]pipeline.Bar, 0, w.batchSize)
 
 			w.mu.Unlock()
 
@@ -150,6 +174,13 @@ func (w *DBWriter) flushTimer() {
 				go func() {
 					defer w.wg.Done()
 					w.insertDepthBatch(dBatch)
+				}()
+			}
+			if len(bBatch) > 0 {
+				w.wg.Add(1)
+				go func() {
+					defer w.wg.Done()
+					w.insertBarsBatch(bBatch)
 				}()
 			}
 
@@ -224,6 +255,39 @@ func (w *DBWriter) insertDepthBatch(batch []DepthRecord) {
 	}
 }
 
+func (w *DBWriter) insertBarsBatch(batch []pipeline.Bar) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	copyCount, err := w.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{"gidh_bars"},
+		[]string{
+			"timestamp", "instrument_token", "stock_name", "timeframe",
+			"open", "high", "low", "close", "volume",
+			"vwap", "poc", "vah", "val", "vol_energy", "rng_energy",
+		},
+		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
+			b := batch[i]
+			return []any{
+				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
+				b.Open, b.High, b.Low, b.Close, b.Volume,
+				b.VWAP, b.POC, b.VAH, b.VAL, b.VolEnergy, b.RngEnergy,
+			}, nil
+		}),
+	)
+
+	if err != nil {
+		logger.Errorf("Failed to insert bars: %v", err)
+	} else {
+		logger.Debugf("Inserted %d closed bars (background)", copyCount)
+	}
+}
+
 func (w *DBWriter) Close() {
 	logger.Info("Closing DB writer, flushing remaining data...")
 
@@ -233,6 +297,7 @@ func (w *DBWriter) Close() {
 	w.mu.Lock()
 	tBatch := w.tickBatch
 	dBatch := w.depthBatch
+	bBatch := w.barBatch
 
 	w.mu.Unlock()
 
@@ -241,6 +306,9 @@ func (w *DBWriter) Close() {
 	}
 	if len(dBatch) > 0 {
 		w.insertDepthBatch(dBatch)
+	}
+	if len(bBatch) > 0 {
+		w.insertBarsBatch(bBatch)
 	}
 
 	w.wg.Wait() // Wait for all background goroutines to finish

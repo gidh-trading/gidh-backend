@@ -1,16 +1,23 @@
 package pipeline
 
-import "time"
+import (
+	"gidh-backend/internal/service/models"
+	"time"
+)
 
-func newBar(ts time.Time, price float64) *Bar {
+func newBar(ts time.Time, price float64, token uint32, name string, timeframe string) *Bar {
 	return &Bar{
-		Open:      price,
-		High:      price,
-		Low:       price,
-		Close:     price,
-		Timestamp: ts,
-		VolEnergy: 0,
-		RngEnergy: 0,
+		Timestamp:       ts,
+		InstrumentToken: int32(token),
+		StockName:       name,
+		Timeframe:       timeframe,
+		Open:            price,
+		High:            price,
+		Low:             price,
+		Close:           price,
+		VolEnergy:       0,
+		RngEnergy:       0,
+		Ticks:           make([]models.TickData, 0, 60), // Pre-allocate for the 60-tick burst
 	}
 }
 

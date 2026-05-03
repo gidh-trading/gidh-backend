@@ -28,21 +28,25 @@ type BarBuilderStage struct {
 	bar5m   map[uint32]*Bar
 	session map[uint32]*SessionState
 
-	lastTs map[uint32]time.Time // 🔥 for dt
+	lastTs map[uint32]time.Time
 
 	mu sync.RWMutex
+
+	// Persistence Signaling: Broadcasts finalized bars to the writer
+	ClosedBars chan *Bar
 }
 
 func NewBarBuilderStage() *BarBuilderStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &BarBuilderStage{
-		loc:     loc,
-		rolling: make(map[uint32]*RollingState),
-		bar1m:   make(map[uint32]*Bar),
-		bar5m:   make(map[uint32]*Bar),
-		session: make(map[uint32]*SessionState),
-		lastTs:  make(map[uint32]time.Time),
+		loc:        loc,
+		rolling:    make(map[uint32]*RollingState),
+		bar1m:      make(map[uint32]*Bar),
+		bar5m:      make(map[uint32]*Bar),
+		session:    make(map[uint32]*SessionState),
+		lastTs:     make(map[uint32]time.Time),
+		ClosedBars: make(chan *Bar, 5000), // Buffered to prevent pipeline blocking during high-throughput bursts
 	}
 }
 
@@ -54,6 +58,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	price := tick.Raw.LastPrice
 	vol := float64(tick.TickVolume)
 	ts := tick.Raw.Timestamp.In(s.loc)
+	name := tick.Raw.StockName
 
 	if tick.DNA == nil {
 		return nil
@@ -66,10 +71,10 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 		s.rolling[token] = &RollingState{}
 	}
 	if s.bar1m[token] == nil {
-		s.bar1m[token] = newBar(ts, price)
+		s.bar1m[token] = newBar(ts, price, token, name, "1m")
 	}
 	if s.bar5m[token] == nil {
-		s.bar5m[token] = newBar(ts, price)
+		s.bar5m[token] = newBar(ts, price, token, name, "5m")
 	}
 	if s.session[token] == nil {
 		s.session[token] = &SessionState{}
@@ -81,7 +86,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	// -------------------------
 	// 1. ROLLING WINDOW UPDATE
 	// -------------------------
-	entry := rollingEntry{ts, price, vol}
+	entry := rollingEntry{ts: ts, price: price, vol: vol}
 	r.queue = append(r.queue, entry)
 	r.Volume += vol
 
@@ -124,16 +129,28 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	// -------------------------
-	// 2. UPDATE 1M BAR
+	// 2. UPDATE 1M BAR & TICK BUFFER
 	// -------------------------
 	b1 := s.bar1m[token]
 	updateBar(b1, price, vol)
+
+	// Tick Buffering: Store ALL ticks for the current open bar (unbounded).
+	// This naturally resets when newBar() is called on bar closure.
+	b1.Ticks = append(b1.Ticks, tick.Raw)
 
 	if ts.Minute() != b1.Timestamp.Minute() {
 		// ✅ ONLY 1m updates session
 		session.Update(b1.Volume, b1.High-b1.Low)
 
-		s.bar1m[token] = newBar(ts, price)
+		// Bar Closure Trigger: Send closed bar to writer asynchronously
+		select {
+		case s.ClosedBars <- b1:
+		default:
+			// Fallback if channel is maxed out (prevents blocking the real-time feed)
+		}
+
+		// Buffer Reset: Initializes a fresh Ticks array for the next minute
+		s.bar1m[token] = newBar(ts, price, token, name, "1m")
 		b1 = s.bar1m[token]
 	}
 
@@ -144,7 +161,12 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	updateBar(b5, price, vol)
 
 	if (ts.Minute() / 5) != (b5.Timestamp.Minute() / 5) {
-		s.bar5m[token] = newBar(ts, price)
+		select {
+		case s.ClosedBars <- b5:
+		default:
+		}
+
+		s.bar5m[token] = newBar(ts, price, token, name, "5m")
 		b5 = s.bar5m[token]
 	}
 
