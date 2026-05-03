@@ -105,8 +105,13 @@ type TradeStats struct {
 	VolumeZ float64
 	RangeZ  float64
 
-	VolEnergy float64
-	RngEnergy float64
+	VolEnergy       float64
+	RngEnergy       float64
+	BuyVolEnergy    float64
+	SellVolEnergy   float64
+	BuyRngEnergy    float64
+	SellRngEnergy   float64
+	EnergyImbalance float64
 }
 
 type EnrichedTick struct {

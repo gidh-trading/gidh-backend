@@ -83,10 +83,23 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	r := s.rolling[token]
 	session := s.session[token]
 
+	// Capture range BEFORE update to avoid look-ahead bias
 	prevPrice := r.Close
 	if prevPrice == 0 {
 		prevPrice = price
 	}
+
+	prevHigh := r.High
+	if prevHigh == 0 {
+		prevHigh = price
+	}
+
+	prevLow := r.Low
+	if prevLow == 0 {
+		prevLow = price
+	}
+
+	prevRange := prevHigh - prevLow
 
 	// -------------------------
 	// 1. ROLLING WINDOW UPDATE
@@ -139,23 +152,17 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	b1 := s.bar1m[token]
 	expectedTs := ts.Truncate(time.Minute)
 
-	// Chronological Check: Only close and swap bars if time has moved forward.
-	// This prevents duplicate inserts if ticks arrive out-of-order.
 	if expectedTs.After(b1.Timestamp) {
-		// ✅ 1. Update session stats before closing (only done on 1m close)
 		session.Update(b1.Volume, b1.High-b1.Low)
 
-		// ✅ 2. Close and save the completed 1m bar
 		if s.writer != nil {
 			s.writer.AddBar(*b1)
 		}
 
-		// ✅ 3. Create fresh bar for the new minute
 		s.bar1m[token] = newBar(ts, price, token, name, "1m")
 		b1 = s.bar1m[token]
 	}
 
-	// Only update if the tick belongs to the current or a future bar
 	if !expectedTs.Before(b1.Timestamp) {
 		updateBar(b1, price, vol)
 		b1.Ticks = append(b1.Ticks, tick.Raw)
@@ -168,17 +175,14 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	expected5mTs := ts.Truncate(5 * time.Minute)
 
 	if expected5mTs.After(b5.Timestamp) {
-		// ✅ 1. Close and save the completed 5m bar
 		if s.writer != nil {
 			s.writer.AddBar(*b5)
 		}
 
-		// ✅ 2. Initialize the fresh 5m bar
 		s.bar5m[token] = newBar(ts, price, token, name, "5m")
 		b5 = s.bar5m[token]
 	}
 
-	// Only update if the tick belongs to the current or a future 5m window
 	if !expected5mTs.Before(b5.Timestamp) {
 		updateBar(b5, price, vol)
 	}
@@ -198,15 +202,16 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	// DIRECTION (tick-level)
 	// -------------------------
 	delta := price - prevPrice
-
-	// noise filter
-	if math.Abs(delta) < 0.0001 {
-		delta = 0
-	}
-
 	dir := 0.0
-	if range1m > 1e-6 {
-		dir = delta / range1m
+
+	// ✅ FIX 1 & 2: Unified base for both scaling and filtering
+	base := math.Max(prevRange, 0.001*price)
+
+	// ✅ FIX 3: Volume-weighted direction to respect lot-size mechanics
+	volWeight := math.Sqrt(vol) // Dampens massive outliers while respecting volume gravity
+
+	if math.Abs(delta) >= 0.01*base {
+		dir = (delta / base) * volWeight
 	}
 
 	// clamp
@@ -248,7 +253,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	if last, ok := s.lastTs[token]; ok {
 		dt = ts.Sub(last).Seconds()
 		if dt <= 0 || dt > 2 {
-			dt = 1.0 // clamp (protect against gaps)
+			dt = 1.0
 		}
 	}
 	s.lastTs[token] = ts
@@ -261,37 +266,53 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	vEnergy := math.Max(0, volumeZ-threshold)
 	rEnergy := math.Max(0, rangeZ-threshold)
 
+	// ✅ FIX 4: Safe signal sharpening. Prevents NaN when dir is negative.
+	sharpDir := math.Pow(math.Abs(dir), 1.5) * math.Copysign(1.0, dir)
+
 	// -------------------------
 	// SIGNED ENERGY
 	// -------------------------
-	signedVol := vEnergy * dir * dt
-	signedRng := rEnergy * dir * dt
+	signedVol := vEnergy * sharpDir * dt
+	signedRng := rEnergy * sharpDir * dt
 
 	// net
-	b1.VolEnergy += signedVol
-	b1.RngEnergy += signedRng
+	smooth := 0.9
 
-	b5.VolEnergy += signedVol
-	b5.RngEnergy += signedRng
+	b1.VolEnergy = smooth*b1.VolEnergy + (1-smooth)*signedVol
+	b1.RngEnergy = smooth*b1.RngEnergy + (1-smooth)*signedRng
+
+	b5.VolEnergy = smooth*b5.VolEnergy + (1-smooth)*signedVol
+	b5.RngEnergy = smooth*b5.RngEnergy + (1-smooth)*signedRng
 
 	// -------------------------
 	// BUY / SELL SPLIT
 	// -------------------------
-	if dir > 0 {
-		b1.BuyVolEnergy += vEnergy * dir * dt
-		b1.BuyRngEnergy += rEnergy * dir * dt
+	if sharpDir > 0 {
+		b1.BuyVolEnergy += vEnergy * sharpDir * dt
+		b1.BuyRngEnergy += rEnergy * sharpDir * dt
 
-		b5.BuyVolEnergy += vEnergy * dir * dt
-		b5.BuyRngEnergy += rEnergy * dir * dt
+		b5.BuyVolEnergy += vEnergy * sharpDir * dt
+		b5.BuyRngEnergy += rEnergy * sharpDir * dt
 
-	} else if dir < 0 {
-		d := -dir
+	} else if sharpDir < 0 {
+		d := -sharpDir
 
 		b1.SellVolEnergy += vEnergy * d * dt
 		b1.SellRngEnergy += rEnergy * d * dt
 
 		b5.SellVolEnergy += vEnergy * d * dt
 		b5.SellRngEnergy += rEnergy * d * dt
+	}
+
+	// -------------------------
+	// ✅ FIX 5 & 6: DERIVED IMBALANCE SIGNAL
+	// -------------------------
+	imbalance := b1.BuyVolEnergy - b1.SellVolEnergy
+	totalEnergy := b1.BuyVolEnergy + b1.SellVolEnergy
+
+	imbalanceRatio := 0.0
+	if totalEnergy > 1e-6 {
+		imbalanceRatio = imbalance / totalEnergy
 	}
 
 	// -------------------------
@@ -320,6 +341,14 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 		VolEnergy: b1.VolEnergy,
 		RngEnergy: b1.RngEnergy,
+
+		BuyVolEnergy:  b1.BuyVolEnergy,
+		SellVolEnergy: b1.SellVolEnergy,
+		BuyRngEnergy:  b1.BuyRngEnergy,
+		SellRngEnergy: b1.SellRngEnergy,
+
+		// The new alpha signal
+		EnergyImbalance: imbalanceRatio,
 	}
 
 	return nil
