@@ -6,8 +6,18 @@ import (
 )
 
 func newBar(ts time.Time, price float64, token uint32, name string, timeframe string) *models.Bar {
+	// Truncate based on timeframe
+	var truncatedTs time.Time
+	if timeframe == "5m" {
+		// Truncate to 5-minute interval
+		truncatedTs = ts.Truncate(5 * time.Minute)
+	} else {
+		// Default to 1-minute truncation
+		truncatedTs = ts.Truncate(time.Minute)
+	}
+
 	return &models.Bar{
-		Timestamp:       ts,
+		Timestamp:       truncatedTs, // Now starts at :00
 		InstrumentToken: int32(token),
 		StockName:       name,
 		Timeframe:       timeframe,
@@ -15,8 +25,7 @@ func newBar(ts time.Time, price float64, token uint32, name string, timeframe st
 		High:            price,
 		Low:             price,
 		Close:           price,
-		VolEnergy:       0,
-		RngEnergy:       0,
+		Volume:          0,
 		Ticks:           make([]models.TickData, 0, 60),
 	}
 }

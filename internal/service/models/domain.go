@@ -194,20 +194,41 @@ func (vp *VolumeProfile) Copy() *VolumeProfile {
 }
 
 type Bar struct {
-	Timestamp       time.Time  `json:"timestamp"`
-	InstrumentToken int32      `json:"instrument_token"`
-	StockName       string     `json:"stock_name"`
-	Timeframe       string     `json:"timeframe"`
-	Open            float64    `json:"open"`
-	High            float64    `json:"high"`
-	Low             float64    `json:"low"`
-	Close           float64    `json:"close"`
-	Volume          float64    `json:"volume"`
-	VWAP            float64    `json:"vwap,omitempty"`
-	POC             float64    `json:"poc,omitempty"`
-	VAH             float64    `json:"vah,omitempty"`
-	VAL             float64    `json:"val,omitempty"`
-	VolEnergy       float64    `json:"vol_energy,omitempty"`
-	RngEnergy       float64    `json:"rng_energy,omitempty"`
-	Ticks           []TickData `json:"ticks,omitempty"`
+	Timestamp       time.Time `json:"timestamp"`
+	InstrumentToken int32     `json:"instrument_token"`
+	StockName       string    `json:"stock_name"`
+	Timeframe       string    `json:"timeframe"`
+
+	// ---- OHLC ----
+	Open  float64 `json:"open"`
+	High  float64 `json:"high"`
+	Low   float64 `json:"low"`
+	Close float64 `json:"close"`
+
+	// ---- Volume ----
+	Volume float64 `json:"volume"`
+
+	// ---- Optional Auction Metrics ----
+	VWAP float64 `json:"vwap,omitempty"`
+	POC  float64 `json:"poc,omitempty"`
+	VAH  float64 `json:"vah,omitempty"`
+	VAL  float64 `json:"val,omitempty"`
+
+	// =====================================================
+	// 🔥 ENERGY (NOW DIRECTIONAL)
+	// =====================================================
+
+	// Net signed energy (can be + or -)
+	VolEnergy float64 `json:"vol_energy,omitempty"`
+	RngEnergy float64 `json:"rng_energy,omitempty"`
+
+	// ---- BUY / SELL SPLIT (CRITICAL) ----
+	BuyVolEnergy  float64 `json:"buy_vol_energy,omitempty"`
+	SellVolEnergy float64 `json:"sell_vol_energy,omitempty"`
+
+	BuyRngEnergy  float64 `json:"buy_rng_energy,omitempty"`
+	SellRngEnergy float64 `json:"sell_rng_energy,omitempty"`
+
+	// ---- Raw ticks ----
+	Ticks []TickData `json:"ticks,omitempty"`
 }

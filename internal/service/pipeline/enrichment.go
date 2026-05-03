@@ -32,25 +32,20 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	token := tick.Raw.InstrumentToken
 
-	// -------------------------
-	// 1. Attach DNA + Time Key
-	// -------------------------
+	// Attach DNA
 	if dna, ok := s.dnaMap[token]; ok {
 		tick.DNA = dna
 	}
 
-	// -------------------------
-	// 2. Tick Volume
-	// -------------------------
+	// Tick volume
 	tick.TickVolume = s.calculateTickVolume(token, tick)
 
-	// skip dead feed updates
+	// Skip dead updates
 	if tick.TickVolume == 0 && tick.Raw.LastPrice == s.lastPriceMap[token] {
 		return nil
 	}
 
 	s.lastPriceMap[token] = tick.Raw.LastPrice
-
 	return nil
 }
 
@@ -68,7 +63,7 @@ func (s *EnrichmentStage) calculateTickVolume(token uint32, tick *models.Enriche
 		delta = curr - prev
 
 	default:
-		// Session reset / bad feed reset
+		// reset case
 		delta = tick.Raw.LastTradedQuantity
 	}
 

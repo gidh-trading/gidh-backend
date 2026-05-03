@@ -72,6 +72,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	if s.bar1m[token] == nil {
 		s.bar1m[token] = newBar(ts, price, token, name, "1m")
 	}
+
 	if s.bar5m[token] == nil {
 		s.bar5m[token] = newBar(ts, price, token, name, "5m")
 	}
@@ -81,6 +82,11 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	r := s.rolling[token]
 	session := s.session[token]
+
+	prevPrice := r.Close
+	if prevPrice == 0 {
+		prevPrice = price
+	}
 
 	// -------------------------
 	// 1. ROLLING WINDOW UPDATE
@@ -131,37 +137,50 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	// 2. UPDATE 1M BAR & TICK BUFFER
 	// -------------------------
 	b1 := s.bar1m[token]
-	updateBar(b1, price, vol)
+	expectedTs := ts.Truncate(time.Minute)
 
-	// Tick Buffering: Store ALL ticks for the current open bar (unbounded).
-	// This naturally resets when newBar() is called on bar closure.
-	b1.Ticks = append(b1.Ticks, tick.Raw)
-
-	if ts.Minute() != b1.Timestamp.Minute() {
-		// ✅ ONLY 1m updates session
+	// Chronological Check: Only close and swap bars if time has moved forward.
+	// This prevents duplicate inserts if ticks arrive out-of-order.
+	if expectedTs.After(b1.Timestamp) {
+		// ✅ 1. Update session stats before closing (only done on 1m close)
 		session.Update(b1.Volume, b1.High-b1.Low)
 
+		// ✅ 2. Close and save the completed 1m bar
 		if s.writer != nil {
 			s.writer.AddBar(*b1)
 		}
 
-		// Buffer Reset: Initializes a fresh Ticks array for the next minute
+		// ✅ 3. Create fresh bar for the new minute
 		s.bar1m[token] = newBar(ts, price, token, name, "1m")
 		b1 = s.bar1m[token]
+	}
+
+	// Only update if the tick belongs to the current or a future bar
+	if !expectedTs.Before(b1.Timestamp) {
+		updateBar(b1, price, vol)
+		b1.Ticks = append(b1.Ticks, tick.Raw)
 	}
 
 	// -------------------------
 	// 3. UPDATE 5M BAR
 	// -------------------------
 	b5 := s.bar5m[token]
-	updateBar(b5, price, vol)
+	expected5mTs := ts.Truncate(5 * time.Minute)
 
-	if (ts.Minute() / 5) != (b5.Timestamp.Minute() / 5) {
+	if expected5mTs.After(b5.Timestamp) {
+		// ✅ 1. Close and save the completed 5m bar
 		if s.writer != nil {
 			s.writer.AddBar(*b5)
 		}
+
+		// ✅ 2. Initialize the fresh 5m bar
 		s.bar5m[token] = newBar(ts, price, token, name, "5m")
 		b5 = s.bar5m[token]
+	}
+
+	// Only update if the tick belongs to the current or a future 5m window
+	if !expected5mTs.Before(b5.Timestamp) {
+		updateBar(b5, price, vol)
 	}
 
 	// -------------------------
@@ -174,6 +193,28 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	range1m := r.High - r.Low
 	normVol := r.Volume / session.TotalVolume
 	normRange := range1m / session.AvgRange()
+
+	// -------------------------
+	// DIRECTION (tick-level)
+	// -------------------------
+	delta := price - prevPrice
+
+	// noise filter
+	if math.Abs(delta) < 0.0001 {
+		delta = 0
+	}
+
+	dir := 0.0
+	if range1m > 1e-6 {
+		dir = delta / range1m
+	}
+
+	// clamp
+	if dir > 1 {
+		dir = 1
+	} else if dir < -1 {
+		dir = -1
+	}
 
 	// -------------------------
 	// 5. DNA LOOKUP
@@ -203,7 +244,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	// -------------------------
 	// 7. TIME DELTA (dt)
 	// -------------------------
-	var dt float64 = 1.0
+	var dt = 1.0
 	if last, ok := s.lastTs[token]; ok {
 		dt = ts.Sub(last).Seconds()
 		if dt <= 0 || dt > 2 {
@@ -220,11 +261,38 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	vEnergy := math.Max(0, volumeZ-threshold)
 	rEnergy := math.Max(0, rangeZ-threshold)
 
-	b1.VolEnergy += vEnergy * dt
-	b1.RngEnergy += rEnergy * dt
+	// -------------------------
+	// SIGNED ENERGY
+	// -------------------------
+	signedVol := vEnergy * dir * dt
+	signedRng := rEnergy * dir * dt
 
-	b5.VolEnergy += vEnergy * dt
-	b5.RngEnergy += rEnergy * dt
+	// net
+	b1.VolEnergy += signedVol
+	b1.RngEnergy += signedRng
+
+	b5.VolEnergy += signedVol
+	b5.RngEnergy += signedRng
+
+	// -------------------------
+	// BUY / SELL SPLIT
+	// -------------------------
+	if dir > 0 {
+		b1.BuyVolEnergy += vEnergy * dir * dt
+		b1.BuyRngEnergy += rEnergy * dir * dt
+
+		b5.BuyVolEnergy += vEnergy * dir * dt
+		b5.BuyRngEnergy += rEnergy * dir * dt
+
+	} else if dir < 0 {
+		d := -dir
+
+		b1.SellVolEnergy += vEnergy * d * dt
+		b1.SellRngEnergy += rEnergy * d * dt
+
+		b5.SellVolEnergy += vEnergy * d * dt
+		b5.SellRngEnergy += rEnergy * d * dt
+	}
 
 	// -------------------------
 	// 9. ASSIGN STATS
