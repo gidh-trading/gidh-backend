@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/writer"
 	"math"
 	"sync"
 	"time"
@@ -30,23 +31,21 @@ type BarBuilderStage struct {
 
 	lastTs map[uint32]time.Time
 
-	mu sync.RWMutex
-
-	// Persistence Signaling: Broadcasts finalized bars to the writer
-	ClosedBars chan *Bar
+	mu     sync.RWMutex
+	writer *writer.DBWriter
 }
 
-func NewBarBuilderStage() *BarBuilderStage {
+func NewBarBuilderStage(w *writer.DBWriter) *BarBuilderStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &BarBuilderStage{
-		loc:        loc,
-		rolling:    make(map[uint32]*RollingState),
-		bar1m:      make(map[uint32]*Bar),
-		bar5m:      make(map[uint32]*Bar),
-		session:    make(map[uint32]*SessionState),
-		lastTs:     make(map[uint32]time.Time),
-		ClosedBars: make(chan *Bar, 5000), // Buffered to prevent pipeline blocking during high-throughput bursts
+		loc:     loc,
+		rolling: make(map[uint32]*RollingState),
+		bar1m:   make(map[uint32]*Bar),
+		bar5m:   make(map[uint32]*Bar),
+		session: make(map[uint32]*SessionState),
+		lastTs:  make(map[uint32]time.Time),
+		writer:  w,
 	}
 }
 
@@ -142,11 +141,8 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 		// ✅ ONLY 1m updates session
 		session.Update(b1.Volume, b1.High-b1.Low)
 
-		// Bar Closure Trigger: Send closed bar to writer asynchronously
-		select {
-		case s.ClosedBars <- b1:
-		default:
-			// Fallback if channel is maxed out (prevents blocking the real-time feed)
+		if s.writer != nil {
+			s.writer.AddBar(*b1)
 		}
 
 		// Buffer Reset: Initializes a fresh Ticks array for the next minute
@@ -161,11 +157,9 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	updateBar(b5, price, vol)
 
 	if (ts.Minute() / 5) != (b5.Timestamp.Minute() / 5) {
-		select {
-		case s.ClosedBars <- b5:
-		default:
+		if s.writer != nil {
+			s.writer.AddBar(*b5)
 		}
-
 		s.bar5m[token] = newBar(ts, price, token, name, "5m")
 		b5 = s.bar5m[token]
 	}
