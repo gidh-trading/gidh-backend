@@ -53,8 +53,8 @@ func NewApp(cfg *config.Config) (*App, error) {
 	app.initWebServer()
 
 	// 2. Data & Domain Setup
-	dnaMap := app.loadMarketData(ctx)
-	if err := app.initPipeline(ctx, dnaMap); err != nil {
+	dnaMap, advMap := app.loadMarketData(ctx)
+	if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
 		return nil, err
 	}
 
@@ -115,9 +115,9 @@ func (a *App) initWebServer() {
 }
 
 // loadMarketData fetches instrument and DNA baselines from DB[cite: 4].
-func (a *App) loadMarketData(ctx context.Context) map[uint32]*models.MarketDNA {
+func (a *App) loadMarketData(ctx context.Context) (map[uint32]*models.MarketDNA, map[uint32]float64) {
 	if a.pool == nil {
-		return make(map[uint32]*models.MarketDNA)
+		return make(map[uint32]*models.MarketDNA), make(map[uint32]float64)
 	}
 
 	targetDate := time.Now()
@@ -142,16 +142,21 @@ func (a *App) loadMarketData(ctx context.Context) map[uint32]*models.MarketDNA {
 		a.instrumentList, _ = instReader.FetchBacktestConfigs(ctx)
 	}
 
+	advMap, err := instReader.FetchADVProfiles(ctx)
+	if err != nil {
+		logger.Errorf("FAILED TO LOAD ADV PROFILES: %v", err)
+	}
+
 	for _, c := range a.instrumentList {
 		a.tokenToName[c.Token] = c.Name
 		a.nameToToken[c.Name] = c.Token
 	}
 
-	return dnaMap
+	return dnaMap, advMap
 }
 
 // initPipeline configures the data processing stages[cite: 4].
-func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA) error {
+func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, advMap map[uint32]float64) error {
 	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, a.pool)
 
 	if a.Config.Mode == "live" {
@@ -161,7 +166,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	enrichmentStage := pipeline.NewEnrichmentStage(dnaMap)
-	barStage := pipeline.NewBarBuilderStage(a.DBWriter)
+	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap)
 
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
 	a.activePipe = a.Pipeline

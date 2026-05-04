@@ -3,6 +3,7 @@ package pipeline
 import (
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
+	"gidh-backend/pkg/logger"
 	"math"
 	"sync"
 	"time"
@@ -22,30 +23,29 @@ func (s *SessionState) AvgRange() float64 {
 }
 
 type BarBuilderStage struct {
-	loc *time.Location
-
-	rolling map[uint32]*RollingState
-	bar1m   map[uint32]*models.Bar
-	bar5m   map[uint32]*models.Bar
-	session map[uint32]*SessionState
-
-	lastTs map[uint32]time.Time
-
-	mu     sync.RWMutex
-	writer *writer.DBWriter
+	loc       *time.Location
+	rolling   map[uint32]*RollingState
+	bar1m     map[uint32]*models.Bar
+	bar5m     map[uint32]*models.Bar
+	session   map[uint32]*SessionState
+	adv30dMap map[uint32]float64
+	lastTs    map[uint32]time.Time
+	mu        sync.RWMutex
+	writer    *writer.DBWriter
 }
 
-func NewBarBuilderStage(w *writer.DBWriter) *BarBuilderStage {
+func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64) *BarBuilderStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &BarBuilderStage{
-		loc:     loc,
-		rolling: make(map[uint32]*RollingState),
-		bar1m:   make(map[uint32]*models.Bar),
-		bar5m:   make(map[uint32]*models.Bar),
-		session: make(map[uint32]*SessionState),
-		lastTs:  make(map[uint32]time.Time),
-		writer:  w,
+		loc:       loc,
+		rolling:   make(map[uint32]*RollingState),
+		bar1m:     make(map[uint32]*models.Bar),
+		bar5m:     make(map[uint32]*models.Bar),
+		session:   make(map[uint32]*SessionState),
+		adv30dMap: advMap,
+		lastTs:    make(map[uint32]time.Time),
+		writer:    w,
 	}
 }
 
@@ -205,8 +205,13 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	// -------------------------
 	range1m := r.High - r.Low
 
-	// TODO: Replace this 1000000.0 with the actual ADV 30d from your instrument profile!
-	adv30d := 330597.0
+	adv30d, ok := s.adv30dMap[token]
+	if !ok || adv30d == 0 {
+		// Fallback to a default or skip if no profile exists
+		adv30d = 450000.0
+	}
+
+	logger.Infof("adv30d: %v", adv30d)
 
 	// We use the rolling volume here so the Z-score is always a true "last 60 seconds" snapshot
 	normVol := r.Volume / adv30d

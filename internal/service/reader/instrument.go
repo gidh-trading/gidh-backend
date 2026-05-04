@@ -100,3 +100,27 @@ func (r *InstrumentReader) FetchConfigsByStockNames(ctx context.Context, stockNa
 	}
 	return configs, nil
 }
+
+// FetchADVProfiles retrieves the 30-day average daily volume for all instruments.
+func (r *InstrumentReader) FetchADVProfiles(ctx context.Context) (map[uint32]float64, error) {
+	advMap := make(map[uint32]float64)
+
+	// Querying bigint adv_30d from public.instrument_profile[cite: 3]
+	query := `SELECT instrument_token, adv_30d FROM public.instrument_profile`
+
+	rows, err := r.pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var token uint32
+		var adv int64 // DB type is bigint[cite: 3]
+		if err := rows.Scan(&token, &adv); err != nil {
+			return nil, err
+		}
+		advMap[token] = float64(adv) // Pipeline expects float64
+	}
+	return advMap, nil
+}
