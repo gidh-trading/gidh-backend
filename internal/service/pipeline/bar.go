@@ -72,7 +72,6 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	if s.bar1m[token] == nil {
 		s.bar1m[token] = newBar(ts, price, token, name, "1m")
 	}
-
 	if s.bar5m[token] == nil {
 		s.bar5m[token] = newBar(ts, price, token, name, "5m")
 	}
@@ -83,26 +82,13 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	r := s.rolling[token]
 	session := s.session[token]
 
-	// Capture range BEFORE update to avoid look-ahead bias
 	prevPrice := r.Close
 	if prevPrice == 0 {
 		prevPrice = price
 	}
 
-	prevHigh := r.High
-	if prevHigh == 0 {
-		prevHigh = price
-	}
-
-	prevLow := r.Low
-	if prevLow == 0 {
-		prevLow = price
-	}
-
-	prevRange := prevHigh - prevLow
-
 	// -------------------------
-	// 1. ROLLING WINDOW UPDATE
+	// 1. ROLLING WINDOW UPDATE (1 Min)
 	// -------------------------
 	entry := rollingEntry{ts: ts, price: price, vol: vol}
 	r.queue = append(r.queue, entry)
@@ -122,7 +108,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 	r.Close = price
 
-	// remove old entries
+	// remove entries older than 60 seconds
 	cutoff := ts.Add(-60 * time.Second)
 	for len(r.queue) > 0 && r.queue[0].ts.Before(cutoff) {
 		old := r.queue[0]
@@ -130,7 +116,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 		r.Volume -= old.vol
 	}
 
-	// recompute high/low (acceptable for v1)
+	// recompute high/low
 	if len(r.queue) > 0 {
 		r.Open = r.queue[0].price
 		r.High = r.queue[0].price
@@ -147,7 +133,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	// -------------------------
-	// 2. UPDATE 1M BAR & TICK BUFFER
+	// 2. UPDATE 1M BAR
 	// -------------------------
 	b1 := s.bar1m[token]
 	expectedTs := ts.Truncate(time.Minute)
@@ -188,54 +174,58 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	// -------------------------
-	// 4. NORMALIZATION
+	// 4. TICK DIRECTION & RAW ACCUMULATION
 	// -------------------------
-	if session.TotalVolume == 0 || session.AvgRange() == 0 {
-		return nil
-	}
-
-	range1m := r.High - r.Low
-	normVol := r.Volume / session.TotalVolume
-	normRange := range1m / session.AvgRange()
-
-	// -------------------------
-	// DIRECTION (tick-level)
-	// -------------------------
-	delta := price - prevPrice
-	dir := 0.0
-
-	// ✅ FIX 1 & 2: Unified base for both scaling and filtering
-	base := math.Max(prevRange, 0.001*price)
-
-	// ✅ FIX 3: Volume-weighted direction to respect lot-size mechanics
-	volWeight := math.Sqrt(vol) // Dampens massive outliers while respecting volume gravity
-
-	if math.Abs(delta) >= 0.01*base {
-		dir = (delta / base) * volWeight
-	}
-
-	// clamp
-	if dir > 1 {
+	dir := 0
+	if price > prevPrice {
 		dir = 1
-	} else if dir < -1 {
+	} else if price < prevPrice {
 		dir = -1
 	}
 
+	tickRange := math.Abs(price - prevPrice)
+
+	// Accumulate pure raw shares/range
+	if dir > 0 {
+		b1.BuyVolume += vol
+		b1.BuyRange += tickRange
+
+		b5.BuyVolume += vol
+		b5.BuyRange += tickRange
+	} else if dir < 0 {
+		b1.SellVolume += vol
+		b1.SellRange += tickRange
+
+		b5.SellVolume += vol
+		b5.SellRange += tickRange
+	}
+
 	// -------------------------
-	// 5. DNA LOOKUP
+	// 5. NORMALIZATION & DNA Z-SCORE
 	// -------------------------
+	range1m := r.High - r.Low
+
+	// TODO: Replace this 1000000.0 with the actual ADV 30d from your instrument profile!
+	adv30d := 330597.0
+
+	// We use the rolling volume here so the Z-score is always a true "last 60 seconds" snapshot
+	normVol := r.Volume / adv30d
+
+	normRange := 0.0
+	if session.AvgRange() > 0 {
+		normRange = range1m / session.AvgRange()
+	}
+
 	marketOpen := time.Date(ts.Year(), ts.Month(), ts.Day(), 9, 15, 0, 0, s.loc)
 	minuteIndex := int(ts.Sub(marketOpen).Minutes())
 
 	if minuteIndex < 0 || minuteIndex >= len(tick.DNA.TimeBuckets) {
-		return nil
+		return nil // Outside market hours
 	}
 
 	bucket := tick.DNA.TimeBuckets[minuteIndex]
 
-	// -------------------------
-	// 6. Z-SCORE
-	// -------------------------
+	// Calculate Raw Z-Scores
 	var volumeZ float64
 	if bucket.VolumeStd > 1e-6 {
 		volumeZ = (normVol - bucket.VolumeMean) / bucket.VolumeStd
@@ -247,76 +237,54 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	// -------------------------
-	// 7. TIME DELTA (dt)
+	// 6. DISTRIBUTE ENERGY TO BUCKETS (The Ratio Method)
 	// -------------------------
-	var dt = 1.0
-	if last, ok := s.lastTs[token]; ok {
-		dt = ts.Sub(last).Seconds()
-		if dt <= 0 || dt > 2 {
-			dt = 1.0
-		}
+
+	// OVERWRITE the Total Energy with the latest true Z-score (Do NOT use +=)
+	b1.TotalVolEnergy = volumeZ
+	b1.TotalRngEnergy = rangeZ
+
+	b5.TotalVolEnergy = volumeZ
+	b5.TotalRngEnergy = rangeZ
+
+	// 1M BAR: Split total energy into Buy/Sell using the actual raw volume ratios
+	if b1.Volume > 0 {
+		buyRatio := b1.BuyVolume / b1.Volume
+		sellRatio := b1.SellVolume / b1.Volume
+
+		b1.BuyVolEnergy = b1.TotalVolEnergy * buyRatio
+		b1.SellVolEnergy = b1.TotalVolEnergy * sellRatio
 	}
-	s.lastTs[token] = ts
 
-	// -------------------------
-	// 8. ENERGY ACCUMULATION
-	// -------------------------
-	threshold := 1.5
+	totalRawRange1m := b1.BuyRange + b1.SellRange
+	if totalRawRange1m > 0 {
+		buyRngRatio := b1.BuyRange / totalRawRange1m
+		sellRngRatio := b1.SellRange / totalRawRange1m
 
-	vEnergy := math.Max(0, volumeZ-threshold)
-	rEnergy := math.Max(0, rangeZ-threshold)
+		b1.BuyRngEnergy = b1.TotalRngEnergy * buyRngRatio
+		b1.SellRngEnergy = b1.TotalRngEnergy * sellRngRatio
+	}
 
-	// ✅ FIX 4: Safe signal sharpening. Prevents NaN when dir is negative.
-	sharpDir := math.Pow(math.Abs(dir), 1.5) * math.Copysign(1.0, dir)
+	// 5M BAR: Split total energy into Buy/Sell using 5m raw volume ratios
+	if b5.Volume > 0 {
+		buyRatio5 := b5.BuyVolume / b5.Volume
+		sellRatio5 := b5.SellVolume / b5.Volume
 
-	// -------------------------
-	// SIGNED ENERGY
-	// -------------------------
-	signedVol := vEnergy * sharpDir * dt
-	signedRng := rEnergy * sharpDir * dt
+		b5.BuyVolEnergy = b5.TotalVolEnergy * buyRatio5
+		b5.SellVolEnergy = b5.TotalVolEnergy * sellRatio5
+	}
 
-	// net
-	smooth := 0.9
+	totalRawRange5m := b5.BuyRange + b5.SellRange
+	if totalRawRange5m > 0 {
+		buyRngRatio5 := b5.BuyRange / totalRawRange5m
+		sellRngRatio5 := b5.SellRange / totalRawRange5m
 
-	b1.VolEnergy = smooth*b1.VolEnergy + (1-smooth)*signedVol
-	b1.RngEnergy = smooth*b1.RngEnergy + (1-smooth)*signedRng
-
-	b5.VolEnergy = smooth*b5.VolEnergy + (1-smooth)*signedVol
-	b5.RngEnergy = smooth*b5.RngEnergy + (1-smooth)*signedRng
-
-	// -------------------------
-	// BUY / SELL SPLIT
-	// -------------------------
-	if sharpDir > 0 {
-		b1.BuyVolEnergy += vEnergy * sharpDir * dt
-		b1.BuyRngEnergy += rEnergy * sharpDir * dt
-
-		b5.BuyVolEnergy += vEnergy * sharpDir * dt
-		b5.BuyRngEnergy += rEnergy * sharpDir * dt
-
-	} else if sharpDir < 0 {
-		d := -sharpDir
-
-		b1.SellVolEnergy += vEnergy * d * dt
-		b1.SellRngEnergy += rEnergy * d * dt
-
-		b5.SellVolEnergy += vEnergy * d * dt
-		b5.SellRngEnergy += rEnergy * d * dt
+		b5.BuyRngEnergy = b5.TotalRngEnergy * buyRngRatio5
+		b5.SellRngEnergy = b5.TotalRngEnergy * sellRngRatio5
 	}
 
 	// -------------------------
-	// ✅ FIX 5 & 6: DERIVED IMBALANCE SIGNAL
-	// -------------------------
-	imbalance := b1.BuyVolEnergy - b1.SellVolEnergy
-	totalEnergy := b1.BuyVolEnergy + b1.SellVolEnergy
-
-	imbalanceRatio := 0.0
-	if totalEnergy > 1e-6 {
-		imbalanceRatio = imbalance / totalEnergy
-	}
-
-	// -------------------------
-	// 9. ASSIGN STATS
+	// 7. ASSIGN STATS (For UI/Debugging)
 	// -------------------------
 	tick.Stats = &models.TradeStats{
 		MinuteIndex: minuteIndex,
@@ -324,31 +292,17 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 		Volume1m: r.Volume,
 		Range1m:  range1m,
+		VolumeZ:  volumeZ,
+		RangeZ:   rangeZ,
 
-		SessionVolume:   session.TotalVolume,
-		SessionAvgRange: session.AvgRange(),
+		// The 6 Fact Columns
+		TotalVolEnergy: b1.TotalVolEnergy,
+		BuyVolEnergy:   b1.BuyVolEnergy,
+		SellVolEnergy:  b1.SellVolEnergy,
 
-		NormVolume: normVol,
-		NormRange:  normRange,
-
-		VolumeMean: bucket.VolumeMean,
-		VolumeStd:  bucket.VolumeStd,
-		RangeMean:  bucket.RangeMean,
-		RangeStd:   bucket.RangeStd,
-
-		VolumeZ: volumeZ,
-		RangeZ:  rangeZ,
-
-		VolEnergy: b1.VolEnergy,
-		RngEnergy: b1.RngEnergy,
-
-		BuyVolEnergy:  b1.BuyVolEnergy,
-		SellVolEnergy: b1.SellVolEnergy,
-		BuyRngEnergy:  b1.BuyRngEnergy,
-		SellRngEnergy: b1.SellRngEnergy,
-
-		// The new alpha signal
-		EnergyImbalance: imbalanceRatio,
+		TotalRngEnergy: b1.TotalRngEnergy,
+		BuyRngEnergy:   b1.BuyRngEnergy,
+		SellRngEnergy:  b1.SellRngEnergy,
 	}
 
 	return nil

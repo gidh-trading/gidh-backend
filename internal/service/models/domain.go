@@ -105,13 +105,14 @@ type TradeStats struct {
 	VolumeZ float64
 	RangeZ  float64
 
-	VolEnergy       float64
-	RngEnergy       float64
-	BuyVolEnergy    float64
-	SellVolEnergy   float64
-	BuyRngEnergy    float64
-	SellRngEnergy   float64
-	EnergyImbalance float64
+	// Live Energy accumulation
+	TotalVolEnergy float64 `json:"total_vol_energy"`
+	BuyVolEnergy   float64 `json:"buy_vol_energy"`
+	SellVolEnergy  float64 `json:"sell_vol_energy"`
+
+	TotalRngEnergy float64 `json:"total_rng_energy"`
+	BuyRngEnergy   float64 `json:"buy_rng_energy"`
+	SellRngEnergy  float64 `json:"sell_rng_energy"`
 }
 
 type EnrichedTick struct {
@@ -219,21 +220,21 @@ type Bar struct {
 	VAH  float64 `json:"vah,omitempty"`
 	VAL  float64 `json:"val,omitempty"`
 
-	// =====================================================
-	// 🔥 ENERGY (NOW DIRECTIONAL)
-	// =====================================================
+	BuyVolume  float64 `json:"-"`
+	SellVolume float64 `json:"-"`
+	BuyRange   float64 `json:"-"`
+	SellRange  float64 `json:"-"`
 
-	// Net signed energy (can be + or -)
-	VolEnergy float64 `json:"vol_energy,omitempty"`
-	RngEnergy float64 `json:"rng_energy,omitempty"`
+	// Volume Energy
+	TotalVolEnergy float64 `json:"total_vol_energy"`
+	BuyVolEnergy   float64 `json:"buy_vol_energy"`
+	SellVolEnergy  float64 `json:"sell_vol_energy"`
 
-	// ---- BUY / SELL SPLIT (CRITICAL) ----
-	BuyVolEnergy  float64 `json:"buy_vol_energy,omitempty"`
-	SellVolEnergy float64 `json:"sell_vol_energy,omitempty"`
-
-	BuyRngEnergy  float64 `json:"buy_rng_energy,omitempty"`
-	SellRngEnergy float64 `json:"sell_rng_energy,omitempty"`
+	// Range Energy
+	TotalRngEnergy float64 `json:"total_rng_energy"`
+	BuyRngEnergy   float64 `json:"buy_rng_energy"`
+	SellRngEnergy  float64 `json:"sell_rng_energy"`
 
 	// ---- Raw ticks ----
-	Ticks []TickData `json:"ticks,omitempty"`
+	Ticks []TickData `json:"-"`
 }
