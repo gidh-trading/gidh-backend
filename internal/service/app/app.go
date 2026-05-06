@@ -120,7 +120,7 @@ func (a *App) initWebServer() {
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"mode":         a.Config.Mode,
 			"current_date": currentDate,
-			"is_active":    a.StreamManager != nil,
+			"is_running":   a.StreamManager != nil,
 		})
 	})
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)

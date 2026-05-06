@@ -151,6 +151,12 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	if !expectedTs.Before(b1.Timestamp) {
 		updateBar(b1, price, vol)
 		b1.Ticks = append(b1.Ticks, tick.Raw)
+		b1.VWAP = tick.Raw.AverageTradedPrice // Day's VWAP from Kite
+		if tick.VolProfile != nil {
+			b1.POC = tick.VolProfile.POC
+			b1.VAH = tick.VolProfile.VAH
+			b1.VAL = tick.VolProfile.VAL
+		}
 	}
 
 	// -------------------------
@@ -170,6 +176,12 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	if !expected5mTs.Before(b5.Timestamp) {
 		updateBar(b5, price, vol)
+		b5.VWAP = tick.Raw.AverageTradedPrice
+		if tick.VolProfile != nil {
+			b5.POC = tick.VolProfile.POC
+			b5.VAH = tick.VolProfile.VAH
+			b5.VAL = tick.VolProfile.VAL
+		}
 	}
 
 	// -------------------------

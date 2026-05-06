@@ -48,17 +48,17 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		return err
 	}
 
-	// 3. STAGE 2: BAR BUILDER (Runs after enrichment so it has TickVolume)
-	if p.barBuilder != nil {
-		if err := p.barBuilder.Process(enrichedTick); err != nil {
-			log.Printf("Pipeline Error: Failed to process bars: %v", err)
-		}
-	}
-
-	// 4. STAGE 3: VOLUME PROFILE
+	// 3. STAGE 2: VOLUME PROFILE
 	if p.vpStage != nil {
 		if err := p.vpStage.Process(enrichedTick); err != nil {
 			log.Printf("Pipeline Error: Failed to process volume profile: %v", err)
+		}
+	}
+
+	// 4. STAGE 3: BAR BUILDER (Runs after VP Stage)
+	if p.barBuilder != nil {
+		if err := p.barBuilder.Process(enrichedTick); err != nil {
+			log.Printf("Pipeline Error: Failed to process bars: %v", err)
 		}
 	}
 
