@@ -281,6 +281,7 @@ func (a *App) initStreamManager() error {
 }
 
 func (a *App) Start(ctx context.Context) error {
+	// Always start the HTTP server (handles /ws, /api/backtest/start, etc.)
 	go func() {
 		logger.Infof("Server starting on %s", a.server.Addr)
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -288,7 +289,14 @@ func (a *App) Start(ctx context.Context) error {
 		}
 	}()
 
-	return a.StreamManager.Start()
+	// Only start the stream manager if it was initialized during NewApp (Live Mode)
+	// In Backtest Mode, this will be nil until handleBacktestStart is called.
+	if a.StreamManager != nil {
+		return a.StreamManager.Start()
+	}
+
+	logger.Info("App started in IDLE mode, waiting for backtest start command...")
+	return nil
 }
 
 func (a *App) Stop() {
