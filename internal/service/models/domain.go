@@ -220,8 +220,8 @@ type Bar struct {
 	VAH  float64 `json:"vah,omitempty"`
 	VAL  float64 `json:"val,omitempty"`
 
-	BuyVolume  float64 `json:"-"`
-	SellVolume float64 `json:"-"`
+	BuyVolume  float64 `json:"buy_volume"`
+	SellVolume float64 `json:"sell_volume"`
 	BuyRange   float64 `json:"-"`
 	SellRange  float64 `json:"-"`
 

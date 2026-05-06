@@ -3,7 +3,6 @@ package pipeline
 import (
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
-	"gidh-backend/pkg/logger"
 	"math"
 	"sync"
 	"time"
@@ -210,8 +209,6 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 		// Fallback to a default or skip if no profile exists
 		adv30d = 450000.0
 	}
-
-	logger.Infof("adv30d: %v", adv30d)
 
 	// We use the rolling volume here so the Z-score is always a true "last 60 seconds" snapshot
 	normVol := r.Volume / adv30d
