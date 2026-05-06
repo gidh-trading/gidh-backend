@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"sync"
@@ -36,31 +37,30 @@ type App struct {
 	activeManager  *stream.Manager
 }
 
-// NewApp orchestrates the application setup by calling specialized init methods.
+// NewApp orchestrates the application setup.
 func NewApp(cfg *config.Config) (*App, error) {
 	ctx := context.Background()
-
 	app := &App{
 		Config:      cfg,
 		tokenToName: make(map[uint32]string),
 		nameToToken: make(map[string]uint32),
 	}
 
-	// 1. Infrastructure Setup
 	if err := app.initDatabase(ctx); err != nil {
 		return nil, err
 	}
 	app.initWebServer()
 
-	// 2. Data & Domain Setup
-	dnaMap, advMap := app.loadMarketData(ctx)
-	if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
-		return nil, err
-	}
-
-	// 3. Stream Setup
-	if err := app.initStreamManager(); err != nil {
-		return nil, err
+	// If live, we load everything and start immediately.
+	// If backtest, we wait for the API call.
+	if cfg.Mode == "live" {
+		dnaMap, advMap := app.loadMarketData(ctx, time.Now())
+		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
+			return nil, err
+		}
+		if err := app.initStreamManager(); err != nil {
+			return nil, err
+		}
 	}
 
 	return app, nil
@@ -108,45 +108,140 @@ func (a *App) initWebServer() {
 		ws.ServeWs(a.wsHub, w, r)
 	})
 
+	mux.HandleFunc("/api/backtest/status", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		// The StreamManager knows the current processing state
+		currentDate := ""
+		if a.StreamManager != nil {
+			currentDate = a.StreamManager.GetStatus()
+		}
+
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"mode":         a.Config.Mode,
+			"current_date": currentDate,
+			"is_active":    a.StreamManager != nil,
+		})
+	})
+	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
+
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%s", a.Config.Port),
 		Handler: mux,
 	}
 }
 
-// loadMarketData fetches instrument and DNA baselines from DB[cite: 4].
-func (a *App) loadMarketData(ctx context.Context) (map[uint32]*models.MarketDNA, map[uint32]float64) {
+func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req StartBacktestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+
+	// 1. Stop existing manager if running
+	a.managerMu.Lock()
+	if a.StreamManager != nil {
+		logger.Info("Stopping existing stream for new backtest request...")
+		a.StreamManager.Stop()
+	}
+
+	// 2. Update DB selection for stocks
+	instReader := reader.NewInstrumentReader(a.pool)
+	if err := instReader.UpdateBacktestSelection(ctx, req.Stocks); err != nil {
+		a.managerMu.Unlock()
+		logger.Errorf("Failed to update backtest selection: %v", err)
+		http.Error(w, "Failed to update stock selection", http.StatusInternalServerError)
+		return
+	}
+
+	// 3. Prepare Data (Extract .tar.xz)
+	if err := stream.PrepareBacktestData(a.Config.BacktestBackupDir, a.Config.BacktestDataDir, req.Date); err != nil {
+		a.managerMu.Unlock()
+		logger.Errorf("Data preparation failed: %v", err)
+		http.Error(w, "Backtest data not found or extraction failed", http.StatusNotFound)
+		return
+	}
+
+	// 4. Cleanup DB for the new date
+	if err := db.CleanupBacktestData(ctx, req.Date); err != nil {
+		logger.Warnf("Cleanup failed (continuing anyway): %v", err)
+	}
+
+	// 5. Override Config with API params
+	a.Config.BacktestDate = req.Date
+	a.Config.BacktestSpeedFactor = req.SpeedFactor
+
+	// 6. Reload Market Data & DNA for the specific date
+	parsedDate, _ := time.Parse("2006-01-02", req.Date)
+	dnaMap, advMap := a.loadMarketData(ctx, parsedDate)
+
+	// 7. RE-INITIALIZE PIPELINE (This resets all internal memory/maps)
+	if err := a.initPipeline(ctx, dnaMap, advMap); err != nil {
+		a.managerMu.Unlock()
+		http.Error(w, "Pipeline init failed", http.StatusInternalServerError)
+		return
+	}
+
+	// 8. Re-init Stream Manager with new source
+	if err := a.initStreamManager(); err != nil {
+		a.managerMu.Unlock()
+		http.Error(w, "Stream Manager init failed", http.StatusInternalServerError)
+		return
+	}
+
+	// 9. Start Processing
+	go func() {
+		if err := a.StreamManager.Start(); err != nil {
+			logger.Errorf("Stream started with error: %v", err)
+		}
+	}()
+
+	a.managerMu.Unlock()
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "started", "date": req.Date})
+}
+
+// loadMarketData fetches instrument and DNA baselines from DB for a specific date.
+func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]float64) {
 	if a.pool == nil {
 		return make(map[uint32]*models.MarketDNA), make(map[uint32]float64)
 	}
 
-	targetDate := time.Now()
-	if a.Config.Mode == "backtest" && a.Config.BacktestDate != "" {
-		if parsed, err := time.Parse("2006-01-02", a.Config.BacktestDate); err == nil {
-			targetDate = parsed
-		}
-	}
-
-	// Load DNA Baselines
+	// 1. Load DNA Baselines for the specific target date
 	dnaReader := reader.NewDNAReader(a.pool)
 	dnaMap, err := dnaReader.FetchMarketDNA(ctx, targetDate)
 	if err != nil {
-		logger.Errorf("FAILED TO LOAD MARKET DNA: %v", err)
+		logger.Errorf("FAILED TO LOAD MARKET DNA for %s: %v", targetDate.Format("2006-01-02"), err)
 	}
 
-	// Load Instruments
+	// 2. Load Instruments based on current Mode (Live or Backtest)
 	instReader := reader.NewInstrumentReader(a.pool)
 	if a.Config.Mode == "live" {
 		a.instrumentList, _ = instReader.FetchActiveConfigs(ctx)
 	} else {
+		// In backtest mode, this will return only the stocks
+		// updated via UpdateBacktestSelection in the start handler.
 		a.instrumentList, _ = instReader.FetchBacktestConfigs(ctx)
 	}
 
+	// 3. Load 30-day Average Daily Volume (ADV) profiles for Z-score normalization
 	advMap, err := instReader.FetchADVProfiles(ctx)
 	if err != nil {
 		logger.Errorf("FAILED TO LOAD ADV PROFILES: %v", err)
 	}
 
+	// 4. Reset and rebuild internal token/name mapping maps
+	// This ensures only the currently active instruments are in memory.
+	a.tokenToName = make(map[uint32]string)
+	a.nameToToken = make(map[string]uint32)
 	for _, c := range a.instrumentList {
 		a.tokenToName[c.Token] = c.Name
 		a.nameToToken[c.Name] = c.Token
@@ -215,4 +310,10 @@ func (a *App) Stop() {
 		a.DBWriter.Close()
 	}
 	db.CloseDB()
+}
+
+type StartBacktestRequest struct {
+	Date        string   `json:"date"`
+	SpeedFactor float64  `json:"speed_factor"`
+	Stocks      []string `json:"stocks"`
 }
