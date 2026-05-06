@@ -118,12 +118,13 @@ func (a *App) initWebServer() {
 		}
 
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"mode":         a.Config.Mode,
-			"current_date": currentDate,
-			"is_running":   a.StreamManager != nil,
+			"mode":       a.Config.Mode,
+			"date":       currentDate,
+			"is_running": a.StreamManager != nil,
 		})
 	})
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
+	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
 
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%s", a.Config.Port),
@@ -209,6 +210,40 @@ func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "started", "date": req.Date})
 }
 
+// 2. Implement the handleBacktestStop function
+func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	a.managerMu.Lock()
+	defer a.managerMu.Unlock()
+
+	if a.StreamManager != nil {
+		logger.Info("Stopping stream manager via API request...")
+
+		// Stop the manager (this cancels context and waits for workers)
+		a.StreamManager.Stop()
+
+		// Clear the references so the status API reflects the idle state
+		a.StreamManager = nil
+		a.activeManager = nil
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "stopped",
+			"message": "Stream manager terminated successfully",
+		})
+	} else {
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{
+			"status":  "idle",
+			"message": "No active stream manager to stop",
+		})
+	}
+}
+
 // loadMarketData fetches instrument and DNA baselines from DB for a specific date.
 func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]float64) {
 	if a.pool == nil {
@@ -252,7 +287,8 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 
 // initPipeline configures the data processing stages[cite: 4].
 func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, advMap map[uint32]float64) error {
-	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, a.pool)
+
+	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, a.pool, a.wsHub)
 
 	if a.Config.Mode == "live" {
 		if err := vpStage.LoadExistingProfiles(ctx, time.Now()); err != nil {
@@ -261,7 +297,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	enrichmentStage := pipeline.NewEnrichmentStage(dnaMap)
-	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap)
+	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub)
 
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
 	a.activePipe = a.Pipeline

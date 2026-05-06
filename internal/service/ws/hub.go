@@ -1,6 +1,7 @@
 package ws
 
 import (
+	"encoding/json"
 	"gidh-backend/pkg/logger"
 	"sync"
 )
@@ -101,4 +102,18 @@ func (h *Hub) Stop() {
 		delete(h.clients, client)
 	}
 	logger.Info("WebSocket Hub stopped: all client connections closed.")
+}
+
+func (h *Hub) BroadcastJSON(key string, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		logger.Errorf("WS Marshal Error: %v", err)
+		return
+	}
+
+	// Send to the broadcast channel defined in Hub
+	h.Broadcast <- Message{
+		Key:     key,
+		Payload: data,
+	}
 }

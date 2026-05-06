@@ -3,6 +3,7 @@ package pipeline
 import (
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
+	"gidh-backend/internal/service/ws"
 	"math"
 	"sync"
 	"time"
@@ -31,9 +32,10 @@ type BarBuilderStage struct {
 	lastTs    map[uint32]time.Time
 	mu        sync.RWMutex
 	writer    *writer.DBWriter
+	wsHub     *ws.Hub
 }
 
-func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64) *BarBuilderStage {
+func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64, hub *ws.Hub) *BarBuilderStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &BarBuilderStage{
@@ -45,6 +47,7 @@ func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64) *BarBuild
 		adv30dMap: advMap,
 		lastTs:    make(map[uint32]time.Time),
 		writer:    w,
+		wsHub:     hub,
 	}
 }
 
@@ -150,6 +153,8 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	if !expectedTs.Before(b1.Timestamp) {
 		updateBar(b1, price, vol)
+		b1.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
+		b1.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 		b1.Ticks = append(b1.Ticks, tick.Raw)
 		b1.VWAP = tick.Raw.AverageTradedPrice // Day's VWAP from Kite
 		if tick.VolProfile != nil {
@@ -176,6 +181,8 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	if !expected5mTs.Before(b5.Timestamp) {
 		updateBar(b5, price, vol)
+		b5.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
+		b5.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 		b5.VWAP = tick.Raw.AverageTradedPrice
 		if tick.VolProfile != nil {
 			b5.POC = tick.VolProfile.POC
@@ -279,6 +286,14 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 		b1.SellRngEnergy = b1.TotalRngEnergy * sellRngRatio
 	}
 
+	if s.wsHub != nil {
+		key1m := tick.Raw.StockName + ":1m"
+		s.wsHub.BroadcastJSON(key1m, map[string]any{
+			"type": "bar",
+			"data": b1,
+		})
+	}
+
 	// 5M BAR: Split total energy into Buy/Sell using 5m raw volume ratios
 	if b5.Volume > 0 {
 		buyRatio5 := b5.BuyVolume / b5.Volume
@@ -295,6 +310,14 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 		b5.BuyRngEnergy = b5.TotalRngEnergy * buyRngRatio5
 		b5.SellRngEnergy = b5.TotalRngEnergy * sellRngRatio5
+	}
+
+	if s.wsHub != nil {
+		key5m := tick.Raw.StockName + ":5m"
+		s.wsHub.BroadcastJSON(key5m, map[string]any{
+			"type": "bar",
+			"data": b5,
+		})
 	}
 
 	// -------------------------

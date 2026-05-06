@@ -3,6 +3,7 @@ package pipeline
 import (
 	"context"
 	"encoding/json"
+	"gidh-backend/internal/service/ws"
 	"math"
 	"sort"
 	"sync"
@@ -18,12 +19,14 @@ type VolumeProfileStage struct {
 	profiles map[uint32]*models.VolumeProfile
 	mu       sync.RWMutex
 	pool     *pgxpool.Pool
+	wsHub    *ws.Hub
 }
 
-func NewVolumeProfileStage(configs []models.InstrumentConfig, pool *pgxpool.Pool) *VolumeProfileStage {
+func NewVolumeProfileStage(configs []models.InstrumentConfig, pool *pgxpool.Pool, hub *ws.Hub) *VolumeProfileStage {
 	h := &VolumeProfileStage{
 		profiles: make(map[uint32]*models.VolumeProfile),
 		pool:     pool,
+		wsHub:    hub,
 	}
 
 	for _, cfg := range configs {
@@ -197,6 +200,19 @@ func (h *VolumeProfileStage) syncAllBucketsToNodes(p *models.VolumeProfile) {
 	}
 	p.HVNs = hvns
 	p.LVNs = lvns
+
+	if h.wsHub != nil {
+		// Broadcast the profile to both common interval keys so any active
+		// subscriber for that stock receives it.
+		intervals := []string{"1m", "5m"}
+		for _, interval := range intervals {
+			key := p.StockName + ":" + interval
+			h.wsHub.BroadcastJSON(key, map[string]any{
+				"type": "volume_profile",
+				"data": p.Copy(), // Use Copy for thread safety
+			})
+		}
+	}
 }
 
 func (h *VolumeProfileStage) persistSingleProfileAsync(p *models.VolumeProfile) {
