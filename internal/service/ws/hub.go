@@ -50,16 +50,19 @@ func NewHub() *Hub {
 	}
 }
 
+// internal/service/ws/hub.go
+
 func (h *Hub) Run() {
 	for {
 		select {
 		case client := <-h.register:
+			h.mu.Lock()
 			h.clients[client] = true
+			h.mu.Unlock()
 
 		case client := <-h.unregister:
-			if _, ok := h.clients[client]; ok {
-				h.removeClient(client)
-			}
+			// No need for 'if ok' check here, removeClient handles it
+			h.removeClient(client)
 
 		case req := <-h.subscribe:
 			key := req.symbol + ":" + req.interval
@@ -72,23 +75,52 @@ func (h *Hub) Run() {
 
 		case msg := <-h.Broadcast:
 			h.mu.RLock()
-			if clients, ok := h.subscriptions[msg.Key]; ok {
-				for client := range clients {
-					select {
-					case client.send <- msg.Payload:
-					default:
-						h.removeClient(client)
-					}
+			clients, ok := h.subscriptions[msg.Key]
+			if !ok {
+				h.mu.RUnlock()
+				continue
+			}
+
+			var slowClients []*Client
+			for client := range clients {
+				select {
+				case client.send <- msg.Payload:
+					// Successfully sent
+				default:
+					// Buffer is full, mark for removal
+					slowClients = append(slowClients, client)
 				}
 			}
 			h.mu.RUnlock()
+
+			// Remove slow clients after releasing the RLock to avoid deadlock
+			for _, client := range slowClients {
+				h.removeClient(client)
+			}
 		}
 	}
 }
 
 func (h *Hub) removeClient(c *Client) {
+	h.mu.Lock() // Ensure we have a write lock for cleanup
+	defer h.mu.Unlock()
+
+	// Check if already removed to avoid double-closing
+	if _, ok := h.clients[c]; !ok {
+		return
+	}
+
 	delete(h.clients, c)
 	close(c.send)
+
+	// Remove the client from all subscription buckets
+	for key, subs := range h.subscriptions {
+		delete(subs, c)
+		// Clean up empty subscription keys to save memory
+		if len(subs) == 0 {
+			delete(h.subscriptions, key)
+		}
+	}
 }
 
 func (h *Hub) Stop() {
