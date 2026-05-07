@@ -11,12 +11,13 @@ type rollingEntry struct {
 }
 
 type RollingState struct {
-	queue  []rollingEntry
-	Volume float64
-	Open   float64
-	High   float64
-	Low    float64
-	Close  float64
+	queue   []rollingEntry
+	Volume  float64
+	Open    float64
+	High    float64
+	Low     float64
+	Close   float64
+	LastDir int
 }
 
 type SessionState struct {

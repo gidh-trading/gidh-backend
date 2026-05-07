@@ -192,13 +192,44 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	// -------------------------
-	// 4. TICK DIRECTION & RAW ACCUMULATION
+	// 4. TICK DIRECTION & RAW ACCUMULATION (Lee-Ready Algorithm)
 	// -------------------------
 	dir := 0
-	if price > prevPrice {
-		dir = 1
-	} else if price < prevPrice {
-		dir = -1
+
+	// Step 1: Quote Test via Midpoint
+	if len(tick.Raw.Depth.Buy) > 0 && len(tick.Raw.Depth.Sell) > 0 {
+		bestBid := tick.Raw.Depth.Buy[0].Price
+		bestAsk := tick.Raw.Depth.Sell[0].Price
+		midpoint := (bestBid + bestAsk) / 2.0
+
+		// Use a tiny epsilon to handle floating point precision issues at the exact midpoint
+		const epsilon = 1e-6
+
+		if price > midpoint+epsilon {
+			// Trade occurred closer to the Ask -> Aggressive Buy
+			dir = 1
+		} else if price < midpoint-epsilon {
+			// Trade occurred closer to the Bid -> Aggressive Sell
+			dir = -1
+		}
+	}
+
+	// Step 2: Tick Test Fallback
+	// Executes if trade is exactly at the midpoint, or if Level 2 depth is missing
+	if dir == 0 {
+		if price > prevPrice {
+			dir = 1
+		} else if price < prevPrice {
+			dir = -1
+		} else {
+			// Zero-Tick: Price hasn't changed. Inherit the dominant flow.
+			dir = r.LastDir
+		}
+	}
+
+	// Update the rolling state with the resolved direction
+	if dir != 0 {
+		r.LastDir = dir
 	}
 
 	tickRange := math.Abs(price - prevPrice)
