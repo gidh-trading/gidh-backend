@@ -242,3 +242,15 @@ type Bar struct {
 	// ---- Raw ticks ----
 	Ticks []TickData `json:"-"`
 }
+
+type PlayableAlert struct {
+	Timestamp   time.Time `json:"timestamp"`
+	StockName   string    `json:"stock_name"`
+	Token       uint32    `json:"token"`
+	LastPrice   float64   `json:"last_price"`
+	EnergyDelta float64   `json:"energy_delta"` // buy_vol_energy - sell_vol_energy
+	TotalEnergy float64   `json:"total_energy"`
+	BuyEnergy   float64   `json:"buy_energy"`
+	SellEnergy  float64   `json:"sell_energy"`
+	Timeframe   string    `json:"timeframe"`
+}

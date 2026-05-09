@@ -288,6 +288,10 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 		rangeZ = (normRange - bucket.RangeMean) / bucket.RangeStd
 	}
 
+	// Below-average volume should mean 0 energy, not negative energy.
+	volumeZ = math.Max(0, volumeZ)
+	rangeZ = math.Max(0, rangeZ)
+
 	// -------------------------
 	// 6. DISTRIBUTE ENERGY TO BUCKETS (The Ratio Method)
 	// -------------------------
@@ -349,6 +353,32 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 			"type": "bar",
 			"data": b5,
 		})
+	}
+
+	// --- ALERT LOGIC HERE ---
+	energyDelta := b1.BuyVolEnergy - b1.SellVolEnergy
+	threshold := 0.8
+
+	if energyDelta > threshold {
+		alert := models.PlayableAlert{
+			Timestamp:   ts,
+			StockName:   name,
+			Token:       token,
+			LastPrice:   price,
+			EnergyDelta: energyDelta,
+			TotalEnergy: b1.TotalVolEnergy,
+			BuyEnergy:   b1.BuyVolEnergy,
+			SellEnergy:  b1.SellVolEnergy,
+			Timeframe:   "1m",
+		}
+
+		// Broadcast to a global alerts channel
+		if s.wsHub != nil {
+			s.wsHub.BroadcastJSON("global:alerts", map[string]any{
+				"type": "alert",
+				"data": alert,
+			})
+		}
 	}
 
 	// -------------------------
