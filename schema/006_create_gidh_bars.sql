@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS gidh_bars
 
     -- Value Area / Profile Stats
     vwap             DOUBLE PRECISION NOT NULL DEFAULT 0,
-    poc              DOUBLE PRECISION NOT NULL DULT 0,
+    poc              DOUBLE PRECISION NOT NULL DEFAULT 0,
     vah              DOUBLE PRECISION NOT NULL DEFAULT 0,
     val              DOUBLE PRECISION NOT NULL DEFAULT 0,
     buy_volume       DOUBLE PRECISION NOT NULL DEFAULT 0,

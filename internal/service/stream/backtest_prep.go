@@ -1,15 +1,16 @@
 package stream
 
 import (
+	"archive/tar"
 	"fmt"
 	"gidh-backend/pkg/logger"
+	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
+
+	"github.com/ulikunitz/xz" // Add this: go get github.com/ulikunitz/xz
 )
 
-// PrepareBacktestData replaces the 'make prepare-backtest' logic.
-// It extracts the .tar.xz backup for a specific date if the directory doesn't exist.
 func PrepareBacktestData(backupDir, dataDir, dateStr string) error {
 	targetFolder := filepath.Join(dataDir, dateStr)
 
@@ -30,10 +31,56 @@ func PrepareBacktestData(backupDir, dataDir, dateStr string) error {
 		return err
 	}
 
-	// 3. Execute tar extraction
-	cmd := exec.Command("tar", "-xJf", tarPath, "-C", dataDir)
-	if output, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("tar extraction failed: %v, output: %s", err, string(output))
+	// 3. Open the .tar.xz file
+	file, err := os.Open(tarPath)
+	if err != nil {
+		return fmt.Errorf("failed to open tar.xz file: %w", err)
+	}
+	defer file.Close()
+
+	// Create xz reader
+	xzReader, err := xz.NewReader(file)
+	if err != nil {
+		return fmt.Errorf("failed to create xz reader: %w", err)
+	}
+
+	// Create tar reader
+	tarReader := tar.NewReader(xzReader)
+
+	// Extract files
+	for {
+		header, err := tarReader.Next()
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return fmt.Errorf("tar read error: %w", err)
+		}
+
+		targetPath := filepath.Join(dataDir, header.Name)
+
+		switch header.Typeflag {
+		case tar.TypeDir:
+			if err := os.MkdirAll(targetPath, 0755); err != nil {
+				return fmt.Errorf("failed to create dir: %w", err)
+			}
+		case tar.TypeReg:
+			// Ensure parent directory exists
+			if err := os.MkdirAll(filepath.Dir(targetPath), 0755); err != nil {
+				return fmt.Errorf("failed to create parent dir: %w", err)
+			}
+
+			outFile, err := os.Create(targetPath)
+			if err != nil {
+				return fmt.Errorf("failed to create file: %w", err)
+			}
+
+			if _, err := io.Copy(outFile, tarReader); err != nil {
+				outFile.Close()
+				return fmt.Errorf("failed to write file: %w", err)
+			}
+			outFile.Close()
+		}
 	}
 
 	logger.Info("Preparation complete.")

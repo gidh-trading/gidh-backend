@@ -1,3 +1,5 @@
+CREATE EXTENSION IF NOT EXISTS timescaledb CASCADE;
+
 -- Create live_ticks table
 CREATE TABLE IF NOT EXISTS live_ticks
 (
