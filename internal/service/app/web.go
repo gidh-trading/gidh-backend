@@ -41,7 +41,7 @@ func (a *App) initWebServer() {
 	})
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
-	mux.HandleFunc("/api/playable-stocks", a.handleGetPlayableStocks) //
+	mux.HandleFunc("/api/alerts/", a.handleGetAlerts)
 
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%s", a.Config.Port),
@@ -161,8 +161,13 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *App) handleGetPlayableStocks(w http.ResponseWriter, r *http.Request) {
+// 2. Implement the new handleGetAlerts function with the required response wrapper
+func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
+
+	// Extract date from the path (/api/alerts/YYYY-MM-DD)
+	// Note: If you're on Go 1.22+, you can use r.PathValue("date")
+	// if you register the route as "/api/alerts/{date}"
 
 	a.alertMu.RLock()
 	var list []models.PlayableAlert
@@ -171,12 +176,18 @@ func (a *App) handleGetPlayableStocks(w http.ResponseWriter, r *http.Request) {
 	}
 	a.alertMu.RUnlock()
 
-	// Sort by EnergyDelta descending so top stocks appear first
+	// Sort by EnergyDelta descending
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].EnergyDelta > list[j].EnergyDelta
 	})
 
-	json.NewEncoder(w).Encode(list)
+	// Wrap the result in a 'data' field to match the UI's 'json.data' expectation
+	response := map[string]interface{}{
+		"status": "success",
+		"data":   list,
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 type StartBacktestRequest struct {
