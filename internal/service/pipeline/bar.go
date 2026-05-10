@@ -385,6 +385,30 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 				"data": alert,
 			})
 		}
+	} else if energyDelta < -threshold {
+		alert := models.PlayableAlert{
+			Timestamp:   ts,
+			StockName:   name,
+			Token:       token,
+			LastPrice:   price,
+			EnergyDelta: b1.BuyVolEnergy - b1.SellVolEnergy,
+			TotalEnergy: b1.TotalVolEnergy,
+			BuyEnergy:   b1.BuyVolEnergy,
+			SellEnergy:  b1.SellVolEnergy,
+			Timeframe:   "1m",
+		}
+
+		if s.onAlert != nil {
+			s.onAlert(alert)
+		}
+
+		// Broadcast to a global alerts channel
+		if s.wsHub != nil {
+			s.wsHub.BroadcastJSON("global:alerts", map[string]any{
+				"type": "alert",
+				"data": alert,
+			})
+		}
 	}
 
 	// -------------------------
