@@ -30,6 +30,8 @@ type App struct {
 	instrumentList []models.InstrumentConfig
 	tokenToName    map[uint32]string
 	nameToToken    map[string]uint32
+	topPlayable    map[uint32]models.PlayableAlert
+	alertMu        sync.RWMutex
 	managerMu      sync.RWMutex
 	activePipe     *Pipeline
 	activeManager  *stream.Manager
@@ -42,6 +44,7 @@ func NewApp(cfg *config.Config) (*App, error) {
 		Config:      cfg,
 		tokenToName: make(map[uint32]string),
 		nameToToken: make(map[string]uint32),
+		topPlayable: make(map[uint32]models.PlayableAlert),
 	}
 
 	if err := app.initDatabase(ctx); err != nil {
@@ -149,7 +152,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	enrichmentStage := pipeline.NewEnrichmentStage(dnaMap)
-	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub)
+	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub, a.UpdateTopPlayable)
 
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
 	a.activePipe = a.Pipeline
@@ -206,4 +209,10 @@ func (a *App) Stop() {
 		a.DBWriter.Close()
 	}
 	db.CloseDB()
+}
+
+func (a *App) UpdateTopPlayable(alert models.PlayableAlert) {
+	a.alertMu.Lock()
+	defer a.alertMu.Unlock()
+	a.topPlayable[alert.Token] = alert
 }

@@ -30,12 +30,13 @@ type BarBuilderStage struct {
 	session   map[uint32]*SessionState
 	adv30dMap map[uint32]float64
 	lastTs    map[uint32]time.Time
+	onAlert   func(models.PlayableAlert)
 	mu        sync.RWMutex
 	writer    *writer.DBWriter
 	wsHub     *ws.Hub
 }
 
-func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64, hub *ws.Hub) *BarBuilderStage {
+func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64, hub *ws.Hub, onAlert func(models.PlayableAlert)) *BarBuilderStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &BarBuilderStage{
@@ -46,6 +47,7 @@ func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64, hub *ws.H
 		session:   make(map[uint32]*SessionState),
 		adv30dMap: advMap,
 		lastTs:    make(map[uint32]time.Time),
+		onAlert:   onAlert,
 		writer:    w,
 		wsHub:     hub,
 	}
@@ -365,11 +367,15 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 			StockName:   name,
 			Token:       token,
 			LastPrice:   price,
-			EnergyDelta: energyDelta,
+			EnergyDelta: b1.BuyVolEnergy - b1.SellVolEnergy,
 			TotalEnergy: b1.TotalVolEnergy,
 			BuyEnergy:   b1.BuyVolEnergy,
 			SellEnergy:  b1.SellVolEnergy,
 			Timeframe:   "1m",
+		}
+
+		if s.onAlert != nil {
+			s.onAlert(alert)
 		}
 
 		// Broadcast to a global alerts channel

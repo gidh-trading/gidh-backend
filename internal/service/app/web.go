@@ -4,11 +4,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"gidh-backend/internal/service/db"
+	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/reader"
 	"gidh-backend/internal/service/stream"
 	"gidh-backend/internal/service/ws"
 	"gidh-backend/pkg/logger"
 	"net/http"
+	"sort"
 	"time"
 )
 
@@ -39,6 +41,7 @@ func (a *App) initWebServer() {
 	})
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
+	mux.HandleFunc("/api/playable-stocks", a.handleGetPlayableStocks) //
 
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%s", a.Config.Port),
@@ -156,6 +159,24 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 			"message": "No active stream manager to stop",
 		})
 	}
+}
+
+func (a *App) handleGetPlayableStocks(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	a.alertMu.RLock()
+	var list []models.PlayableAlert
+	for _, alert := range a.topPlayable {
+		list = append(list, alert)
+	}
+	a.alertMu.RUnlock()
+
+	// Sort by EnergyDelta descending so top stocks appear first
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].EnergyDelta > list[j].EnergyDelta
+	})
+
+	json.NewEncoder(w).Encode(list)
 }
 
 type StartBacktestRequest struct {
