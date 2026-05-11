@@ -143,6 +143,15 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 		// Stop the manager (this cancels context and waits for workers)
 		a.StreamManager.Stop()
 
+		// Clear alert states in the pipeline
+		if a.Pipeline != nil {
+			a.Pipeline.Reset()
+		}
+
+		a.alertMu.Lock()
+		a.topPlayable = make(map[uint32]models.PlayableAlert)
+		a.alertMu.Unlock()
+
 		// Clear the references so the status API reflects the idle state
 		a.StreamManager = nil
 		a.activeManager = nil

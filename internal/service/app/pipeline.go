@@ -64,3 +64,9 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 
 	return nil
 }
+
+func (p *Pipeline) Reset() {
+	if p.barBuilder != nil {
+		p.barBuilder.ClearState()
+	}
+}

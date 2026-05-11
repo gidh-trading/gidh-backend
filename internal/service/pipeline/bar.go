@@ -438,3 +438,16 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	return nil
 }
+
+func (s *BarBuilderStage) ClearState() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Clear the alert tracking map
+	s.alertStates = make(map[uint32]string)
+
+	// Optional: Clear bars and rolling states if you want a total reset
+	s.bar1m = make(map[uint32]*models.Bar)
+	s.bar5m = make(map[uint32]*models.Bar)
+	s.rolling = make(map[uint32]*RollingState)
+}
