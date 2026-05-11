@@ -23,33 +23,35 @@ func (s *SessionState) AvgRange() float64 {
 }
 
 type BarBuilderStage struct {
-	loc       *time.Location
-	rolling   map[uint32]*RollingState
-	bar1m     map[uint32]*models.Bar
-	bar5m     map[uint32]*models.Bar
-	session   map[uint32]*SessionState
-	adv30dMap map[uint32]float64
-	lastTs    map[uint32]time.Time
-	onAlert   func(models.PlayableAlert)
-	mu        sync.RWMutex
-	writer    *writer.DBWriter
-	wsHub     *ws.Hub
+	loc         *time.Location
+	rolling     map[uint32]*RollingState
+	bar1m       map[uint32]*models.Bar
+	bar5m       map[uint32]*models.Bar
+	session     map[uint32]*SessionState
+	adv30dMap   map[uint32]float64
+	lastTs      map[uint32]time.Time
+	alertStates map[uint32]string
+	onAlert     func(models.PlayableAlert)
+	mu          sync.RWMutex
+	writer      *writer.DBWriter
+	wsHub       *ws.Hub
 }
 
 func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64, hub *ws.Hub, onAlert func(models.PlayableAlert)) *BarBuilderStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &BarBuilderStage{
-		loc:       loc,
-		rolling:   make(map[uint32]*RollingState),
-		bar1m:     make(map[uint32]*models.Bar),
-		bar5m:     make(map[uint32]*models.Bar),
-		session:   make(map[uint32]*SessionState),
-		adv30dMap: advMap,
-		lastTs:    make(map[uint32]time.Time),
-		onAlert:   onAlert,
-		writer:    w,
-		wsHub:     hub,
+		loc:         loc,
+		rolling:     make(map[uint32]*RollingState),
+		bar1m:       make(map[uint32]*models.Bar),
+		bar5m:       make(map[uint32]*models.Bar),
+		session:     make(map[uint32]*SessionState),
+		adv30dMap:   advMap,
+		lastTs:      make(map[uint32]time.Time),
+		alertStates: make(map[uint32]string),
+		onAlert:     onAlert,
+		writer:      w,
+		wsHub:       hub,
 	}
 }
 
@@ -361,52 +363,53 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	energyDelta := b1.BuyVolEnergy - b1.SellVolEnergy
 	threshold := 0.8
 
+	// The exitThreshold is lower than the entry threshold (e.g., 0.4).
+	// This prevents "flickering" alerts if the energy bounces between 0.79 and 0.81.
+	exitThreshold := 0.4
+
+	lastState := s.alertStates[token] // Expected values: "BUY", "SELL", or "" (Neutral)
+	newState := lastState
+
+	// 1. Determine the New State
 	if energyDelta > threshold {
-		alert := models.PlayableAlert{
-			Timestamp:   ts,
-			StockName:   name,
-			Token:       token,
-			LastPrice:   price,
-			EnergyDelta: b1.BuyVolEnergy - b1.SellVolEnergy,
-			TotalEnergy: b1.TotalVolEnergy,
-			BuyEnergy:   b1.BuyVolEnergy,
-			SellEnergy:  b1.SellVolEnergy,
-			Timeframe:   "1m",
-		}
-
-		if s.onAlert != nil {
-			s.onAlert(alert)
-		}
-
-		// Broadcast to a global alerts channel
-		if s.wsHub != nil {
-			s.wsHub.BroadcastJSON("global:alerts", map[string]any{
-				"type": "alert",
-				"data": alert,
-			})
-		}
+		newState = "BUY"
 	} else if energyDelta < -threshold {
+		newState = "SELL"
+	} else if math.Abs(energyDelta) < exitThreshold {
+		// Only revert to neutral if the energy drops significantly
+		newState = "NEUTRAL"
+	}
+
+	// 2. Trigger ONLY if the state has changed
+	if newState != lastState {
+		s.alertStates[token] = newState
+
 		alert := models.PlayableAlert{
 			Timestamp:   ts,
 			StockName:   name,
 			Token:       token,
 			LastPrice:   price,
-			EnergyDelta: b1.BuyVolEnergy - b1.SellVolEnergy,
+			EnergyDelta: energyDelta,
 			TotalEnergy: b1.TotalVolEnergy,
 			BuyEnergy:   b1.BuyVolEnergy,
 			SellEnergy:  b1.SellVolEnergy,
 			Timeframe:   "1m",
+			// Note: You may want to add a 'Side' or 'State' string field
+			// to your PlayableAlert model to easily filter in the UI.
 		}
 
+		// Trigger the callback (useful for sound effects or logs)
 		if s.onAlert != nil {
 			s.onAlert(alert)
 		}
 
-		// Broadcast to a global alerts channel
+		// Broadcast to the global channel.
+		// The UI can use this to add/remove/update rows in the Alert Table.
 		if s.wsHub != nil {
 			s.wsHub.BroadcastJSON("global:alerts", map[string]any{
-				"type": "alert",
-				"data": alert,
+				"type":  "alert_state_change",
+				"state": newState,
+				"data":  alert,
 			})
 		}
 	}
