@@ -152,13 +152,14 @@ func (pm *PositionManager) ReconcileRiskOrders(posID string) {
 		if pos.StopLossOrderID == "" {
 			// Create SL
 			resp, err := pm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, kiteconnect.OrderParams{
-				Exchange:        kiteconnect.ExchangeNSE,
-				Tradingsymbol:   pos.Symbol,
-				TransactionType: exitTxnType,
-				Quantity:        absQtyInt,
-				TriggerPrice:    pos.StopLossPrice,
-				OrderType:       kiteconnect.OrderTypeSLM,
-				Product:         pos.Product,
+				Exchange:         kiteconnect.ExchangeNSE,
+				Tradingsymbol:    pos.Symbol,
+				TransactionType:  exitTxnType,
+				Quantity:         absQtyInt,
+				TriggerPrice:     pos.StopLossPrice,
+				OrderType:        kiteconnect.OrderTypeSLM,
+				Product:          pos.Product,
+				MarketProtection: -1,
 			})
 			if err == nil {
 				pos.StopLossOrderID = resp.OrderID
@@ -209,6 +210,10 @@ func (pm *PositionManager) PlaceEntryOrder(req models.OrderRequest) error {
 		OrderType:       req.OrderType,
 		Product:         req.Product,
 		Price:           req.Price,
+	}
+
+	if req.OrderType == kiteconnect.OrderTypeMarket || req.OrderType == kiteconnect.OrderTypeSLM {
+		params.MarketProtection = -1
 	}
 
 	resp, err := pm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, params)
