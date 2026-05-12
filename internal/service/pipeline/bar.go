@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/order"
 	"gidh-backend/internal/service/writer"
 	"gidh-backend/internal/service/ws"
 	"math"
@@ -27,6 +28,7 @@ type BarBuilderStage struct {
 	rolling     map[uint32]*RollingState
 	bar1m       map[uint32]*models.Bar
 	bar5m       map[uint32]*models.Bar
+	posMgr      *order.PositionManager
 	session     map[uint32]*SessionState
 	adv30dMap   map[uint32]float64
 	lastTs      map[uint32]time.Time
@@ -37,7 +39,13 @@ type BarBuilderStage struct {
 	wsHub       *ws.Hub
 }
 
-func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64, hub *ws.Hub, onAlert func(models.PlayableAlert)) *BarBuilderStage {
+func NewBarBuilderStage(
+	w *writer.DBWriter,
+	advMap map[uint32]float64,
+	hub *ws.Hub,
+	onAlert func(models.PlayableAlert),
+	pm *order.PositionManager, // New: Pass the manager here
+) *BarBuilderStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &BarBuilderStage{
@@ -52,6 +60,7 @@ func NewBarBuilderStage(w *writer.DBWriter, advMap map[uint32]float64, hub *ws.H
 		onAlert:     onAlert,
 		writer:      w,
 		wsHub:       hub,
+		posMgr:      pm, // New: Assign the manager
 	}
 }
 
@@ -306,6 +315,12 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	b5.TotalVolEnergy = volumeZ
 	b5.TotalRngEnergy = rangeZ
+
+	if s.posMgr != nil {
+		pnl := s.posMgr.GetUnrealizedPnL(name, price)
+		b1.UnrealizedPnL = pnl
+		b5.UnrealizedPnL = pnl
+	}
 
 	// 1M BAR: Split total energy into Buy/Sell using the actual raw volume ratios
 	if b1.Volume > 0 {

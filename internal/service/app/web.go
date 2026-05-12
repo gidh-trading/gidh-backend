@@ -44,6 +44,7 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/alerts/", a.handleGetAlerts)
 	mux.HandleFunc("/api/orders/place", a.handlePlaceOrder)
 	mux.HandleFunc("/api/portfolio/positions", a.handleGetPositions)
+	mux.HandleFunc("/api/portfolio/position", a.handleGetPositionByStock)
 
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%s", a.Config.Port),
@@ -244,6 +245,31 @@ func (a *App) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
 		return
 	}
+}
+
+func (a *App) handleGetPositionByStock(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	stockName := r.URL.Query().Get("stock_name")
+	if stockName == "" {
+		http.Error(w, "Missing 'symbol' query parameter", http.StatusBadRequest)
+		return
+	}
+
+	// Fetch filtered positions from the manager
+	positions := a.PositionManager.GetPositionsBySymbol(stockName)
+
+	w.Header().Set("Content-Type", "application/json")
+	response := map[string]interface{}{
+		"status": "success",
+		"symbol": stockName,
+		"data":   positions,
+	}
+
+	json.NewEncoder(w).Encode(response)
 }
 
 type StartBacktestRequest struct {

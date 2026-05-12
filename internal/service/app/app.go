@@ -160,7 +160,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	enrichmentStage := pipeline.NewEnrichmentStage(dnaMap)
-	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub, a.UpdateTopPlayable)
+	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub, a.UpdateTopPlayable, a.PositionManager)
 
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
 	a.activePipe = a.Pipeline

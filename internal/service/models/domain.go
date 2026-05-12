@@ -236,8 +236,9 @@ type Bar struct {
 	SellRngEnergy  float64 `json:"sell_rng_energy"`
 
 	// ---- UI Only Metrics (Not persisted in DB) ----
-	TotalBuyQty  float64 `json:"total_buy_qty"`
-	TotalSellQty float64 `json:"total_sell_qty"`
+	TotalBuyQty   float64 `json:"total_buy_qty"`
+	TotalSellQty  float64 `json:"total_sell_qty"`
+	UnrealizedPnL float64 `json:"unrealized_pnl"`
 
 	// ---- Raw ticks ----
 	Ticks []TickData `json:"-"`

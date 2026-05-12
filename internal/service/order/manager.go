@@ -236,3 +236,35 @@ func (pm *PositionManager) GetActivePositions() []models.Position {
 	}
 	return positions
 }
+
+func (pm *PositionManager) GetPositionsBySymbol(symbol string) []models.Position {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	var matched []models.Position
+	for _, pos := range pm.activePositions {
+		if pos.Symbol == symbol {
+			// Dereference to return a copy for thread safety
+			matched = append(matched, *pos)
+		}
+	}
+	return matched
+}
+
+func (pm *PositionManager) GetUnrealizedPnL(symbol string, ltp float64) float64 {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	var totalPnL float64
+	for _, pos := range pm.activePositions {
+		if pos.Symbol == symbol && pos.NetQuantity != 0 {
+			if pos.Side == "LONG" {
+				totalPnL += (ltp - pos.AveragePrice) * pos.NetQuantity
+			} else {
+				// Short PnL: (EntryPrice - LTP) * Quantity
+				totalPnL += (pos.AveragePrice - ltp) * math.Abs(pos.NetQuantity)
+			}
+		}
+	}
+	return totalPnL
+}
