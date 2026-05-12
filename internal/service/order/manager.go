@@ -268,3 +268,21 @@ func (pm *PositionManager) GetUnrealizedPnL(symbol string, ltp float64) float64 
 	}
 	return totalPnL
 }
+
+// ModifyEntryOrder allows manual price/qty updates for pending Limit orders
+func (pm *PositionManager) ModifyEntryOrder(req models.ModifyOrderRequest) error {
+	params := kiteconnect.OrderParams{}
+	if req.Quantity > 0 {
+		params.Quantity = int(req.Quantity)
+	}
+	if req.Price > 0 {
+		params.Price = req.Price
+	}
+
+	_, err := pm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, req.OrderID, params)
+	if err != nil {
+		logger.Errorf("Failed to modify entry order %s: %v", req.OrderID, err)
+		return err
+	}
+	return nil
+}

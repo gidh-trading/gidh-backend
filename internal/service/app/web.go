@@ -43,6 +43,7 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
 	mux.HandleFunc("/api/alerts/", a.handleGetAlerts)
 	mux.HandleFunc("/api/orders/place", a.handlePlaceOrder)
+	mux.HandleFunc("/api/orders/modify", a.handleModifyOrder)
 	mux.HandleFunc("/api/portfolio/positions", a.handleGetPositions)
 	mux.HandleFunc("/api/portfolio/position", a.handleGetPositionByStock)
 
@@ -221,6 +222,27 @@ func (a *App) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Order placed successfully"})
+}
+
+func (a *App) handleModifyOrder(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req models.ModifyOrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if err := a.PositionManager.ModifyEntryOrder(req); err != nil {
+		http.Error(w, "Modification failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
 }
 
 // handleGetPositions returns the live portfolio positions mapped in memory

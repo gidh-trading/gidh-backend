@@ -294,3 +294,9 @@ type Position struct {
 	TargetOrderID   string  `json:"target_order_id"`
 	StopLossOrderID string  `json:"stop_loss_order_id"`
 }
+
+type ModifyOrderRequest struct {
+	OrderID  string  `json:"order_id"`
+	Quantity float64 `json:"quantity,omitempty"`
+	Price    float64 `json:"price,omitempty"`
+}
