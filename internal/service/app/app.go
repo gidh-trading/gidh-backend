@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"gidh-backend/internal/service/order"
 	"net/http"
 	"sync"
 	"time"
@@ -18,26 +17,24 @@ import (
 	"gidh-backend/pkg/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
-	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
 type App struct {
-	Config          *config.Config
-	StreamManager   *stream.Manager
-	Pipeline        *Pipeline
-	DBWriter        *writer.DBWriter
-	PositionManager *order.PositionManager
-	server          *http.Server
-	wsHub           *ws.Hub
-	pool            *pgxpool.Pool
-	instrumentList  []models.InstrumentConfig
-	tokenToName     map[uint32]string
-	nameToToken     map[string]uint32
-	topPlayable     map[uint32]models.PlayableAlert
-	alertMu         sync.RWMutex
-	managerMu       sync.RWMutex
-	activePipe      *Pipeline
-	activeManager   *stream.Manager
+	Config         *config.Config
+	StreamManager  *stream.Manager
+	Pipeline       *Pipeline
+	DBWriter       *writer.DBWriter
+	server         *http.Server
+	wsHub          *ws.Hub
+	pool           *pgxpool.Pool
+	instrumentList []models.InstrumentConfig
+	tokenToName    map[uint32]string
+	nameToToken    map[string]uint32
+	topPlayable    map[uint32]models.PlayableAlert
+	alertMu        sync.RWMutex
+	managerMu      sync.RWMutex
+	activePipe     *Pipeline
+	activeManager  *stream.Manager
 }
 
 // NewApp orchestrates the application setup.
@@ -58,10 +55,6 @@ func NewApp(cfg *config.Config) (*App, error) {
 	// If live, we load everything and start immediately.
 	// If backtest, we wait for the API call.
 	if cfg.Mode == "live" {
-
-		kiteClient := kiteconnect.New(cfg.KiteAPIKey)
-		kiteClient.SetAccessToken(cfg.KiteAccessToken)
-		app.PositionManager = order.NewPositionManager(kiteClient)
 
 		dnaMap, advMap := app.loadMarketData(ctx, time.Now())
 		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
@@ -160,7 +153,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	enrichmentStage := pipeline.NewEnrichmentStage(dnaMap)
-	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub, a.UpdateTopPlayable, a.PositionManager)
+	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub, a.UpdateTopPlayable)
 
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
 	a.activePipe = a.Pipeline

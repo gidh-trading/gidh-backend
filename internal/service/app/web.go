@@ -42,10 +42,6 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
 	mux.HandleFunc("/api/alerts/", a.handleGetAlerts)
-	mux.HandleFunc("/api/orders/place", a.handlePlaceOrder)
-	mux.HandleFunc("/api/orders/modify", a.handleModifyOrder)
-	mux.HandleFunc("/api/portfolio/positions", a.handleGetPositions)
-	mux.HandleFunc("/api/portfolio/position", a.handleGetPositionByStock)
 
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%s", a.Config.Port),
@@ -198,97 +194,6 @@ func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
 	response := map[string]interface{}{
 		"status": "success",
 		"data":   list,
-	}
-
-	json.NewEncoder(w).Encode(response)
-}
-
-func (a *App) handlePlaceOrder(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req models.OrderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if err := a.PositionManager.PlaceEntryOrder(req); err != nil {
-		http.Error(w, "Failed to place order: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "success", "message": "Order placed successfully"})
-}
-
-func (a *App) handleModifyOrder(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	var req models.ModifyOrderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request body", http.StatusBadRequest)
-		return
-	}
-
-	if err := a.PositionManager.ModifyEntryOrder(req); err != nil {
-		http.Error(w, "Modification failed: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"status": "success"})
-}
-
-// handleGetPositions returns the live portfolio positions mapped in memory
-func (a *App) handleGetPositions(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Fetch the thread-safe snapshot of positions
-	positions := a.PositionManager.GetActivePositions()
-
-	w.Header().Set("Content-Type", "application/json")
-
-	// Wrap the response in a 'data' array to match standard frontend expectations
-	response := map[string]interface{}{
-		"status": "success",
-		"data":   positions,
-	}
-
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		http.Error(w, "Failed to encode response", http.StatusInternalServerError)
-		return
-	}
-}
-
-func (a *App) handleGetPositionByStock(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	stockName := r.URL.Query().Get("stock_name")
-	if stockName == "" {
-		http.Error(w, "Missing 'symbol' query parameter", http.StatusBadRequest)
-		return
-	}
-
-	// Fetch filtered positions from the manager
-	positions := a.PositionManager.GetPositionsBySymbol(stockName)
-
-	w.Header().Set("Content-Type", "application/json")
-	response := map[string]interface{}{
-		"status": "success",
-		"symbol": stockName,
-		"data":   positions,
 	}
 
 	json.NewEncoder(w).Encode(response)

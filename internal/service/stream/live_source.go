@@ -14,10 +14,6 @@ import (
 	kiteticker "github.com/zerodha/gokiteconnect/v4/ticker"
 )
 
-type OrderUpdateHandler interface {
-	HandleOrderUpdate(kOrder kiteconnect.Order)
-}
-
 // LiveTickSource implements TickDataSource using Zerodha Kite Connect WebSocket
 type LiveTickSource struct {
 	ticker      *kiteticker.Ticker
@@ -38,7 +34,6 @@ type LiveSourceConfig struct {
 	InstrumentMap       map[uint32]string // Token to stock name mapping
 	ReconnectMaxRetries int
 	ReconnectInterval   int // in seconds
-	OrderHandler        OrderUpdateHandler
 }
 
 // NewLiveSource creates a new Kite Connect WebSocket source
@@ -93,9 +88,6 @@ func (l *LiveTickSource) Connect(ctx context.Context) error {
 	// Updated: Convert Kite order to internal model for rich UI updates
 	l.ticker.OnOrderUpdate(func(o kiteconnect.Order) {
 		logger.Infof("[Kite] Order Update: %s -> %s (Filled: %d)", o.OrderID, o.Status, o.FilledQuantity)
-		if l.config.OrderHandler != nil {
-			l.config.OrderHandler.HandleOrderUpdate(o)
-		}
 	})
 
 	logger.Info("Kite Ticker initialized successfully")

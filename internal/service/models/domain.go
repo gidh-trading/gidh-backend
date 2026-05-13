@@ -236,9 +236,8 @@ type Bar struct {
 	SellRngEnergy  float64 `json:"sell_rng_energy"`
 
 	// ---- UI Only Metrics (Not persisted in DB) ----
-	TotalBuyQty   float64 `json:"total_buy_qty"`
-	TotalSellQty  float64 `json:"total_sell_qty"`
-	UnrealizedPnL float64 `json:"unrealized_pnl"`
+	TotalBuyQty  float64 `json:"total_buy_qty"`
+	TotalSellQty float64 `json:"total_sell_qty"`
 
 	// ---- Raw ticks ----
 	Ticks []TickData `json:"-"`
@@ -254,49 +253,4 @@ type PlayableAlert struct {
 	BuyEnergy   float64   `json:"buy_energy"`
 	SellEnergy  float64   `json:"sell_energy"`
 	Timeframe   string    `json:"timeframe"`
-}
-
-// =====================================================================
-// ORDER MANAGEMENT SYSTEM
-// =====================================================================
-
-type OrderRequest struct {
-	Symbol          string  `json:"symbol"`
-	Product         string  `json:"product"`
-	TransactionType string  `json:"transaction_type"`
-	OrderType       string  `json:"order_type"`
-	Quantity        float64 `json:"quantity"` // <-- CHANGE TO float64
-	Price           float64 `json:"price,omitempty"`
-
-	TargetPrice   float64 `json:"target_price,omitempty"`
-	StopLossPrice float64 `json:"stop_loss_price,omitempty"`
-}
-
-type Position struct {
-	InternalID string `json:"internal_id"`
-	Symbol     string `json:"symbol"`
-	Product    string `json:"product"`
-	Side       string `json:"side"`
-
-	// Core State
-	NetQuantity  float64 `json:"net_quantity"` // <-- CHANGE TO float64
-	AveragePrice float64 `json:"average_price"`
-	LastFillQty  float64 `json:"-"` // <-- CHANGE TO float64
-
-	// Profit and Loss
-	RealizedPnL    float64 `json:"realized_pnl"`
-	TotalBuyValue  float64 `json:"total_buy_value"`
-	TotalSellValue float64 `json:"total_sell_value"`
-
-	// Live Risk State
-	TargetPrice     float64 `json:"target_price"`
-	StopLossPrice   float64 `json:"stop_loss_price"`
-	TargetOrderID   string  `json:"target_order_id"`
-	StopLossOrderID string  `json:"stop_loss_order_id"`
-}
-
-type ModifyOrderRequest struct {
-	OrderID  string  `json:"order_id"`
-	Quantity float64 `json:"quantity,omitempty"`
-	Price    float64 `json:"price,omitempty"`
 }
