@@ -43,6 +43,8 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
 	mux.HandleFunc("/api/alerts/", a.handleGetAlerts)
 
+	mux.HandleFunc("/api/orders/place", a.handleOrderPlace)
+
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%s", a.Config.Port),
 		Handler: mux,
@@ -197,6 +199,28 @@ func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(response)
+}
+
+func (a *App) handleOrderPlace(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req models.OrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request", http.StatusBadRequest)
+		return
+	}
+
+	// a.OrderManager would be an interface initialized in app.go
+	id, err := a.OrderManager.PlaceOrder(r.Context(), req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	json.NewEncoder(w).Encode(map[string]string{"order_id": id, "status": "success"})
 }
 
 type StartBacktestRequest struct {

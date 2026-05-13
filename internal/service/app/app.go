@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"gidh-backend/internal/service/order"
 	"net/http"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ type App struct {
 	StreamManager  *stream.Manager
 	Pipeline       *Pipeline
 	DBWriter       *writer.DBWriter
+	OrderManager   order.PositionManager
 	server         *http.Server
 	wsHub          *ws.Hub
 	pool           *pgxpool.Pool
@@ -98,6 +100,14 @@ func (a *App) initDatabase(ctx context.Context) error {
 	})
 
 	return nil
+}
+
+func (a *App) initOrderManager() {
+	if a.Config.Mode == "live" {
+		// a.OrderManager = order.NewLivePositionManager(...)
+	} else {
+		a.OrderManager = order.NewPaperPositionManager()
+	}
 }
 
 // loadMarketData fetches instrument and DNA baselines from DB for a specific date.
