@@ -15,6 +15,7 @@ type PaperPositionManager struct {
 	mu              sync.RWMutex
 	activePositions map[string]*models.Position // Key: symbol:product
 	orderBook       []models.OrderBookEntry
+	lastPrices      map[string]float64 // Tracks latest LTP for Market Orders
 	wsHub           *ws.Hub
 }
 
@@ -22,11 +23,13 @@ func NewPaperPositionManager(hub *ws.Hub) *PaperPositionManager {
 	return &PaperPositionManager{
 		activePositions: make(map[string]*models.Position),
 		orderBook:       make([]models.OrderBookEntry, 0),
+		lastPrices:      make(map[string]float64),
 		wsHub:           hub,
 	}
 }
 
-// PlaceOrder simulates the initial entry into a trade loop.
+// PlaceOrder handles the initial intent.
+// MARKET orders fill immediately, LIMIT orders stay PENDING.
 func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.OrderRequest) (string, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -37,24 +40,31 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 		OrderID:   orderID,
 		Symbol:    req.Symbol,
 		Side:      req.TransactionType,
+		OrderType: req.OrderType,
 		Qty:       req.Quantity,
 		Price:     req.Price,
 		Status:    "PENDING",
 		Timestamp: time.Now(),
 	}
 
+	// Immediate Execution for Market Orders
 	if req.OrderType == "MARKET" {
+		ltp, exists := pm.lastPrices[strings.ToUpper(req.Symbol)]
+		if !exists {
+			return "", fmt.Errorf("no market price available for %s", req.Symbol)
+		}
+
+		entry.Price = ltp
 		entry.Status = "COMPLETE"
 		entry.FilledQty = req.Quantity
-		pm.updatePositionState(req, req.Price)
+		pm.updatePositionState(req, ltp)
 	}
 
 	pm.orderBook = append(pm.orderBook, entry)
 
-	// ADD THIS: Broadcast the order update immediately
 	if pm.wsHub != nil {
 		pm.wsHub.BroadcastJSON("global:trading", map[string]any{
-			"type": "position_update",
+			"type": "order_update",
 			"data": entry,
 		})
 	}
@@ -62,38 +72,70 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 	return orderID, nil
 }
 
-// OnPriceUpdate is the high-frequency hook for the global stream.
-// It recalculates PnL for active positions when a new price arrives.
-// internal/service/order/paper_manager.go
-
+// OnPriceUpdate now checks if any PENDING limit orders should be triggered.
 func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
+	symbolKey := strings.ToUpper(symbol)
+	pm.lastPrices[symbolKey] = ltp
+
+	// 1. Check Order Book for pending LIMIT orders
+	for i := range pm.orderBook {
+		order := &pm.orderBook[i]
+
+		if order.Status == "PENDING" && order.Symbol == symbol && order.OrderType == "LIMIT" {
+			shouldFill := false
+
+			// BUY LIMIT: Fill if Market Price <= Limit Price
+			if order.Side == "BUY" && ltp <= order.Price {
+				shouldFill = true
+			}
+			// SELL LIMIT: Fill if Market Price >= Limit Price
+			if order.Side == "SELL" && ltp >= order.Price {
+				shouldFill = true
+			}
+
+			if shouldFill {
+				order.Status = "COMPLETE"
+				order.FilledQty = order.Qty
+
+				// Update the Position using the Limit Price as the fill price
+				req := models.OrderRequest{
+					Symbol:          order.Symbol,
+					Product:         "MIS", // Default for paper trading or add to OrderBookEntry
+					TransactionType: order.Side,
+					Quantity:        order.Qty,
+				}
+				pm.updatePositionState(req, order.Price)
+
+				// Notify UI of the fill
+				if pm.wsHub != nil {
+					pm.wsHub.BroadcastJSON("global:trading", map[string]any{
+						"type": "order_update",
+						"data": order,
+					})
+				}
+			}
+		}
+	}
+
+	// 2. Recalculate Unrealized PnL for active positions
 	for _, product := range []string{"MIS", "CNC"} {
-		key := fmt.Sprintf("%s:%s", strings.ToUpper(symbol), strings.ToUpper(product))
+		key := fmt.Sprintf("%s:%s", symbolKey, product)
 		pos, exists := pm.activePositions[key]
 
 		if exists && pos.NetQuantity != 0 {
-			// 1. Calculate PnL
 			if pos.Side == "LONG" {
 				pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 			} else {
 				pos.UnrealizedPnL = (pos.AveragePrice - ltp) * float64(pos.NetQuantity)
 			}
 
-			// 2. Broadcast (This will now work because pm.wsHub is no longer nil)
 			if pm.wsHub != nil {
-				payload := map[string]any{
-					"type": "position_update",
-					"data": pos,
-				}
-
-				// Broadcast to the global trading channel
+				payload := map[string]any{"type": "position_update", "data": pos}
 				pm.wsHub.BroadcastJSON("global:trading", payload)
-
-				// Optional: Also broadcast to the specific stock channel so the UI chart updates
-				pm.wsHub.BroadcastJSON(strings.ToUpper(symbol)+":1m", payload)
+				pm.wsHub.BroadcastJSON(symbolKey+":1m", payload)
 			}
 		}
 	}
@@ -103,13 +145,12 @@ func (pm *PaperPositionManager) GetPosition(symbol string, product string) (*mod
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	key := fmt.Sprintf("%s:%s", symbol, product)
+	key := fmt.Sprintf("%s:%s", strings.ToUpper(symbol), strings.ToUpper(product))
 	pos, exists := pm.activePositions[key]
 	return pos, exists
 }
 
-// updatePositionState handles the "Position" side of the Golden Rule:
-// Orders only update the Net Position.
+// updatePositionState handles the "Position" side of the Golden Rule.
 func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fillPrice float64) {
 	key := fmt.Sprintf("%s:%s", strings.ToUpper(req.Symbol), strings.ToUpper(req.Product))
 	pos, exists := pm.activePositions[key]
@@ -124,20 +165,31 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		pm.activePositions[key] = pos
 	}
 
-	// Update quantities and average price
+	// Calculate New Average Price and Net Quantity
 	if req.TransactionType == "BUY" {
 		totalCost := (pos.AveragePrice * float64(pos.NetQuantity)) + (fillPrice * float64(req.Quantity))
 		pos.NetQuantity += req.Quantity
 		pos.AveragePrice = totalCost / float64(pos.NetQuantity)
-		pos.Side = "LONG"
+
+		if pos.NetQuantity > 0 {
+			pos.Side = "LONG"
+		} else if pos.NetQuantity < 0 {
+			pos.Side = "SHORT"
+		}
 	} else {
-		// Simplified for first step: assuming Sell initiates a Short or reduces Long
+		// SELL Transaction
 		totalValue := (pos.AveragePrice * float64(pos.NetQuantity)) - (fillPrice * float64(req.Quantity))
 		pos.NetQuantity -= req.Quantity
+
 		if pos.NetQuantity != 0 {
 			pos.AveragePrice = totalValue / float64(pos.NetQuantity)
 		}
-		pos.Side = "SHORT"
+
+		if pos.NetQuantity > 0 {
+			pos.Side = "LONG"
+		} else if pos.NetQuantity < 0 {
+			pos.Side = "SHORT"
+		}
 	}
 
 	if pm.wsHub != nil {
@@ -146,5 +198,19 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 			"data": pos,
 		})
 	}
+}
 
+func (pm *PaperPositionManager) GetOrders(symbol string) []models.OrderBookEntry {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	var filtered []models.OrderBookEntry
+	symbol = strings.ToUpper(symbol)
+
+	for _, order := range pm.orderBook {
+		if order.Symbol == symbol {
+			filtered = append(filtered, order)
+		}
+	}
+	return filtered
 }

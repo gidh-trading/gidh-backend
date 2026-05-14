@@ -19,6 +19,7 @@ type OrderBookEntry struct {
 	OrderID   string    `json:"order_id"`
 	Symbol    string    `json:"symbol"`
 	Side      string    `json:"side"`
+	OrderType string    `json:"order_type"`
 	Qty       int       `json:"qty"`
 	FilledQty int       `json:"filled_qty"`
 	Price     float64   `json:"price"`
