@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"gidh-backend/internal/service/ws"
+	"gidh-backend/pkg/logger"
 	"strings"
 	"sync"
 	"time"
@@ -224,4 +225,15 @@ func (pm *PaperPositionManager) GetAllPositions() []models.Position {
 		positions = append(positions, *pos)
 	}
 	return positions
+}
+
+func (pm *PaperPositionManager) ClearPositions() {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	pm.activePositions = make(map[string]*models.Position)
+	pm.orderBook = make([]models.OrderBookEntry, 0)
+	pm.lastPrices = make(map[string]float64)
+
+	logger.Info("Paper Position Manager state cleared.")
 }

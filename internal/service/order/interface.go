@@ -11,4 +11,5 @@ type PositionManager interface {
 	OnPriceUpdate(symbol string, ltp float64)
 	GetOrders(symbol string) []models.OrderBookEntry
 	GetAllPositions() []models.Position
+	ClearPositions()
 }

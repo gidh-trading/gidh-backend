@@ -135,7 +135,6 @@ func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "started", "date": req.Date})
 }
 
-// 2. Implement the handleBacktestStop function
 func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -148,32 +147,37 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 	if a.StreamManager != nil {
 		logger.Info("Stopping stream manager via API request...")
 
-		// Stop the manager (this cancels context and waits for workers)
+		// 1. Stop the stream reader and workers
 		a.StreamManager.Stop()
 
-		// Clear alert states in the pipeline
+		// 2. Clear bar/rolling state in the pipeline
 		if a.Pipeline != nil {
 			a.Pipeline.Reset()
 		}
 
+		// 3. Clear the Position Manager (Orders/Positions/Prices)
+		if a.OrderManager != nil {
+			a.OrderManager.ClearPositions()
+		}
+
+		// 4. Clear alert history
 		a.alertMu.Lock()
 		a.topPlayable = make(map[uint32]models.PlayableAlert)
 		a.alertMu.Unlock()
 
-		// Clear the references so the status API reflects the idle state
 		a.StreamManager = nil
 		a.activeManager = nil
 
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
 			"status":  "stopped",
-			"message": "Stream manager terminated successfully",
+			"message": "Stream and trade state terminated successfully",
 		})
 	} else {
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
 			"status":  "idle",
-			"message": "No active stream manager to stop",
+			"message": "No active backtest to stop",
 		})
 	}
 }
