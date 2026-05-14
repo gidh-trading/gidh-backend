@@ -6,9 +6,9 @@ import (
 
 type OrderRequest struct {
 	Symbol          string  `json:"symbol"`
-	Product         string  `json:"product"`          // e.g., "MIS"
-	TransactionType string  `json:"transaction_type"` // "BUY" or "SELL"
-	OrderType       string  `json:"order_type"`       // "MARKET" or "LIMIT"
+	Product         string  `json:"product"`
+	TransactionType string  `json:"transaction_type"`
+	OrderType       string  `json:"order_type"`
 	Quantity        int     `json:"quantity"`
 	Price           float64 `json:"price,omitempty"`
 	TargetPrice     float64 `json:"target_price,omitempty"`

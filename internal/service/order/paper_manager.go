@@ -34,6 +34,8 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 
 	orderID := fmt.Sprintf("PPR-%d", time.Now().UnixNano())
 
+	logger.Infof("Request: %+v", req)
+
 	entry := models.OrderBookEntry{
 		OrderID:   orderID,
 		Symbol:    req.Symbol,
