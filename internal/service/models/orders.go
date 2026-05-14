@@ -16,15 +16,17 @@ type OrderRequest struct {
 }
 
 type OrderBookEntry struct {
-	OrderID   string    `json:"order_id"`
-	Symbol    string    `json:"symbol"`
-	Side      string    `json:"side"`
-	OrderType string    `json:"order_type"`
-	Qty       int       `json:"qty"`
-	FilledQty int       `json:"filled_qty"`
-	Price     float64   `json:"price"`
-	Status    string    `json:"status"` // PENDING, COMPLETE, REJECTED
-	Timestamp time.Time `json:"timestamp"`
+	OrderID       string    `json:"order_id"`
+	Symbol        string    `json:"symbol"`
+	Side          string    `json:"side"`
+	OrderType     string    `json:"order_type"`
+	Qty           int       `json:"qty"`
+	FilledQty     int       `json:"filled_qty"`
+	Price         float64   `json:"price"`
+	Status        string    `json:"status"` // PENDING, COMPLETE, REJECTED
+	Timestamp     time.Time `json:"timestamp"`
+	TargetPrice   float64   `json:"target_price"`    // Add this
+	StopLossPrice float64   `json:"stop_loss_price"` // Add this
 }
 
 type Position struct {
