@@ -7,4 +7,5 @@ import (
 
 type PositionManager interface {
 	PlaceOrder(ctx context.Context, req models.OrderRequest) (string, error)
+	GetPosition(symbol string, product string) (*models.Position, bool)
 }

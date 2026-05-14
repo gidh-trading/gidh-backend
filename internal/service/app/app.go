@@ -52,6 +52,9 @@ func NewApp(cfg *config.Config) (*App, error) {
 	if err := app.initDatabase(ctx); err != nil {
 		return nil, err
 	}
+
+	app.initOrderManager()
+
 	app.initWebServer()
 
 	// If live, we load everything and start immediately.
@@ -106,7 +109,7 @@ func (a *App) initOrderManager() {
 	if a.Config.Mode == "live" {
 		// a.OrderManager = order.NewLivePositionManager(...)
 	} else {
-		a.OrderManager = order.NewPaperPositionManager()
+		a.OrderManager = order.NewPaperPositionManager(a.wsHub)
 	}
 }
 
@@ -163,7 +166,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	enrichmentStage := pipeline.NewEnrichmentStage(dnaMap)
-	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub, a.UpdateTopPlayable)
+	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub, a.OrderManager, a.UpdateTopPlayable)
 
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
 	a.activePipe = a.Pipeline

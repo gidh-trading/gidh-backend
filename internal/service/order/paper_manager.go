@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"fmt"
+	"gidh-backend/internal/service/ws"
 	"sync"
 	"time"
 
@@ -14,12 +15,14 @@ type PaperPositionManager struct {
 	mu              sync.RWMutex
 	activePositions map[string]*models.Position // Key: symbol:product
 	orderBook       []models.OrderBookEntry
+	wsHub           *ws.Hub
 }
 
-func NewPaperPositionManager() *PaperPositionManager {
+func NewPaperPositionManager(hub *ws.Hub) *PaperPositionManager {
 	return &PaperPositionManager{
 		activePositions: make(map[string]*models.Position),
 		orderBook:       make([]models.OrderBookEntry, 0),
+		wsHub:           hub,
 	}
 }
 
@@ -89,16 +92,21 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		}
 		pos.Side = "SHORT"
 	}
+
+	if pm.wsHub != nil {
+		pm.wsHub.BroadcastJSON("global:trading", map[string]any{
+			"type": "position_update",
+			"data": pos,
+		})
+	}
+
 }
 
-// GetPositions allows the UI to fetch the current state.
-func (pm *PaperPositionManager) GetPositions() []models.Position {
+func (pm *PaperPositionManager) GetPosition(symbol string, product string) (*models.Position, bool) {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	var list []models.Position
-	for _, p := range pm.activePositions {
-		list = append(list, *p)
-	}
-	return list
+	key := fmt.Sprintf("%s:%s", symbol, product)
+	pos, exists := pm.activePositions[key]
+	return pos, exists
 }

@@ -1,7 +1,9 @@
 package app
 
 import (
+	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"gidh-backend/internal/service/db"
 	"gidh-backend/internal/service/models"
@@ -9,6 +11,7 @@ import (
 	"gidh-backend/internal/service/stream"
 	"gidh-backend/internal/service/ws"
 	"gidh-backend/pkg/logger"
+	"net"
 	"net/http"
 	"sort"
 	"time"
@@ -45,9 +48,11 @@ func (a *App) initWebServer() {
 
 	mux.HandleFunc("/api/orders/place", a.handleOrderPlace)
 
+	handlerWithLogging := LoggingMiddleware(mux)
+
 	a.server = &http.Server{
 		Addr:    fmt.Sprintf(":%s", a.Config.Port),
-		Handler: mux,
+		Handler: handlerWithLogging,
 	}
 }
 
@@ -216,6 +221,7 @@ func (a *App) handleOrderPlace(w http.ResponseWriter, r *http.Request) {
 	// a.OrderManager would be an interface initialized in app.go
 	id, err := a.OrderManager.PlaceOrder(r.Context(), req)
 	if err != nil {
+		logger.Errorf("Order Placement Failed: %v | Request: %+v", err, req)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -227,4 +233,50 @@ type StartBacktestRequest struct {
 	Date        string   `json:"date"`
 	SpeedFactor float64  `json:"speed_factor"`
 	Stocks      []string `json:"stocks"`
+}
+
+// responseWriter is a wrapper to capture the status code
+type responseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.statusCode = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	h, ok := rw.ResponseWriter.(http.Hijacker)
+	if !ok {
+		return nil, nil, errors.New("webserver does not support hijacking")
+	}
+	return h.Hijack()
+}
+
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func LoggingMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+
+		// Initialize with 200 as default
+		wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+		// Call the next handler
+		next.ServeHTTP(wrappedWriter, r)
+
+		// Log the results using your structured logger
+		duration := time.Since(start)
+		logger.Infof("%s %s | Status: %d | Duration: %v",
+			r.Method,
+			r.URL.Path,
+			wrappedWriter.statusCode,
+			duration,
+		)
+	})
 }

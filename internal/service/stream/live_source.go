@@ -85,9 +85,13 @@ func (l *LiveTickSource) Connect(ctx context.Context) error {
 	l.ticker.OnReconnect(l.onReconnect)
 	l.ticker.OnNoReconnect(l.onNoReconnect)
 
-	// Updated: Convert Kite order to internal model for rich UI updates
 	l.ticker.OnOrderUpdate(func(o kiteconnect.Order) {
-		logger.Infof("[Kite] Order Update: %s -> %s (Filled: %d)", o.OrderID, o.Status, o.FilledQuantity)
+		logger.Infof("[Kite] Order Update: %s -> %s", o.OrderID, o.Status)
+
+		// Logic from your OMS Spec:
+		// This should call your OrderManager to reconcile the position
+		// and then the OrderManager will use the Hub to broadcast to the UI.
+		// pm.HandleOrderUpdate(o)
 	})
 
 	logger.Info("Kite Ticker initialized successfully")

@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/order"
 	"gidh-backend/internal/service/writer"
 	"gidh-backend/internal/service/ws"
 	"math"
@@ -35,12 +36,14 @@ type BarBuilderStage struct {
 	mu          sync.RWMutex
 	writer      *writer.DBWriter
 	wsHub       *ws.Hub
+	orderMgr    order.PositionManager
 }
 
 func NewBarBuilderStage(
 	w *writer.DBWriter,
 	advMap map[uint32]float64,
 	hub *ws.Hub,
+	orderMgr order.PositionManager,
 	onAlert func(models.PlayableAlert),
 ) *BarBuilderStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
@@ -57,6 +60,7 @@ func NewBarBuilderStage(
 		onAlert:     onAlert,
 		writer:      w,
 		wsHub:       hub,
+		orderMgr:    orderMgr,
 	}
 }
 
@@ -300,6 +304,25 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	// Below-average volume should mean 0 energy, not negative energy.
 	volumeZ = math.Max(0, volumeZ)
 	rangeZ = math.Max(0, rangeZ)
+
+	// -------------------------
+	// REAL-TIME UNREALIZED PNL CALCULATION
+	// -------------------------
+	// Pull current position for this stock (assuming "MIS" product for intraday)
+	if pos, exists := s.orderMgr.GetPosition(name, "MIS"); exists && pos.NetQuantity != 0 {
+		// - Using NetQuantity and AveragePrice from Position model
+		if pos.Side == "LONG" {
+			b1.UnrealizedPnL = (price - pos.AveragePrice) * float64(pos.NetQuantity)
+		} else {
+			// (AveragePrice - CurrentPrice) * Quantity for Shorts
+			b1.UnrealizedPnL = (pos.AveragePrice - price) * float64(pos.NetQuantity)
+		}
+		b5.UnrealizedPnL = b1.UnrealizedPnL
+	} else {
+		// Reset to 0 if no active position
+		b1.UnrealizedPnL = 0
+		b5.UnrealizedPnL = 0
+	}
 
 	// -------------------------
 	// 6. DISTRIBUTE ENERGY TO BUCKETS (The Ratio Method)
