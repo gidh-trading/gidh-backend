@@ -53,9 +53,9 @@ func NewApp(cfg *config.Config) (*App, error) {
 		return nil, err
 	}
 
-	app.initOrderManager()
-
 	app.initWebServer()
+
+	app.initOrderManager()
 
 	// If live, we load everything and start immediately.
 	// If backtest, we wait for the API call.

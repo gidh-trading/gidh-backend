@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"gidh-backend/internal/service/ws"
-	"gidh-backend/pkg/logger"
 	"strings"
 	"sync"
 	"time"
@@ -65,34 +64,36 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 
 // OnPriceUpdate is the high-frequency hook for the global stream.
 // It recalculates PnL for active positions when a new price arrives.
+// internal/service/order/paper_manager.go
+
 func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// Check for MIS and CNC positions for this symbol
 	for _, product := range []string{"MIS", "CNC"} {
 		key := fmt.Sprintf("%s:%s", strings.ToUpper(symbol), strings.ToUpper(product))
 		pos, exists := pm.activePositions[key]
-		for symbol, pos := range pm.activePositions {
-			logger.Infof("  %s: %+v", symbol, pos)
-		}
 
 		if exists && pos.NetQuantity != 0 {
-			// Calculate Unrealized PnL
+			// 1. Calculate PnL
 			if pos.Side == "LONG" {
 				pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 			} else {
 				pos.UnrealizedPnL = (pos.AveragePrice - ltp) * float64(pos.NetQuantity)
 			}
 
-			// Broadcast the Position Update with live PnL
+			// 2. Broadcast (This will now work because pm.wsHub is no longer nil)
 			if pm.wsHub != nil {
-
-				logger.Infof("Broadcasting:")
-				pm.wsHub.BroadcastJSON("global:trading", map[string]any{
+				payload := map[string]any{
 					"type": "position_update",
 					"data": pos,
-				})
+				}
+
+				// Broadcast to the global trading channel
+				pm.wsHub.BroadcastJSON("global:trading", payload)
+
+				// Optional: Also broadcast to the specific stock channel so the UI chart updates
+				pm.wsHub.BroadcastJSON(strings.ToUpper(symbol)+":1m", payload)
 			}
 		}
 	}
