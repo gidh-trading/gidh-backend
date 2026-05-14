@@ -34,8 +34,6 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 
 	orderID := fmt.Sprintf("PPR-%d", time.Now().UnixNano())
 
-	logger.Infof("Request: %+v", req)
-
 	entry := models.OrderBookEntry{
 		OrderID:   orderID,
 		Symbol:    req.Symbol,
@@ -57,7 +55,7 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 	// ADD THIS: Broadcast the order update immediately
 	if pm.wsHub != nil {
 		pm.wsHub.BroadcastJSON("global:trading", map[string]any{
-			"type": "order_update",
+			"type": "position_update",
 			"data": entry,
 		})
 	}
@@ -89,6 +87,8 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 
 			// Broadcast the Position Update with live PnL
 			if pm.wsHub != nil {
+
+				logger.Infof("Broadcasting:")
 				pm.wsHub.BroadcastJSON("global:trading", map[string]any{
 					"type": "position_update",
 					"data": pos,
