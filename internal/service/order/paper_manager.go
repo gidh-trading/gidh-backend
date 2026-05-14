@@ -214,3 +214,14 @@ func (pm *PaperPositionManager) GetOrders(symbol string) []models.OrderBookEntry
 	}
 	return filtered
 }
+
+func (pm *PaperPositionManager) GetAllPositions() []models.Position {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	var list []models.Position
+	for _, pos := range pm.activePositions {
+		list = append(list, *pos)
+	}
+	return list
+}
