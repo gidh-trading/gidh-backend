@@ -46,6 +46,7 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
 	mux.HandleFunc("/api/alerts/", a.handleGetAlerts)
 
+	mux.HandleFunc("/api/positions", a.handleGetPositions)
 	mux.HandleFunc("/api/orders/place", a.handleOrderPlace)
 
 	handlerWithLogging := LoggingMiddleware(mux)
@@ -227,6 +228,26 @@ func (a *App) handleOrderPlace(w http.ResponseWriter, r *http.Request) {
 	}
 
 	json.NewEncoder(w).Encode(map[string]string{"order_id": id, "status": "success"})
+}
+
+// Add the handler implementation:
+func (a *App) handleGetPositions(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+
+	// 1. Fetch positions from the manager
+	positions := a.OrderManager.GetAllPositions()
+
+	// 2. Wrap in the 'data' field to match your UI's expectation
+	response := map[string]interface{}{
+		"status": "success",
+		"data":   positions,
+	}
+
+	// 3. Send response
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		logger.Errorf("Failed to encode positions: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
 }
 
 type StartBacktestRequest struct {

@@ -219,9 +219,9 @@ func (pm *PaperPositionManager) GetAllPositions() []models.Position {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
 
-	var list []models.Position
+	positions := make([]models.Position, 0, len(pm.activePositions))
 	for _, pos := range pm.activePositions {
-		list = append(list, *pos)
+		positions = append(positions, *pos)
 	}
-	return list
+	return positions
 }
