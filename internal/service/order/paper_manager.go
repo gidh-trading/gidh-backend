@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"gidh-backend/internal/service/models"
-	"gidh-backend/pkg/logger"
 )
 
 type PaperPositionManager struct {
@@ -31,10 +30,8 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	// 1. Generate a unique ID for this paper order
 	orderID := fmt.Sprintf("PPR-%d", time.Now().UnixNano())
 
-	// 2. Create the Order Book Entry
 	entry := models.OrderBookEntry{
 		OrderID:   orderID,
 		Symbol:    req.Symbol,
@@ -45,20 +42,62 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 		Timestamp: time.Now(),
 	}
 
-	// 3. For Paper MARKET orders, we simulate an immediate fill at the requested price
-	// In a real scenario, this would wait for a tick, but for the UI journey,
-	// we want immediate feedback.
 	if req.OrderType == "MARKET" {
 		entry.Status = "COMPLETE"
 		entry.FilledQty = req.Quantity
 		pm.updatePositionState(req, req.Price)
-		logger.Infof("[Paper] Market Order Filled: %s %d %s @ %.2f", req.Symbol, req.Quantity, req.TransactionType, req.Price)
-	} else {
-		logger.Infof("[Paper] Limit Order Placed: %s %d %s @ %.2f", req.Symbol, req.Quantity, req.TransactionType, req.Price)
 	}
 
 	pm.orderBook = append(pm.orderBook, entry)
+
+	// ADD THIS: Broadcast the order update immediately
+	if pm.wsHub != nil {
+		pm.wsHub.BroadcastJSON("global:trading", map[string]any{
+			"type": "order_update",
+			"data": entry,
+		})
+	}
+
 	return orderID, nil
+}
+
+// OnPriceUpdate is the high-frequency hook for the global stream.
+// It recalculates PnL for active positions when a new price arrives.
+func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	// Check for MIS and CNC positions for this symbol
+	for _, product := range []string{"MIS", "CNC"} {
+		key := fmt.Sprintf("%s:%s", symbol, product)
+		pos, exists := pm.activePositions[key]
+
+		if exists && pos.NetQuantity != 0 {
+			// Calculate Unrealized PnL
+			if pos.Side == "LONG" {
+				pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
+			} else {
+				pos.UnrealizedPnL = (pos.AveragePrice - ltp) * float64(pos.NetQuantity)
+			}
+
+			// Broadcast the Position Update with live PnL
+			if pm.wsHub != nil {
+				pm.wsHub.BroadcastJSON("global:trading", map[string]any{
+					"type": "position_update",
+					"data": pos,
+				})
+			}
+		}
+	}
+}
+
+func (pm *PaperPositionManager) GetPosition(symbol string, product string) (*models.Position, bool) {
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+
+	key := fmt.Sprintf("%s:%s", symbol, product)
+	pos, exists := pm.activePositions[key]
+	return pos, exists
 }
 
 // updatePositionState handles the "Position" side of the Golden Rule:
@@ -100,13 +139,4 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		})
 	}
 
-}
-
-func (pm *PaperPositionManager) GetPosition(symbol string, product string) (*models.Position, bool) {
-	pm.mu.RLock()
-	defer pm.mu.RUnlock()
-
-	key := fmt.Sprintf("%s:%s", symbol, product)
-	pos, exists := pm.activePositions[key]
-	return pos, exists
 }

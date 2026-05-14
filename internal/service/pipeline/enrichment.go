@@ -2,27 +2,30 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/order"
 	"sync"
 	"time"
 )
 
 type EnrichmentStage struct {
-	dnaMap        map[uint32]*models.MarketDNA
-	lastVolumeMap map[uint32]int64
-	lastPriceMap  map[uint32]float64
+	dnaMap          map[uint32]*models.MarketDNA
+	lastVolumeMap   map[uint32]int64
+	lastPriceMap    map[uint32]float64
+	positionManager order.PositionManager
 
 	loc *time.Location
 	mu  sync.RWMutex
 }
 
-func NewEnrichmentStage(dnaMap map[uint32]*models.MarketDNA) *EnrichmentStage {
+func NewEnrichmentStage(dnaMap map[uint32]*models.MarketDNA, pm order.PositionManager) *EnrichmentStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &EnrichmentStage{
-		dnaMap:        dnaMap,
-		lastVolumeMap: make(map[uint32]int64),
-		lastPriceMap:  make(map[uint32]float64),
-		loc:           loc,
+		dnaMap:          dnaMap,
+		lastVolumeMap:   make(map[uint32]int64),
+		lastPriceMap:    make(map[uint32]float64),
+		loc:             loc,
+		positionManager: pm,
 	}
 }
 
@@ -43,6 +46,14 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	// Skip dead updates
 	if tick.TickVolume == 0 && tick.Raw.LastPrice == s.lastPriceMap[token] {
 		return nil
+	}
+
+	priceChanged := tick.Raw.LastPrice != s.lastPriceMap[token]
+
+	if priceChanged && s.positionManager != nil {
+		if pm, ok := s.positionManager.(*order.PaperPositionManager); ok {
+			pm.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice)
+		}
 	}
 
 	s.lastPriceMap[token] = tick.Raw.LastPrice
