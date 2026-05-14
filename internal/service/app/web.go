@@ -49,6 +49,14 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/positions", a.handleGetPositions)
 	mux.HandleFunc("/api/orders/place", a.handleOrderPlace)
 
+	// Order Management Routes
+	mux.HandleFunc("/api/orders/modify", a.handleOrderModify)
+	mux.HandleFunc("/api/orders/cancel", a.handleOrderCancel)
+
+	// Position Management Routes
+	mux.HandleFunc("/api/positions/metadata", a.handlePositionMetadata)
+	mux.HandleFunc("/api/positions/exit", a.handlePositionExit)
+
 	handlerWithLogging := LoggingMiddleware(mux)
 
 	a.server = &http.Server{
@@ -254,10 +262,125 @@ func (a *App) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handlePositionMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPut {
+		return
+	}
+	var req struct {
+		Symbol  string  `json:"symbol"`
+		Product string  `json:"product"`
+		TP      float64 `json:"target_price"`
+		SL      float64 `json:"stop_loss_price"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	err := a.OrderManager.UpdatePositionMetadata(req.Symbol, req.Product, req.TP, req.SL)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	w.WriteHeader(200)
+}
+
+func (a *App) handlePositionExit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		return
+	}
+	var req struct {
+		Symbol  string `json:"symbol"`
+		Product string `json:"product"`
+		Qty     int    `json:"quantity"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+	err := a.OrderManager.ExitPosition(r.Context(), req.Symbol, req.Product, req.Qty)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+		return
+	}
+	w.WriteHeader(200)
+}
+
+func (a *App) handleOrderModify(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req ModifyOrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.OrderID == "" {
+		http.Error(w, "order_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Call the modified OrderManager interface method
+	err := a.OrderManager.ModifyOrder(req.OrderID, req.Price, req.TargetPrice, req.StopLossPrice)
+	if err != nil {
+		logger.Errorf("Order Modification Failed: %v | OrderID: %s", err, req.OrderID)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":   "success",
+		"message":  "Order modified successfully",
+		"order_id": req.OrderID,
+	})
+}
+
+// handleOrderCancel processes requests to move a pending order to a CANCELLED state.
+func (a *App) handleOrderCancel(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req CancelOrderRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if req.OrderID == "" {
+		http.Error(w, "order_id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Call the OrderManager to cancel the pending order
+	err := a.OrderManager.CancelOrder(req.OrderID)
+	if err != nil {
+		logger.Errorf("Order Cancellation Failed: %v | OrderID: %s", err, req.OrderID)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":   "success",
+		"message":  "Order cancelled successfully",
+		"order_id": req.OrderID,
+	})
+}
+
 type StartBacktestRequest struct {
 	Date        string   `json:"date"`
 	SpeedFactor float64  `json:"speed_factor"`
 	Stocks      []string `json:"stocks"`
+}
+
+type ModifyOrderRequest struct {
+	OrderID       string  `json:"order_id"`
+	Price         float64 `json:"price"`
+	TargetPrice   float64 `json:"target_price"`
+	StopLossPrice float64 `json:"stop_loss_price"`
+}
+
+type CancelOrderRequest struct {
+	OrderID string `json:"order_id"`
 }
 
 // responseWriter is a wrapper to capture the status code
