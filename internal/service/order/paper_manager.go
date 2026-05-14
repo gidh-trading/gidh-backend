@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"gidh-backend/internal/service/ws"
+	"gidh-backend/pkg/logger"
+	"strings"
 	"sync"
 	"time"
 
@@ -69,8 +71,11 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 
 	// Check for MIS and CNC positions for this symbol
 	for _, product := range []string{"MIS", "CNC"} {
-		key := fmt.Sprintf("%s:%s", symbol, product)
+		key := fmt.Sprintf("%s:%s", strings.ToUpper(symbol), strings.ToUpper(product))
 		pos, exists := pm.activePositions[key]
+		for symbol, pos := range pm.activePositions {
+			logger.Infof("  %s: %+v", symbol, pos)
+		}
 
 		if exists && pos.NetQuantity != 0 {
 			// Calculate Unrealized PnL
@@ -103,7 +108,7 @@ func (pm *PaperPositionManager) GetPosition(symbol string, product string) (*mod
 // updatePositionState handles the "Position" side of the Golden Rule:
 // Orders only update the Net Position.
 func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fillPrice float64) {
-	key := fmt.Sprintf("%s:%s", req.Symbol, req.Product)
+	key := fmt.Sprintf("%s:%s", strings.ToUpper(req.Symbol), strings.ToUpper(req.Product))
 	pos, exists := pm.activePositions[key]
 
 	if !exists {
