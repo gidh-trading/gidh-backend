@@ -220,7 +220,9 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 	key := fmt.Sprintf("%s:%s", strings.ToUpper(req.Symbol), strings.ToUpper(req.Product))
 	pos, exists := pm.activePositions[key]
 
+	// 1. Initialize or Re-initialize Risk Levels
 	if !exists {
+		// New position object for the session
 		pos = &models.Position{
 			Symbol:        req.Symbol,
 			Product:       req.Product,
@@ -228,37 +230,45 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 			StopLossPrice: req.StopLossPrice,
 		}
 		pm.activePositions[key] = pos
+	} else if pos.NetQuantity == 0 {
+		// Re-opening a flat position: Apply new risk levels from the current request
+		pos.TargetPrice = req.TargetPrice
+		pos.StopLossPrice = req.StopLossPrice
 	}
 
 	qty := req.Quantity
 	isBuy := strings.ToUpper(req.TransactionType) == "BUY"
 
-	// Determine if we are increasing or decreasing the position
-	// Long increase: Buy when NetQty >= 0
-	// Short increase: Sell when NetQty <= 0
+	// Determine if we are increasing or decreasing the current risk
+	// Long increase: Buy when NetQty >= 0 | Short increase: Sell when NetQty <= 0
 	isIncreasing := (isBuy && pos.NetQuantity >= 0) || (!isBuy && pos.NetQuantity <= 0)
 
 	if isIncreasing {
-		// Calculate new Average Price (standard weighted average)
-		totalCost := (pos.AveragePrice * math.Abs(float64(pos.NetQuantity))) + (fillPrice * float64(qty))
+		// Weighted Average Price Update: Only happens when adding to the position
+		currentAbsQty := math.Abs(float64(pos.NetQuantity))
+		totalCost := (pos.AveragePrice * currentAbsQty) + (fillPrice * float64(qty))
+
 		if isBuy {
 			pos.NetQuantity += qty
 		} else {
 			pos.NetQuantity -= qty
 		}
+
+		// New average price based on the new absolute total quantity
 		pos.AveragePrice = totalCost / math.Abs(float64(pos.NetQuantity))
 	} else {
-		// We are reducing or flipping the position
+		// Reducing or Flipping the position: Calculate Realized PnL
 		closedQty := qty
+		// If the order is larger than the current position, only the current position amount is "closed"
 		if qty > int(math.Abs(float64(pos.NetQuantity))) {
 			closedQty = int(math.Abs(float64(pos.NetQuantity)))
 		}
 
-		// Calculate Realized PnL for the closed portion
 		var tradePnL float64
 		if pos.Side == "LONG" {
 			tradePnL = (fillPrice - pos.AveragePrice) * float64(closedQty)
 		} else {
+			// For Shorts: profit = entry - exit
 			tradePnL = (pos.AveragePrice - fillPrice) * float64(closedQty)
 		}
 		pos.RealizedPnL += tradePnL
@@ -270,16 +280,22 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 			pos.NetQuantity -= qty
 		}
 
-		// If we flipped the position (e.g., from Long to Short), reset Average Price
+		// Handle Flipping: If we went from Long to Short (or vice versa), reset average price to the fill price
 		if (isBuy && pos.NetQuantity > 0) || (!isBuy && pos.NetQuantity < 0) {
 			pos.AveragePrice = fillPrice
+			// Inherit risk levels for the new flipped side if provided in request
+			pos.TargetPrice = req.TargetPrice
+			pos.StopLossPrice = req.StopLossPrice
 		} else if pos.NetQuantity == 0 {
+			// Fully Flat: Reset trade-specific metrics and clear risk levels
 			pos.AveragePrice = 0
 			pos.UnrealizedPnL = 0
+			pos.TargetPrice = 0
+			pos.StopLossPrice = 0
 		}
 	}
 
-	// Update Side string
+	// 2. Update Side String
 	if pos.NetQuantity > 0 {
 		pos.Side = "LONG"
 	} else if pos.NetQuantity < 0 {
@@ -288,6 +304,7 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		pos.Side = ""
 	}
 
+	// 3. Broadcast the updated state to UI
 	pm.broadcastPositionUpdate(pos)
 }
 
