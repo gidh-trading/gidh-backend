@@ -263,7 +263,7 @@ func (a *App) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePositionMetadata(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPut {
+	if r.Method != http.MethodPost {
 		return
 	}
 	var req struct {
