@@ -18,6 +18,7 @@ import (
 	"gidh-backend/pkg/logger"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
 type App struct {
@@ -26,6 +27,7 @@ type App struct {
 	Pipeline       *Pipeline
 	DBWriter       *writer.DBWriter
 	OrderManager   order.PositionManager
+	kiteClient     *kiteconnect.Client
 	server         *http.Server
 	wsHub          *ws.Hub
 	pool           *pgxpool.Pool
@@ -48,6 +50,8 @@ func NewApp(cfg *config.Config) (*App, error) {
 		nameToToken: make(map[string]uint32),
 		topPlayable: make(map[uint32]models.PlayableAlert),
 	}
+
+	app.initKiteClient()
 
 	if err := app.initDatabase(ctx); err != nil {
 		return nil, err
@@ -183,6 +187,14 @@ func (a *App) initStreamManager() error {
 	a.StreamManager = stream.NewStreamManager(source, a.Pipeline)
 	a.activeManager = a.StreamManager
 	return nil
+}
+
+func (a *App) initKiteClient() {
+	if a.Config.KiteAPIKey != "" {
+		a.kiteClient = kiteconnect.New(a.Config.KiteAPIKey)
+		a.kiteClient.SetAccessToken(a.Config.KiteAccessToken)
+		logger.Info("Kite Connect client initialized")
+	}
 }
 
 func (a *App) Start(ctx context.Context) error {
