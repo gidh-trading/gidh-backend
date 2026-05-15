@@ -39,4 +39,9 @@ type Position struct {
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
 	TargetPrice   float64 `json:"target_price"`
 	StopLossPrice float64 `json:"stop_loss_price"`
+
+	// Live Exchange IDs
+	TargetOrderID   string `json:"-"` // Kite Order ID for the Limit exit
+	StopLossOrderID string `json:"-"` // Kite Order ID for the SL-M exit
+	LastFillQty     int    `json:"-"` // Tracks cumulative fill for partial fill logic
 }

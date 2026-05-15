@@ -3,6 +3,7 @@ package stream
 import (
 	"context"
 	"fmt"
+	"gidh-backend/internal/service/order"
 	"sync"
 	"time"
 
@@ -34,6 +35,7 @@ type LiveSourceConfig struct {
 	InstrumentMap       map[uint32]string // Token to stock name mapping
 	ReconnectMaxRetries int
 	ReconnectInterval   int // in seconds
+	OrderManager        order.PositionManager
 }
 
 // NewLiveSource creates a new Kite Connect WebSocket source
@@ -87,11 +89,12 @@ func (l *LiveTickSource) Connect(ctx context.Context) error {
 
 	l.ticker.OnOrderUpdate(func(o kiteconnect.Order) {
 		logger.Infof("[Kite] Order Update: %s -> %s", o.OrderID, o.Status)
-
-		// Logic from your OMS Spec:
-		// This should call your OrderManager to reconcile the position
-		// and then the OrderManager will use the Hub to broadcast to the UI.
-		// pm.HandleOrderUpdate(o)
+		if l.config.OrderManager != nil {
+			// Cast to handle live-specific logic if necessary
+			if lm, ok := l.config.OrderManager.(*order.LivePositionManager); ok {
+				lm.HandleOrderUpdate(o)
+			}
+		}
 	})
 
 	logger.Info("Kite Ticker initialized successfully")

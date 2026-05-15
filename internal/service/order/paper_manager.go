@@ -337,7 +337,6 @@ func (pm *PaperPositionManager) broadcastPositionUpdate(pos *models.Position) {
 	if pm.wsHub != nil {
 		payload := map[string]any{"type": "position_update", "data": pos}
 		pm.wsHub.BroadcastJSON("global:trading", payload)
-		pm.wsHub.BroadcastJSON(strings.ToUpper(pos.Symbol)+":1m", payload)
 	}
 }
 
