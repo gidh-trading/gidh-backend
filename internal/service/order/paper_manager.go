@@ -107,12 +107,8 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 		pos, exists := pm.activePositions[key]
 
 		if exists && pos.NetQuantity != 0 {
-			// Update PnL
-			if pos.Side == "LONG" {
-				pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
-			} else {
-				pos.UnrealizedPnL = (pos.AveragePrice - ltp) * float64(pos.NetQuantity)
-			}
+
+			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 
 			// Check auto-exit triggers (The Management Logic)
 			isTargetHit := (pos.Side == "LONG" && pos.TargetPrice > 0 && ltp >= pos.TargetPrice) ||
@@ -234,32 +230,62 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		pm.activePositions[key] = pos
 	}
 
-	if req.TransactionType == "BUY" {
-		totalCost := (pos.AveragePrice * float64(pos.NetQuantity)) + (fillPrice * float64(req.Quantity))
-		pos.NetQuantity += req.Quantity
-		if pos.NetQuantity != 0 {
-			pos.AveragePrice = math.Abs(totalCost / float64(pos.NetQuantity))
+	qty := req.Quantity
+	isBuy := strings.ToUpper(req.TransactionType) == "BUY"
+
+	// Determine if we are increasing or decreasing the position
+	// Long increase: Buy when NetQty >= 0
+	// Short increase: Sell when NetQty <= 0
+	isIncreasing := (isBuy && pos.NetQuantity >= 0) || (!isBuy && pos.NetQuantity <= 0)
+
+	if isIncreasing {
+		// Calculate new Average Price (standard weighted average)
+		totalCost := (pos.AveragePrice * math.Abs(float64(pos.NetQuantity))) + (fillPrice * float64(qty))
+		if isBuy {
+			pos.NetQuantity += qty
+		} else {
+			pos.NetQuantity -= qty
 		}
+		pos.AveragePrice = totalCost / math.Abs(float64(pos.NetQuantity))
 	} else {
-		totalValue := (pos.AveragePrice * float64(pos.NetQuantity)) - (fillPrice * float64(req.Quantity))
-		pos.NetQuantity -= req.Quantity
-		if pos.NetQuantity != 0 {
-			pos.AveragePrice = math.Abs(totalValue / float64(pos.NetQuantity))
+		// We are reducing or flipping the position
+		closedQty := qty
+		if qty > int(math.Abs(float64(pos.NetQuantity))) {
+			closedQty = int(math.Abs(float64(pos.NetQuantity)))
+		}
+
+		// Calculate Realized PnL for the closed portion
+		var tradePnL float64
+		if pos.Side == "LONG" {
+			tradePnL = (fillPrice - pos.AveragePrice) * float64(closedQty)
+		} else {
+			tradePnL = (pos.AveragePrice - fillPrice) * float64(closedQty)
+		}
+		pos.RealizedPnL += tradePnL
+
+		// Update Net Quantity
+		if isBuy {
+			pos.NetQuantity += qty
+		} else {
+			pos.NetQuantity -= qty
+		}
+
+		// If we flipped the position (e.g., from Long to Short), reset Average Price
+		if (isBuy && pos.NetQuantity > 0) || (!isBuy && pos.NetQuantity < 0) {
+			pos.AveragePrice = fillPrice
+		} else if pos.NetQuantity == 0 {
+			pos.AveragePrice = 0
+			pos.UnrealizedPnL = 0
 		}
 	}
 
-	// Update Side and Clean Up Rule
+	// Update Side string
 	if pos.NetQuantity > 0 {
 		pos.Side = "LONG"
 	} else if pos.NetQuantity < 0 {
 		pos.Side = "SHORT"
 	} else {
-		// Clean Up: If flat, clear risk levels and average price
 		pos.Side = ""
-		pos.AveragePrice = 0
-		pos.TargetPrice = 0
-		pos.StopLossPrice = 0
-		pos.UnrealizedPnL = 0
 	}
 
 	pm.broadcastPositionUpdate(pos)
