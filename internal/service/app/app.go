@@ -111,7 +111,7 @@ func (a *App) initDatabase(ctx context.Context) error {
 
 func (a *App) initOrderManager() {
 	if a.Config.Mode == "live" {
-		// TODO: add live manager here
+		a.OrderManager = order.NewLiveOrderManager(a.kiteClient, a.wsHub, a.DBWriter)
 	} else {
 		a.OrderManager = order.NewPaperPositionManager(a.wsHub, a.DBWriter)
 	}

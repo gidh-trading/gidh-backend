@@ -90,10 +90,13 @@ func (l *LiveTickSource) Connect(ctx context.Context) error {
 	l.ticker.OnOrderUpdate(func(o kiteconnect.Order) {
 		logger.Infof("[Kite] Order Update: %s -> %s", o.OrderID, o.Status)
 
-		// Logic from your OMS Spec:
-		// This should call your OrderManager to reconcile the position
-		// and then the OrderManager will use the Hub to broadcast to the UI.
-		// pm.HandleOrderUpdate(o)
+		// Safely assert if the injected OrderManager supports live Kite order updates
+		// This prevents us from having to pollute the generic PositionManager interface with kiteconnect imports.
+		if liveMgr, ok := l.config.OrderManager.(interface{ HandleOrderUpdate(kiteconnect.Order) }); ok {
+			liveMgr.HandleOrderUpdate(o)
+		} else {
+			logger.Debug("[Kite] OrderManager does not support direct Kite updates (likely running in Paper mode)")
+		}
 	})
 
 	logger.Info("Kite Ticker initialized successfully")

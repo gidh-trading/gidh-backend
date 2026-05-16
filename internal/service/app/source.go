@@ -24,6 +24,7 @@ func (a *App) createLiveSource() (stream.TickDataSource, error) {
 		AccessToken:   config.AppConfig.KiteAccessToken,
 		InstrumentMap: a.tokenToName,
 		Instruments:   a.extractTokens(),
+		OrderManager:  a.OrderManager,
 	})
 }
 
