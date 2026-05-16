@@ -178,7 +178,7 @@ func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product st
 }
 
 // ModifyOrder updates a pending limit order price and mirrors to database
-func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, newTP float64, newSL float64) error {
+func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, newTP float64, newSL float64, userEmail string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -190,6 +190,7 @@ func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, ne
 			pm.orderBook[i].Price = newPrice
 			pm.orderBook[i].TargetPrice = newTP
 			pm.orderBook[i].StopLossPrice = newSL
+			pm.orderBook[i].UserEmail = userEmail
 
 			// FIX: Persist changes to DB
 			if pm.dbWriter != nil {
@@ -204,7 +205,7 @@ func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, ne
 }
 
 // CancelOrder changes order state to CANCELLED and mirrors to database
-func (pm *PaperPositionManager) CancelOrder(orderID string) error {
+func (pm *PaperPositionManager) CancelOrder(orderID string, userEmail string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -214,6 +215,7 @@ func (pm *PaperPositionManager) CancelOrder(orderID string) error {
 				return fmt.Errorf("order is already %s", pm.orderBook[i].Status)
 			}
 			pm.orderBook[i].Status = "CANCELLED"
+			pm.orderBook[i].UserEmail = userEmail
 
 			// FIX: Persist changes to DB
 			if pm.dbWriter != nil {
@@ -228,7 +230,7 @@ func (pm *PaperPositionManager) CancelOrder(orderID string) error {
 }
 
 // ExitPosition handles manual exits
-func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string, product string, quantity int) error {
+func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string, product string, quantity int, userEmail string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
@@ -264,7 +266,8 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 		FilledQty: quantity,
 		Price:     ltp,
 		Status:    "COMPLETE",
-		Timestamp: exitTime, // FIX
+		Timestamp: exitTime,
+		UserEmail: userEmail,
 	}
 
 	pm.orderBook = append(pm.orderBook, exitOrder)
@@ -382,6 +385,7 @@ func (pm *PaperPositionManager) executeMarketExit(pos *models.Position, price fl
 		Price:     price,
 		Status:    "COMPLETE",
 		Timestamp: executionTime,
+		UserEmail: "bot@gidh.tech",
 	}
 
 	pm.orderBook = append(pm.orderBook, exitOrder)

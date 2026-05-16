@@ -286,12 +286,13 @@ func (a *App) handlePositionExit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Symbol  string `json:"symbol"`
-		Product string `json:"product"`
-		Qty     int    `json:"quantity"`
+		Symbol    string `json:"symbol"`
+		Product   string `json:"product"`
+		Qty       int    `json:"quantity"`
+		UserEmail string `json:"user_email"`
 	}
 	json.NewDecoder(r.Body).Decode(&req)
-	err := a.OrderManager.ExitPosition(r.Context(), req.Symbol, req.Product, req.Qty)
+	err := a.OrderManager.ExitPosition(r.Context(), req.Symbol, req.Product, req.Qty, req.UserEmail)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -317,7 +318,7 @@ func (a *App) handleOrderModify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call the modified OrderManager interface method
-	err := a.OrderManager.ModifyOrder(req.OrderID, req.Price, req.TargetPrice, req.StopLossPrice)
+	err := a.OrderManager.ModifyOrder(req.OrderID, req.Price, req.TargetPrice, req.StopLossPrice, req.UserEmail)
 	if err != nil {
 		logger.Errorf("Order Modification Failed: %v | OrderID: %s", err, req.OrderID)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -351,7 +352,7 @@ func (a *App) handleOrderCancel(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Call the OrderManager to cancel the pending order
-	err := a.OrderManager.CancelOrder(req.OrderID)
+	err := a.OrderManager.CancelOrder(req.OrderID, req.UserEmail)
 	if err != nil {
 		logger.Errorf("Order Cancellation Failed: %v | OrderID: %s", err, req.OrderID)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -377,10 +378,12 @@ type ModifyOrderRequest struct {
 	Price         float64 `json:"price"`
 	TargetPrice   float64 `json:"target_price"`
 	StopLossPrice float64 `json:"stop_loss_price"`
+	UserEmail     string  `json:"user_email"`
 }
 
 type CancelOrderRequest struct {
-	OrderID string `json:"order_id"`
+	OrderID   string `json:"order_id"`
+	UserEmail string `json:"user_email"`
 }
 
 // responseWriter is a wrapper to capture the status code

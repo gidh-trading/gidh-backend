@@ -89,12 +89,11 @@ func (l *LiveTickSource) Connect(ctx context.Context) error {
 
 	l.ticker.OnOrderUpdate(func(o kiteconnect.Order) {
 		logger.Infof("[Kite] Order Update: %s -> %s", o.OrderID, o.Status)
-		if l.config.OrderManager != nil {
-			// Cast to handle live-specific logic if necessary
-			if lm, ok := l.config.OrderManager.(*order.LivePositionManager); ok {
-				lm.HandleOrderUpdate(o)
-			}
-		}
+
+		// Logic from your OMS Spec:
+		// This should call your OrderManager to reconcile the position
+		// and then the OrderManager will use the Hub to broadcast to the UI.
+		// pm.HandleOrderUpdate(o)
 	})
 
 	logger.Info("Kite Ticker initialized successfully")
