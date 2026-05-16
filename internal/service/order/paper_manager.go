@@ -91,19 +91,19 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 
 	symbolKey := strings.ToUpper(symbol)
 	pm.lastPrices[symbolKey] = ltp
-	pm.lastTimestamps[symbolKey] = ts // Track per stock timestamp
-	pm.currentSimTime = ts            // Sync global execution clock
+	pm.lastTimestamps[symbolKey] = ts
+	pm.currentSimTime = ts
 
-	// 1. Check Order Book for pending LIMIT orders
+	// 1. Check Order Book for pending LIMIT orders (Upgraded to handle case-insensitivity)
 	for i := range pm.orderBook {
 		order := &pm.orderBook[i]
-		if order.Status == "PENDING" && order.Symbol == symbol && order.OrderType == "LIMIT" {
+		if order.Status == "PENDING" && strings.ToUpper(order.Symbol) == symbolKey && order.OrderType == "LIMIT" {
 			shouldFill := (order.Side == "BUY" && ltp <= order.Price) || (order.Side == "SELL" && ltp >= order.Price)
 
 			if shouldFill {
 				order.Status = "COMPLETE"
 				order.FilledQty = order.Qty
-				order.Timestamp = ts // Update target order fill window to historical point
+				order.Timestamp = ts
 
 				if pm.dbWriter != nil {
 					pm.dbWriter.PersistOrder(*order)
@@ -139,7 +139,7 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 
 			if isTargetHit || isSLHit {
 				logger.Infof("[Paper] Exit Triggered for %s at %.2f", pos.Symbol, ltp)
-				pm.executeMarketExit(pos, ltp, ts) // FIX: Pass down the historical time
+				pm.executeMarketExit(pos, ltp, ts)
 			} else {
 				pm.broadcastPositionUpdate(pos)
 			}
@@ -152,28 +152,50 @@ func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product st
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	key := fmt.Sprintf("%s:%s", strings.ToUpper(symbol), strings.ToUpper(product))
+	symbolUpper := strings.ToUpper(symbol)
+	key := fmt.Sprintf("%s:%s", symbolUpper, strings.ToUpper(product))
 	pos, exists := pm.activePositions[key]
-	if !exists {
-		return fmt.Errorf("position not found for %s", key)
+
+	updatedAny := false
+
+	// 1. If the position is already active and open, update its targets directly
+	if exists && pos.NetQuantity != 0 {
+		pos.TargetPrice = tp
+		pos.StopLossPrice = sl
+		updatedAny = true
+
+		sessionTime := pm.lastTimestamps[symbolUpper]
+		if sessionTime.IsZero() {
+			sessionTime = pm.currentSimTime
+		}
+		if sessionTime.IsZero() {
+			sessionTime = time.Now()
+		}
+		if pm.dbWriter != nil {
+			pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
+		}
+		pm.broadcastPositionUpdate(pos)
 	}
 
-	pos.TargetPrice = tp
-	pos.StopLossPrice = sl
+	// 2. ALSO update any PENDING limit orders for this asset.
+	// This ensures that if the position hasn't filled yet, the configurations update safely.
+	for i := range pm.orderBook {
+		if pm.orderBook[i].Status == "PENDING" && strings.ToUpper(pm.orderBook[i].Symbol) == symbolUpper && pm.orderBook[i].OrderType == "LIMIT" {
+			pm.orderBook[i].TargetPrice = tp
+			pm.orderBook[i].StopLossPrice = sl
+			updatedAny = true
 
-	// Persist the updated target and stop-loss rules to the DB
-	sessionTime := pm.lastTimestamps[strings.ToUpper(symbol)]
-	if sessionTime.IsZero() {
-		sessionTime = pm.currentSimTime
-	}
-	if sessionTime.IsZero() {
-		sessionTime = time.Now()
-	}
-	if pm.dbWriter != nil {
-		pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
+			if pm.dbWriter != nil {
+				pm.dbWriter.PersistOrder(pm.orderBook[i])
+			}
+			pm.broadcastOrderUpdate(pm.orderBook[i])
+		}
 	}
 
-	pm.broadcastPositionUpdate(pos)
+	if !updatedAny {
+		return fmt.Errorf("no open position or pending limit orders found for %s", symbol)
+	}
+
 	return nil
 }
 
@@ -287,14 +309,13 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 	return nil
 }
 
-// Adjust updatePositionState signature to handle structural timestamp logic:
 func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fillPrice float64, sessionTime time.Time) {
 	key := fmt.Sprintf("%s:%s", strings.ToUpper(req.Symbol), strings.ToUpper(req.Product))
 	pos, exists := pm.activePositions[key]
 
 	if !exists {
 		pos = &models.Position{
-			Symbol:        req.Symbol,
+			Symbol:        strings.ToUpper(req.Symbol), // 👈 Forces uppercase for clean key tracking
 			Product:       req.Product,
 			TargetPrice:   req.TargetPrice,
 			StopLossPrice: req.StopLossPrice,
@@ -358,7 +379,6 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		pos.Side = ""
 	}
 
-	// FIX: Persist position changes to DB
 	if pm.dbWriter != nil {
 		pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
 	}

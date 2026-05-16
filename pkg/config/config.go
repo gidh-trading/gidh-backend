@@ -51,7 +51,7 @@ func Load() {
 		Port:                 activePort,
 		Mode:                 mode,
 		LogLevel:             getEnv("LOG_LEVEL", "info"),
-		BarIntervals:         getEnvSlice("BAR_INTERVALS", []string{"1m", "5m", "15m", "60m"}),
+		BarIntervals:         getEnvSlice("BAR_INTERVALS", []string{"1m", "3m", "5m"}),
 		KiteAPIKey:           getEnv("KITE_API_KEY", ""),
 		KiteAccessToken:      getEnv("KITE_ACCESS_TOKEN", ""),
 		LiveDBURL:            getEnv("LIVE_DB_URL", ""),
@@ -94,7 +94,7 @@ func (c *Config) OverrideMode(mode string) {
 	}
 }
 
-// Helper to read slices from ENV (e.g. BAR_INTERVALS=1m,5m,15m)
+// Helper to read slices from ENV (e.g. BAR_INTERVALS=1m,3m,5m)
 func getEnvSlice(key string, fallback []string) []string {
 	if value, exists := os.LookupEnv(key); exists {
 		return strings.Split(value, ",")

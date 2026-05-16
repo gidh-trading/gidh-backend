@@ -26,6 +26,7 @@ type BarBuilderStage struct {
 	loc         *time.Location
 	rolling     map[uint32]*RollingState
 	bar1m       map[uint32]*models.Bar
+	bar3m       map[uint32]*models.Bar
 	bar5m       map[uint32]*models.Bar
 	session     map[uint32]*SessionState
 	adv30dMap   map[uint32]float64
@@ -49,6 +50,7 @@ func NewBarBuilderStage(
 		loc:         loc,
 		rolling:     make(map[uint32]*RollingState),
 		bar1m:       make(map[uint32]*models.Bar),
+		bar3m:       make(map[uint32]*models.Bar),
 		bar5m:       make(map[uint32]*models.Bar),
 		session:     make(map[uint32]*SessionState),
 		adv30dMap:   advMap,
@@ -82,6 +84,9 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 	if s.bar1m[token] == nil {
 		s.bar1m[token] = newBar(ts, price, token, name, "1m")
+	}
+	if s.bar3m[token] == nil { // 👈 Initialized on fresh session discovery
+		s.bar3m[token] = newBar(ts, price, token, name, "3m")
 	}
 	if s.bar5m[token] == nil {
 		s.bar5m[token] = newBar(ts, price, token, name, "5m")
@@ -174,7 +179,33 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	// -------------------------
-	// 3. UPDATE 5M BAR
+	// 3. UPDATE 3M BAR (New Sequence Implementation)
+	// -------------------------
+	b3 := s.bar3m[token]
+	expected3mTs := ts.Truncate(3 * time.Minute)
+
+	if expected3mTs.After(b3.Timestamp) {
+		if s.writer != nil {
+			s.writer.AddBar(*b3)
+		}
+		s.bar3m[token] = newBar(ts, price, token, name, "3m")
+		b3 = s.bar3m[token]
+	}
+
+	if !expected3mTs.Before(b3.Timestamp) {
+		updateBar(b3, price, vol)
+		b3.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
+		b3.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
+		b3.VWAP = tick.Raw.AverageTradedPrice
+		if tick.VolProfile != nil {
+			b3.POC = tick.VolProfile.POC
+			b3.VAH = tick.VolProfile.VAH
+			b3.VAL = tick.VolProfile.VAL
+		}
+	}
+
+	// -------------------------
+	// 4. UPDATE 5M BAR
 	// -------------------------
 	b5 := s.bar5m[token]
 	expected5mTs := ts.Truncate(5 * time.Minute)
@@ -248,11 +279,17 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 		b1.BuyVolume += vol
 		b1.BuyRange += tickRange
 
+		b3.BuyVolume += vol // 👈 Accumulating 3m long attribution
+		b3.BuyRange += tickRange
+
 		b5.BuyVolume += vol
 		b5.BuyRange += tickRange
 	} else if dir < 0 {
 		b1.SellVolume += vol
 		b1.SellRange += tickRange
+
+		b3.SellVolume += vol // 👈 Accumulating 3m short attribution
+		b3.SellRange += tickRange
 
 		b5.SellVolume += vol
 		b5.SellRange += tickRange
@@ -309,6 +346,9 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 	b1.TotalVolEnergy = volumeZ
 	b1.TotalRngEnergy = rangeZ
 
+	b3.TotalVolEnergy = volumeZ // 👈 Compute absolute Energy state
+	b3.TotalRngEnergy = rangeZ
+
 	b5.TotalVolEnergy = volumeZ
 	b5.TotalRngEnergy = rangeZ
 
@@ -336,6 +376,20 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 			"type": "bar",
 			"data": b1,
 		})
+	}
+
+	// 3M Ratios (New Distribution + Live Broadcast Loop)
+	if b3.Volume > 0 {
+		b3.BuyVolEnergy = b3.TotalVolEnergy * (b3.BuyVolume / b3.Volume)
+		b3.SellVolEnergy = b3.TotalVolEnergy * (b3.SellVolume / b3.Volume)
+	}
+	totalRawRange3m := b3.BuyRange + b3.SellRange
+	if totalRawRange3m > 0 {
+		b3.BuyRngEnergy = b3.TotalRngEnergy * (b3.BuyRange / totalRawRange3m)
+		b3.SellRngEnergy = b3.TotalRngEnergy * (b3.SellRange / totalRawRange3m)
+	}
+	if s.wsHub != nil {
+		s.wsHub.BroadcastJSON(tick.Raw.StockName+":3m", map[string]any{"type": "bar", "data": b3})
 	}
 
 	// 5M BAR: Split total energy into Buy/Sell using 5m raw volume ratios
@@ -453,6 +507,7 @@ func (s *BarBuilderStage) ClearState() {
 
 	// Optional: Clear bars and rolling states if you want a total reset
 	s.bar1m = make(map[uint32]*models.Bar)
+	s.bar3m = make(map[uint32]*models.Bar) // 👈 Added to reset sequence
 	s.bar5m = make(map[uint32]*models.Bar)
 	s.rolling = make(map[uint32]*RollingState)
 }
