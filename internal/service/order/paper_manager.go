@@ -16,9 +16,11 @@ import (
 
 type PaperPositionManager struct {
 	mu              sync.RWMutex
-	activePositions map[string]*models.Position // Key: symbol:product
+	activePositions map[string]*models.Position
 	orderBook       []models.OrderBookEntry
-	lastPrices      map[string]float64 // Tracks latest LTP for Market Orders
+	lastPrices      map[string]float64
+	lastTimestamps  map[string]time.Time // NEW: Tracks latest historical timestamp per symbol
+	currentSimTime  time.Time            // NEW: Tracks global simulation milestone time
 	wsHub           *ws.Hub
 	dbWriter        *writer.DBWriter
 }
@@ -28,6 +30,7 @@ func NewPaperPositionManager(hub *ws.Hub, db *writer.DBWriter) *PaperPositionMan
 		activePositions: make(map[string]*models.Position),
 		orderBook:       make([]models.OrderBookEntry, 0),
 		lastPrices:      make(map[string]float64),
+		lastTimestamps:  make(map[string]time.Time), // NEW
 		wsHub:           hub,
 		dbWriter:        db,
 	}
@@ -40,6 +43,12 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 
 	orderID := fmt.Sprintf("PPR-%d", time.Now().UnixNano())
 
+	// FIX: Deduce simulation time context instead of system clock wall-time
+	orderTime := pm.currentSimTime
+	if orderTime.IsZero() {
+		orderTime = time.Now()
+	}
+
 	entry := models.OrderBookEntry{
 		OrderID:       orderID,
 		Symbol:        req.Symbol,
@@ -50,7 +59,7 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 		TargetPrice:   req.TargetPrice,
 		StopLossPrice: req.StopLossPrice,
 		Status:        "PENDING",
-		Timestamp:     time.Now(),
+		Timestamp:     orderTime, // FIX
 	}
 
 	if req.OrderType == "MARKET" {
@@ -72,16 +81,17 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 	}
 
 	pm.broadcastOrderUpdate(entry)
-
 	return orderID, nil
 }
 
-func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
+func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts time.Time) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	symbolKey := strings.ToUpper(symbol)
 	pm.lastPrices[symbolKey] = ltp
+	pm.lastTimestamps[symbolKey] = ts // Track per stock timestamp
+	pm.currentSimTime = ts            // Sync global execution clock
 
 	// 1. Check Order Book for pending LIMIT orders
 	for i := range pm.orderBook {
@@ -92,8 +102,8 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 			if shouldFill {
 				order.Status = "COMPLETE"
 				order.FilledQty = order.Qty
+				order.Timestamp = ts // Update target order fill window to historical point
 
-				// FIX: Persist filled limit order to DB
 				if pm.dbWriter != nil {
 					pm.dbWriter.PersistOrder(*order)
 				}
@@ -128,8 +138,7 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 
 			if isTargetHit || isSLHit {
 				logger.Infof("[Paper] Exit Triggered for %s at %.2f", pos.Symbol, ltp)
-				// Use time.Now() if live, or simulate based on tracking clock
-				pm.executeMarketExit(pos, ltp, time.Now())
+				pm.executeMarketExit(pos, ltp, ts) // FIX: Pass down the historical time
 			} else {
 				pm.broadcastPositionUpdate(pos)
 			}
@@ -204,7 +213,7 @@ func (pm *PaperPositionManager) CancelOrder(orderID string) error {
 	return fmt.Errorf("order not found")
 }
 
-// ExitPosition handles partial or full manual exits
+// ExitPosition handles manual exits
 func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string, product string, quantity int) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -220,15 +229,18 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 		return fmt.Errorf("market price unavailable")
 	}
 
-	// Determine direction of exit
 	side := "SELL"
 	if pos.Side == "SHORT" {
 		side = "BUY"
 	}
 
-	// Create an explicit exit tracking order for your new database records
-	exitTime := time.Now()
-	exitOrderID := fmt.Sprintf("PPR-MANUAL-EXIT-%d", exitTime.UnixNano())
+	// FIX: Dedure accurate backtest clock for manual exit placement logging
+	exitTime := pm.lastTimestamps[strings.ToUpper(symbol)]
+	if exitTime.IsZero() {
+		exitTime = pm.currentSimTime
+	}
+
+	exitOrderID := fmt.Sprintf("PPR-MANUAL-EXIT-%d", time.Now().UnixNano())
 	exitOrder := models.OrderBookEntry{
 		OrderID:   exitOrderID,
 		Symbol:    symbol,
@@ -238,7 +250,7 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 		FilledQty: quantity,
 		Price:     ltp,
 		Status:    "COMPLETE",
-		Timestamp: exitTime,
+		Timestamp: exitTime, // FIX
 	}
 
 	pm.orderBook = append(pm.orderBook, exitOrder)
@@ -248,7 +260,6 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 	}
 	pm.broadcastOrderUpdate(exitOrder)
 
-	// FIX: Added exitTime as the third argument
 	pm.updatePositionState(models.OrderRequest{
 		Symbol:          symbol,
 		Product:         product,
@@ -431,5 +442,7 @@ func (pm *PaperPositionManager) ClearPositions() {
 	pm.activePositions = make(map[string]*models.Position)
 	pm.orderBook = make([]models.OrderBookEntry, 0)
 	pm.lastPrices = make(map[string]float64)
+	pm.lastTimestamps = make(map[string]time.Time) // NEW: Reset timestamps on teardown
+	pm.currentSimTime = time.Time{}                // NEW: Reset simulation clock
 	logger.Info("Paper Position Manager state cleared.")
 }

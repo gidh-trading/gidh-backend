@@ -7,6 +7,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"time"
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/ws"
@@ -153,7 +154,7 @@ func (lm *LivePositionManager) HandleOrderUpdate(kOrder kiteconnect.Order) {
 	lm.broadcastPositionUpdate(pos)
 }
 
-func (lm *LivePositionManager) OnPriceUpdate(symbol string, ltp float64) {
+func (lm *LivePositionManager) OnPriceUpdate(symbol string, ltp float64, ts time.Time) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 

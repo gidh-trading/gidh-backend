@@ -51,7 +51,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	priceChanged := tick.Raw.LastPrice != s.lastPriceMap[token]
 
 	if priceChanged && s.positionManager != nil {
-		s.positionManager.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice)
+		s.positionManager.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice, tick.Raw.Timestamp)
 	}
 
 	s.lastPriceMap[token] = tick.Raw.LastPrice
