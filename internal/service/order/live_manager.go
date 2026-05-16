@@ -48,7 +48,7 @@ func (lm *LivePositionManager) PlaceOrder(ctx context.Context, req models.OrderR
 		OrderType:        req.OrderType,
 		Product:          req.Product,
 		Validity:         kiteconnect.ValidityDay,
-		MarketProtection: -1, // As requested for volatility protection
+		MarketProtection: -1,
 	}
 
 	// 2. Execute via Zerodha API

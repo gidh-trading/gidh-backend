@@ -13,6 +13,7 @@ type OrderRequest struct {
 	Price           float64 `json:"price,omitempty"`
 	TargetPrice     float64 `json:"target_price,omitempty"`
 	StopLossPrice   float64 `json:"stop_loss_price,omitempty"`
+	UserEmail       string  `json:"user_email,omitempty"`
 }
 
 // gidh-backend/internal/service/models/orders.go
@@ -28,7 +29,8 @@ type OrderBookEntry struct {
 	Status        string    `json:"status"`
 	Timestamp     time.Time `json:"timestamp"`
 	TargetPrice   float64   `json:"target_price,omitempty"`
-	StopLossPrice float64   `json:"stop_loss_price,omitempty"` // 🧠 Unified naming convention
+	StopLossPrice float64   `json:"stop_loss_price,omitempty"`
+	UserEmail     string    `json:"user_email,omitempty"`
 }
 
 type Position struct {

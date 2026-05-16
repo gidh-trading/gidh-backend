@@ -59,7 +59,8 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 		TargetPrice:   req.TargetPrice,
 		StopLossPrice: req.StopLossPrice,
 		Status:        "PENDING",
-		Timestamp:     orderTime, // FIX
+		Timestamp:     orderTime,
+		UserEmail:     req.UserEmail,
 	}
 
 	if req.OrderType == "MARKET" {

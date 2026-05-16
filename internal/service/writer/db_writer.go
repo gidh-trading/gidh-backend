@@ -149,22 +149,22 @@ func (w *DBWriter) PersistOrder(order models.OrderBookEntry) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// FIX: Use an independent $13 placeholder instead of re-using $10
 	query := `
 		INSERT INTO gidh_orders (
 			order_id, symbol, product, side, order_type, quantity, 
-			filled_qty, price, status, timestamp, target_price, sl_price, trading_date
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+			filled_qty, price, status, timestamp, target_price, sl_price, trading_date, user_email
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		ON CONFLICT (order_id) DO UPDATE SET
 			status = EXCLUDED.status,
 			filled_qty = EXCLUDED.filled_qty,
-			price = EXCLUDED.price;`
+			price = EXCLUDED.price,
+			user_email = EXCLUDED.user_email;`
 
-	// FIX: Pass order.Timestamp as the 13th argument (pgx maps time.Time to DATE natively)
+	// 🧠 Maps order.UserEmail directly to the 14th placeholder query argument ($14)
 	_, err := w.pool.Exec(ctx, query,
 		order.OrderID, order.Symbol, "MIS", order.Side, order.OrderType, order.Qty,
 		order.FilledQty, order.Price, order.Status, order.Timestamp,
-		order.TargetPrice, order.StopLossPrice, order.Timestamp)
+		order.TargetPrice, order.StopLossPrice, order.Timestamp, order.UserEmail)
 
 	if err != nil {
 		logger.Errorf("DB Error persisting order %s: %v", order.OrderID, err)
