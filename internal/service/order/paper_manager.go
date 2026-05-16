@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"fmt"
+	"gidh-backend/internal/service/writer"
 	"math"
 	"strings"
 	"sync"
@@ -19,14 +20,16 @@ type PaperPositionManager struct {
 	orderBook       []models.OrderBookEntry
 	lastPrices      map[string]float64 // Tracks latest LTP for Market Orders
 	wsHub           *ws.Hub
+	dbWriter        *writer.DBWriter
 }
 
-func NewPaperPositionManager(hub *ws.Hub) *PaperPositionManager {
+func NewPaperPositionManager(hub *ws.Hub, db *writer.DBWriter) *PaperPositionManager {
 	return &PaperPositionManager{
 		activePositions: make(map[string]*models.Position),
 		orderBook:       make([]models.OrderBookEntry, 0),
 		lastPrices:      make(map[string]float64),
 		wsHub:           hub,
+		dbWriter:        db,
 	}
 }
 
@@ -59,16 +62,20 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 		entry.Price = ltp
 		entry.Status = "COMPLETE"
 		entry.FilledQty = req.Quantity
-		pm.updatePositionState(req, ltp)
+		pm.updatePositionState(req, ltp, entry.Timestamp)
 	}
 
 	pm.orderBook = append(pm.orderBook, entry)
-	pm.broadcastOrderUpdate(entry) // Helper used here
+
+	if pm.dbWriter != nil {
+		pm.dbWriter.PersistOrder(entry)
+	}
+
+	pm.broadcastOrderUpdate(entry)
 
 	return orderID, nil
 }
 
-// OnPriceUpdate checks for LIMIT fills and TP/SL triggers
 func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -79,13 +86,17 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 	// 1. Check Order Book for pending LIMIT orders
 	for i := range pm.orderBook {
 		order := &pm.orderBook[i]
-
 		if order.Status == "PENDING" && order.Symbol == symbol && order.OrderType == "LIMIT" {
 			shouldFill := (order.Side == "BUY" && ltp <= order.Price) || (order.Side == "SELL" && ltp >= order.Price)
 
 			if shouldFill {
 				order.Status = "COMPLETE"
 				order.FilledQty = order.Qty
+
+				// FIX: Persist filled limit order to DB
+				if pm.dbWriter != nil {
+					pm.dbWriter.PersistOrder(*order)
+				}
 
 				req := models.OrderRequest{
 					Symbol:          order.Symbol,
@@ -95,7 +106,7 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 					TargetPrice:     order.TargetPrice,
 					StopLossPrice:   order.StopLossPrice,
 				}
-				pm.updatePositionState(req, order.Price)
+				pm.updatePositionState(req, order.Price, order.Timestamp)
 				pm.broadcastOrderUpdate(*order)
 			}
 		}
@@ -107,10 +118,8 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 		pos, exists := pm.activePositions[key]
 
 		if exists && pos.NetQuantity != 0 {
-
 			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 
-			// Check auto-exit triggers (The Management Logic)
 			isTargetHit := (pos.Side == "LONG" && pos.TargetPrice > 0 && ltp >= pos.TargetPrice) ||
 				(pos.Side == "SHORT" && pos.TargetPrice > 0 && ltp <= pos.TargetPrice)
 
@@ -119,7 +128,8 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64) {
 
 			if isTargetHit || isSLHit {
 				logger.Infof("[Paper] Exit Triggered for %s at %.2f", pos.Symbol, ltp)
-				pm.executeMarketExit(pos, ltp)
+				// Use time.Now() if live, or simulate based on tracking clock
+				pm.executeMarketExit(pos, ltp, time.Now())
 			} else {
 				pm.broadcastPositionUpdate(pos)
 			}
@@ -144,7 +154,7 @@ func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product st
 	return nil
 }
 
-// ModifyOrder updates a pending limit order price
+// ModifyOrder updates a pending limit order price and mirrors to database
 func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, newTP float64, newSL float64) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -157,6 +167,12 @@ func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, ne
 			pm.orderBook[i].Price = newPrice
 			pm.orderBook[i].TargetPrice = newTP
 			pm.orderBook[i].StopLossPrice = newSL
+
+			// FIX: Persist changes to DB
+			if pm.dbWriter != nil {
+				pm.dbWriter.PersistOrder(pm.orderBook[i])
+			}
+
 			pm.broadcastOrderUpdate(pm.orderBook[i])
 			return nil
 		}
@@ -164,7 +180,7 @@ func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, ne
 	return fmt.Errorf("order %s not found", orderID)
 }
 
-// CancelOrder moves an order to CANCELLED state
+// CancelOrder changes order state to CANCELLED and mirrors to database
 func (pm *PaperPositionManager) CancelOrder(orderID string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -175,6 +191,12 @@ func (pm *PaperPositionManager) CancelOrder(orderID string) error {
 				return fmt.Errorf("order is already %s", pm.orderBook[i].Status)
 			}
 			pm.orderBook[i].Status = "CANCELLED"
+
+			// FIX: Persist changes to DB
+			if pm.dbWriter != nil {
+				pm.dbWriter.PersistOrder(pm.orderBook[i])
+			}
+
 			pm.broadcastOrderUpdate(pm.orderBook[i])
 			return nil
 		}
@@ -204,25 +226,45 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 		side = "BUY"
 	}
 
+	// Create an explicit exit tracking order for your new database records
+	exitTime := time.Now()
+	exitOrderID := fmt.Sprintf("PPR-MANUAL-EXIT-%d", exitTime.UnixNano())
+	exitOrder := models.OrderBookEntry{
+		OrderID:   exitOrderID,
+		Symbol:    symbol,
+		Side:      side,
+		OrderType: "MARKET",
+		Qty:       quantity,
+		FilledQty: quantity,
+		Price:     ltp,
+		Status:    "COMPLETE",
+		Timestamp: exitTime,
+	}
+
+	pm.orderBook = append(pm.orderBook, exitOrder)
+
+	if pm.dbWriter != nil {
+		pm.dbWriter.PersistOrder(exitOrder)
+	}
+	pm.broadcastOrderUpdate(exitOrder)
+
+	// FIX: Added exitTime as the third argument
 	pm.updatePositionState(models.OrderRequest{
 		Symbol:          symbol,
 		Product:         product,
 		TransactionType: side,
 		Quantity:        quantity,
-	}, ltp)
+	}, ltp, exitTime)
 
 	return nil
 }
 
-// --- Internal Helpers ---
-
-func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fillPrice float64) {
+// Adjust updatePositionState signature to handle structural timestamp logic:
+func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fillPrice float64, sessionTime time.Time) {
 	key := fmt.Sprintf("%s:%s", strings.ToUpper(req.Symbol), strings.ToUpper(req.Product))
 	pos, exists := pm.activePositions[key]
 
-	// 1. Initialize or Re-initialize Risk Levels
 	if !exists {
-		// New position object for the session
 		pos = &models.Position{
 			Symbol:        req.Symbol,
 			Product:       req.Product,
@@ -231,35 +273,25 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		}
 		pm.activePositions[key] = pos
 	} else if pos.NetQuantity == 0 {
-		// Re-opening a flat position: Apply new risk levels from the current request
 		pos.TargetPrice = req.TargetPrice
 		pos.StopLossPrice = req.StopLossPrice
 	}
 
 	qty := req.Quantity
 	isBuy := strings.ToUpper(req.TransactionType) == "BUY"
-
-	// Determine if we are increasing or decreasing the current risk
-	// Long increase: Buy when NetQty >= 0 | Short increase: Sell when NetQty <= 0
 	isIncreasing := (isBuy && pos.NetQuantity >= 0) || (!isBuy && pos.NetQuantity <= 0)
 
 	if isIncreasing {
-		// Weighted Average Price Update: Only happens when adding to the position
 		currentAbsQty := math.Abs(float64(pos.NetQuantity))
 		totalCost := (pos.AveragePrice * currentAbsQty) + (fillPrice * float64(qty))
-
 		if isBuy {
 			pos.NetQuantity += qty
 		} else {
 			pos.NetQuantity -= qty
 		}
-
-		// New average price based on the new absolute total quantity
 		pos.AveragePrice = totalCost / math.Abs(float64(pos.NetQuantity))
 	} else {
-		// Reducing or Flipping the position: Calculate Realized PnL
 		closedQty := qty
-		// If the order is larger than the current position, only the current position amount is "closed"
 		if qty > int(math.Abs(float64(pos.NetQuantity))) {
 			closedQty = int(math.Abs(float64(pos.NetQuantity)))
 		}
@@ -268,26 +300,21 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		if pos.Side == "LONG" {
 			tradePnL = (fillPrice - pos.AveragePrice) * float64(closedQty)
 		} else {
-			// For Shorts: profit = entry - exit
 			tradePnL = (pos.AveragePrice - fillPrice) * float64(closedQty)
 		}
 		pos.RealizedPnL += tradePnL
 
-		// Update Net Quantity
 		if isBuy {
 			pos.NetQuantity += qty
 		} else {
 			pos.NetQuantity -= qty
 		}
 
-		// Handle Flipping: If we went from Long to Short (or vice versa), reset average price to the fill price
 		if (isBuy && pos.NetQuantity > 0) || (!isBuy && pos.NetQuantity < 0) {
 			pos.AveragePrice = fillPrice
-			// Inherit risk levels for the new flipped side if provided in request
 			pos.TargetPrice = req.TargetPrice
 			pos.StopLossPrice = req.StopLossPrice
 		} else if pos.NetQuantity == 0 {
-			// Fully Flat: Reset trade-specific metrics and clear risk levels
 			pos.AveragePrice = 0
 			pos.UnrealizedPnL = 0
 			pos.TargetPrice = 0
@@ -295,7 +322,6 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		}
 	}
 
-	// 2. Update Side String
 	if pos.NetQuantity > 0 {
 		pos.Side = "LONG"
 	} else if pos.NetQuantity < 0 {
@@ -304,22 +330,48 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		pos.Side = ""
 	}
 
-	// 3. Broadcast the updated state to UI
+	// FIX: Persist position changes to DB
+	if pm.dbWriter != nil {
+		pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
+	}
+
 	pm.broadcastPositionUpdate(pos)
 }
 
-func (pm *PaperPositionManager) executeMarketExit(pos *models.Position, price float64) {
+// executeMarketExit logs an explicit MARKET exit order into the DB historical record
+func (pm *PaperPositionManager) executeMarketExit(pos *models.Position, price float64, executionTime time.Time) {
 	side := "SELL"
 	if pos.Side == "SHORT" {
 		side = "BUY"
 	}
+
+	// Generate an exit order tracking entry for history logs
+	exitOrderID := fmt.Sprintf("PPR-EXIT-%d", executionTime.UnixNano())
+	exitOrder := models.OrderBookEntry{
+		OrderID:   exitOrderID,
+		Symbol:    pos.Symbol,
+		Side:      side,
+		OrderType: "MARKET",
+		Qty:       int(math.Abs(float64(pos.NetQuantity))),
+		FilledQty: int(math.Abs(float64(pos.NetQuantity))),
+		Price:     price,
+		Status:    "COMPLETE",
+		Timestamp: executionTime,
+	}
+
+	pm.orderBook = append(pm.orderBook, exitOrder)
+
+	if pm.dbWriter != nil {
+		pm.dbWriter.PersistOrder(exitOrder)
+	}
+	pm.broadcastOrderUpdate(exitOrder)
 
 	pm.updatePositionState(models.OrderRequest{
 		Symbol:          pos.Symbol,
 		Product:         pos.Product,
 		TransactionType: side,
 		Quantity:        int(math.Abs(float64(pos.NetQuantity))),
-	}, price)
+	}, price, executionTime)
 }
 
 // --- Broadcast Helpers ---

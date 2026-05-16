@@ -113,7 +113,7 @@ func (a *App) initOrderManager() {
 	if a.Config.Mode == "live" {
 		a.OrderManager = order.NewLivePositionManager(a.kiteClient, a.wsHub)
 	} else {
-		a.OrderManager = order.NewPaperPositionManager(a.wsHub)
+		a.OrderManager = order.NewPaperPositionManager(a.wsHub, a.DBWriter)
 	}
 }
 

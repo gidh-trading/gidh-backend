@@ -69,19 +69,16 @@ func CleanupBacktestData(ctx context.Context, dateStr string) error {
 		{"live_order_depth", "timestamp"},
 		{"gidh_bars", "timestamp"},
 		{"gidh_volume_profiles", "trading_date"},
+		{"gidh_orders", "trading_date"},    // Added: Clear orders for this specific backtest run
+		{"gidh_positions", "trading_date"}, // Added: Clear positions for this specific backtest run
 	}
 
 	for _, q := range queries {
-		// Cast TIMESTAMPTZ to date for comparison
+		// Cast columns using ::date to handle TIMESTAMPTZ and DATE identically
 		query := fmt.Sprintf("DELETE FROM %s WHERE %s::date = $1", q.table, q.col)
 		if _, err := tx.Exec(ctx, query, dateStr); err != nil {
 			return fmt.Errorf("failed to cleanup table %s: %w", q.table, err)
 		}
-	}
-
-	// Special case for volume profiles which typically uses a DATE type column
-	if _, err := tx.Exec(ctx, "DELETE FROM gidh_volume_profiles WHERE trading_date = $1", dateStr); err != nil {
-		return fmt.Errorf("failed to cleanup gidh_volume_profiles: %w", err)
 	}
 
 	return tx.Commit(ctx)

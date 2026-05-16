@@ -141,6 +141,63 @@ func (w *DBWriter) AddBar(bar models.Bar) {
 	}
 }
 
+func (w *DBWriter) PersistOrder(order models.OrderBookEntry) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	// Using $10::date ensures backtests map to historical days instead of today's calendar date
+	query := `
+		INSERT INTO gidh_orders (
+			order_id, symbol, product, side, order_type, quantity, 
+			filled_qty, price, status, timestamp, target_price, sl_price, trading_date
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $10::date)
+		ON CONFLICT (order_id) DO UPDATE SET
+			status = EXCLUDED.status,
+			filled_qty = EXCLUDED.filled_qty,
+			price = EXCLUDED.price;`
+
+	_, err := w.pool.Exec(ctx, query,
+		order.OrderID, order.Symbol, "MIS", order.Side, order.OrderType, order.Qty,
+		order.FilledQty, order.Price, order.Status, order.Timestamp,
+		order.TargetPrice, order.StopLossPrice)
+
+	if err != nil {
+		logger.Errorf("DB Error persisting order %s: %v", order.OrderID, err)
+	}
+}
+
+func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime time.Time) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	query := `
+		INSERT INTO gidh_positions (
+			trading_date, symbol, product, side, net_quantity, avg_price, realized_pnl, updated_at
+		) VALUES ($1::date, $2, $3, $4, $5, $6, $7, NOW())
+		ON CONFLICT (trading_date, symbol, product) DO UPDATE SET
+			side = EXCLUDED.side,
+			net_quantity = EXCLUDED.net_quantity,
+			avg_price = EXCLUDED.avg_price,
+			realized_pnl = EXCLUDED.realized_pnl,
+			updated_at = NOW();`
+
+	_, err := w.pool.Exec(ctx, query,
+		sessionTime, pos.Symbol, pos.Product, pos.Side, pos.NetQuantity,
+		pos.AveragePrice, pos.RealizedPnL)
+
+	if err != nil {
+		logger.Errorf("DB Error persisting position %s: %v", pos.Symbol, err)
+	}
+}
+
 func (w *DBWriter) flushTimer() {
 	defer w.wg.Done()
 	ticker := time.NewTicker(w.flushInterval)
