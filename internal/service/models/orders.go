@@ -15,6 +15,8 @@ type OrderRequest struct {
 	StopLossPrice   float64 `json:"stop_loss_price,omitempty"`
 }
 
+// gidh-backend/internal/service/models/orders.go
+
 type OrderBookEntry struct {
 	OrderID       string    `json:"order_id"`
 	Symbol        string    `json:"symbol"`
@@ -23,16 +25,16 @@ type OrderBookEntry struct {
 	Qty           int       `json:"qty"`
 	FilledQty     int       `json:"filled_qty"`
 	Price         float64   `json:"price"`
-	Status        string    `json:"status"` // PENDING, COMPLETE, REJECTED
+	Status        string    `json:"status"`
 	Timestamp     time.Time `json:"timestamp"`
-	TargetPrice   float64   `json:"target_price"`    // Add this
-	StopLossPrice float64   `json:"stop_loss_price"` // Add this
+	TargetPrice   float64   `json:"target_price,omitempty"`
+	StopLossPrice float64   `json:"stop_loss_price,omitempty"` // 🧠 Unified naming convention
 }
 
 type Position struct {
 	Symbol        string  `json:"symbol"`
 	Product       string  `json:"product"`
-	Side          string  `json:"side"` // LONG, SHORT
+	Side          string  `json:"side"`
 	NetQuantity   int     `json:"net_quantity"`
 	AveragePrice  float64 `json:"average_price"`
 	RealizedPnL   float64 `json:"realized_pnl"`
@@ -41,7 +43,7 @@ type Position struct {
 	StopLossPrice float64 `json:"stop_loss_price"`
 
 	// Live Exchange IDs
-	TargetOrderID   string `json:"-"` // Kite Order ID for the Limit exit
-	StopLossOrderID string `json:"-"` // Kite Order ID for the SL-M exit
-	LastFillQty     int    `json:"-"` // Tracks cumulative fill for partial fill logic
+	TargetOrderID   string `json:"-"`
+	StopLossOrderID string `json:"-"`
+	LastFillQty     int    `json:"-"`
 }

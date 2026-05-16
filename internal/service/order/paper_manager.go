@@ -159,6 +159,19 @@ func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product st
 
 	pos.TargetPrice = tp
 	pos.StopLossPrice = sl
+
+	// Persist the updated target and stop-loss rules to the DB
+	sessionTime := pm.lastTimestamps[strings.ToUpper(symbol)]
+	if sessionTime.IsZero() {
+		sessionTime = pm.currentSimTime
+	}
+	if sessionTime.IsZero() {
+		sessionTime = time.Now()
+	}
+	if pm.dbWriter != nil {
+		pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
+	}
+
 	pm.broadcastPositionUpdate(pos)
 	return nil
 }

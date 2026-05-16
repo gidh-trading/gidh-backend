@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"fmt"
+	"gidh-backend/internal/service/writer"
 	"gidh-backend/pkg/logger"
 	"math"
 	"strings"
@@ -22,15 +23,17 @@ type LivePositionManager struct {
 	lastPrices      map[string]float64
 	kite            *kiteconnect.Client
 	wsHub           *ws.Hub
+	dbWriter        *writer.DBWriter
 }
 
-func NewLivePositionManager(client *kiteconnect.Client, hub *ws.Hub) *LivePositionManager {
+func NewLivePositionManager(client *kiteconnect.Client, hub *ws.Hub, db *writer.DBWriter) *LivePositionManager {
 	return &LivePositionManager{
 		activePositions: make(map[string]*models.Position),
 		orderBook:       make(map[string]models.OrderBookEntry),
 		lastPrices:      make(map[string]float64),
 		kite:            client,
 		wsHub:           hub,
+		dbWriter:        db,
 	}
 }
 
@@ -145,6 +148,11 @@ func (lm *LivePositionManager) HandleOrderUpdate(kOrder kiteconnect.Order) {
 	} else {
 		pos.Side = ""
 	}
+
+	if lm.dbWriter != nil {
+		lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+	}
+
 	lm.mu.Unlock()
 
 	// 3. Trigger Risk Reconciliation (Manage TP/SL on Exchange)
@@ -187,6 +195,11 @@ func (lm *LivePositionManager) UpdatePositionMetadata(symbol string, product str
 
 	pos.TargetPrice = tp
 	pos.StopLossPrice = sl
+
+	if lm.dbWriter != nil {
+		lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+	}
+
 	lm.mu.Unlock()
 
 	// Trigger reconciliation to modify the real orders on Kite

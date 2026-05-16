@@ -181,18 +181,20 @@ func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime tim
 
 	query := `
 		INSERT INTO gidh_positions (
-			trading_date, symbol, product, side, net_quantity, avg_price, realized_pnl, updated_at
-		) VALUES ($1::date, $2, $3, $4, $5, $6, $7, NOW())
+			trading_date, symbol, product, side, net_quantity, avg_price, realized_pnl, target_price, stop_loss_price, updated_at
+		) VALUES ($1::date, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
 		ON CONFLICT (trading_date, symbol, product) DO UPDATE SET
 			side = EXCLUDED.side,
 			net_quantity = EXCLUDED.net_quantity,
 			avg_price = EXCLUDED.avg_price,
 			realized_pnl = EXCLUDED.realized_pnl,
+			target_price = EXCLUDED.target_price,
+			stop_loss_price = EXCLUDED.stop_loss_price,
 			updated_at = NOW();`
 
 	_, err := w.pool.Exec(ctx, query,
 		sessionTime, pos.Symbol, pos.Product, pos.Side, pos.NetQuantity,
-		pos.AveragePrice, pos.RealizedPnL)
+		pos.AveragePrice, pos.RealizedPnL, pos.TargetPrice, pos.StopLossPrice)
 
 	if err != nil {
 		logger.Errorf("DB Error persisting position %s: %v", pos.Symbol, err)
