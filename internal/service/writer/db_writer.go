@@ -13,11 +13,16 @@ import (
 )
 
 type DBWriter struct {
-	pool          *pgxpool.Pool
-	config        *DBWriterConfig
-	tickBatch     []models.TickData
-	depthBatch    []DepthRecord
-	barBatch      []models.Bar
+	pool       *pgxpool.Pool
+	config     *DBWriterConfig
+	tickBatch  []models.TickData
+	depthBatch []DepthRecord
+	barBatch   []models.Bar
+
+	// New buffers for the incoming streaming analytics anomalies
+	gridBatch  []models.AnomalyGridRecord
+	whaleBatch []models.WhaleBlockRecord
+
 	batchSize     int
 	flushInterval time.Duration
 	mu            sync.Mutex
@@ -59,13 +64,14 @@ func NewDBWriter(cfg *DBWriterConfig) *DBWriter {
 		tickBatch:     make([]models.TickData, 0, cfg.BatchSize),
 		depthBatch:    make([]DepthRecord, 0, cfg.BatchSize),
 		barBatch:      make([]models.Bar, 0, cfg.BatchSize),
+		gridBatch:     make([]models.AnomalyGridRecord, 0, cfg.BatchSize), // Init grid buffer
+		whaleBatch:    make([]models.WhaleBlockRecord, 0, cfg.BatchSize),  // Init whale buffer
 		batchSize:     cfg.BatchSize,
 		flushInterval: cfg.FlushInterval,
 		ctx:           ctx,
 		cancel:        cancel,
 	}
 
-	// Start flush timer
 	writer.wg.Add(1)
 	go writer.flushTimer()
 
@@ -135,6 +141,46 @@ func (w *DBWriter) AddBar(bar models.Bar) {
 		go func() {
 			defer w.wg.Done()
 			w.insertBarsBatch(batch)
+		}()
+	} else {
+		w.mu.Unlock()
+	}
+}
+
+// AddAnomalyGrid places incoming grid data into the background worker loop array
+func (w *DBWriter) AddAnomalyGrid(record models.AnomalyGridRecord) {
+	w.mu.Lock()
+	w.gridBatch = append(w.gridBatch, record)
+
+	if len(w.gridBatch) >= w.batchSize {
+		batch := w.gridBatch
+		w.gridBatch = make([]models.AnomalyGridRecord, 0, w.batchSize)
+		w.mu.Unlock()
+
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.insertAnomalyGridsBatch(batch)
+		}()
+	} else {
+		w.mu.Unlock()
+	}
+}
+
+// AddWhaleBlock pushes transaction alert tracking records into the background batch
+func (w *DBWriter) AddWhaleBlock(record models.WhaleBlockRecord) {
+	w.mu.Lock()
+	w.whaleBatch = append(w.whaleBatch, record)
+
+	if len(w.whaleBatch) >= w.batchSize {
+		batch := w.whaleBatch
+		w.whaleBatch = make([]models.WhaleBlockRecord, 0, w.batchSize)
+		w.mu.Unlock()
+
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.insertWhaleBlocksBatch(batch)
 		}()
 	} else {
 		w.mu.Unlock()
@@ -213,34 +259,37 @@ func (w *DBWriter) flushTimer() {
 			tBatch := w.tickBatch
 			dBatch := w.depthBatch
 			bBatch := w.barBatch
+			gBatch := w.gridBatch   // Swap grid arrays
+			whBatch := w.whaleBatch // Swap whale arrays
 
-			// Reset batch
 			w.tickBatch = make([]models.TickData, 0, w.batchSize)
 			w.depthBatch = make([]DepthRecord, 0, w.batchSize)
 			w.barBatch = make([]models.Bar, 0, w.batchSize)
-
+			w.gridBatch = make([]models.AnomalyGridRecord, 0, w.batchSize)
+			w.whaleBatch = make([]models.WhaleBlockRecord, 0, w.batchSize)
 			w.mu.Unlock()
 
 			if len(tBatch) > 0 {
 				w.wg.Add(1)
-				go func() {
-					defer w.wg.Done()
-					w.insertTicksBatch(tBatch)
-				}()
+				go func() { defer w.wg.Done(); w.insertTicksBatch(tBatch) }()
 			}
 			if len(dBatch) > 0 {
 				w.wg.Add(1)
-				go func() {
-					defer w.wg.Done()
-					w.insertDepthBatch(dBatch)
-				}()
+				go func() { defer w.wg.Done(); w.insertDepthBatch(dBatch) }()
 			}
 			if len(bBatch) > 0 {
 				w.wg.Add(1)
-				go func() {
-					defer w.wg.Done()
-					w.insertBarsBatch(bBatch)
-				}()
+				go func() { defer w.wg.Done(); w.insertBarsBatch(bBatch) }()
+			}
+
+			// Flush analytics anomalies sequentially
+			if len(gBatch) > 0 {
+				w.wg.Add(1)
+				go func() { defer w.wg.Done(); w.insertAnomalyGridsBatch(gBatch) }()
+			}
+			if len(whBatch) > 0 {
+				w.wg.Add(1)
+				go func() { defer w.wg.Done(); w.insertWhaleBlocksBatch(whBatch) }()
 			}
 
 		case <-w.ctx.Done():
@@ -347,17 +396,79 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 	}
 }
 
+func (w *DBWriter) insertAnomalyGridsBatch(batch []models.AnomalyGridRecord) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pgxBatch := &pgx.Batch{}
+	query := `
+		INSERT INTO gidh_anomaly_grids (
+			time_bin, instrument_token, price_bin, buy_volume, 
+			sell_volume, total_volume, peak_z_score, tick_count, cluster_vwap, created_at
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+		ON CONFLICT (time_bin, instrument_token, price_bin) DO UPDATE SET
+			buy_volume = EXCLUDED.buy_volume,
+			sell_volume = EXCLUDED.sell_volume,
+			total_volume = EXCLUDED.total_volume,
+			peak_z_score = EXCLUDED.peak_z_score,
+			tick_count = EXCLUDED.tick_count,
+			cluster_vwap = EXCLUDED.cluster_vwap,
+			created_at = NOW();`
+
+	for _, r := range batch {
+		pgxBatch.Queue(query, r.TimeBin, r.InstrumentToken, r.PriceBin, r.BuyVolume, r.SellVolume, r.TotalVolume, r.PeakZScore, r.TickCount, r.ClusterVWAP)
+	}
+
+	br := w.pool.SendBatch(ctx, pgxBatch)
+	defer br.Close()
+
+	if err := br.Close(); err != nil {
+		logger.Errorf("Failed to persist grid metrics batch updates: %v", err)
+	} else {
+		logger.Debugf("Successfully upserted %d compressed matrix cells into TimescaleDB", len(batch))
+	}
+}
+
+// High-Speed insertion for append-only audit tracking rows using standard CopyFrom logic
+func (w *DBWriter) insertWhaleBlocksBatch(batch []models.WhaleBlockRecord) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	copyCount, err := w.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{"gidh_whale_blocks"},
+		[]string{"timestamp", "instrument_token", "price", "volume", "side", "v_expected"},
+		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
+			r := batch[i]
+			return []any{r.Timestamp, r.InstrumentToken, r.Price, r.Volume, r.Side, r.VExpected}, nil
+		}),
+	)
+
+	if err != nil {
+		logger.Errorf("Failed to log whale transaction blocks: %v", err)
+	} else {
+		logger.Debugf("Logged %d instant transaction alerts securely into TimescaleDB", copyCount)
+	}
+}
+
 func (w *DBWriter) Close() {
 	logger.Info("Closing DB writer, flushing remaining data...")
+	w.cancel()
 
-	w.cancel() // Stop the timer
-
-	// Final sync flush for remaining data
 	w.mu.Lock()
 	tBatch := w.tickBatch
 	dBatch := w.depthBatch
 	bBatch := w.barBatch
-
+	gBatch := w.gridBatch
+	whBatch := w.whaleBatch
 	w.mu.Unlock()
 
 	if len(tBatch) > 0 {
@@ -369,7 +480,13 @@ func (w *DBWriter) Close() {
 	if len(bBatch) > 0 {
 		w.insertBarsBatch(bBatch)
 	}
+	if len(gBatch) > 0 {
+		w.insertAnomalyGridsBatch(gBatch)
+	}
+	if len(whBatch) > 0 {
+		w.insertWhaleBlocksBatch(whBatch)
+	}
 
-	w.wg.Wait() // Wait for all background goroutines to finish
+	w.wg.Wait()
 	logger.Info("DB writer closed")
 }

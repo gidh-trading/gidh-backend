@@ -13,7 +13,6 @@ import (
 	"gidh-backend/pkg/logger"
 	"net"
 	"net/http"
-	"sort"
 	"time"
 )
 
@@ -167,7 +166,6 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 
 		// 4. Clear alert history
 		a.alertMu.Lock()
-		a.topPlayable = make(map[uint32]models.PlayableAlert)
 		a.alertMu.Unlock()
 
 		a.StreamManager = nil
@@ -191,26 +189,10 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Extract date from the path (/api/alerts/YYYY-MM-DD)
-	// Note: If you're on Go 1.22+, you can use r.PathValue("date")
-	// if you register the route as "/api/alerts/{date}"
-
-	a.alertMu.RLock()
-	var list []models.PlayableAlert
-	for _, alert := range a.topPlayable {
-		list = append(list, alert)
-	}
-	a.alertMu.RUnlock()
-
-	// Sort by EnergyDelta descending
-	sort.Slice(list, func(i, j int) bool {
-		return list[i].EnergyDelta > list[j].EnergyDelta
-	})
-
 	// Wrap the result in a 'data' field to match the UI's 'json.data' expectation
 	response := map[string]interface{}{
 		"status": "success",
-		"data":   list,
+		"data":   "[]",
 	}
 
 	json.NewEncoder(w).Encode(response)

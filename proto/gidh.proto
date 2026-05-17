@@ -6,8 +6,15 @@ option go_package = "gidh-backend/grpc";
 import "google/protobuf/timestamp.proto";
 
 service AnalyticIngestor {
-  // Establishes a long-lived stream to push data seamlessly to Python
-  rpc StreamEnrichedTicks(stream EnrichedTickMessage) returns (IngestSummary);
+  // Upgraded to Bidirectional Streaming: Go streams ticks in, Python yields anomalies back out instantly
+  rpc StreamEnrichedTicks(stream EnrichedTickMessage) returns (stream AnomalyResponse);
+}
+
+// Represents a single level inside the order book depth snapshot
+message DepthLevel {
+  double price = 1;
+  int64 quantity = 2;
+  int32 orders = 3;
 }
 
 message EnrichedTickMessage {
@@ -16,15 +23,23 @@ message EnrichedTickMessage {
   string stock_name = 3;
   double last_price = 4;
   int64 tick_volume = 5;
-
-  // Intraday anchor points passed to Python
   double vwap = 6;
   double poc = 7;
   double vah = 8;
   double val = 9;
+  repeated DepthLevel buy_depth = 10;
+  repeated DepthLevel sell_depth = 11;
 }
 
-message IngestSummary {
-  bool success = 1;
-  string message = 2;
+message AnomalyResponse {
+  string anomaly_type = 1;       // "WHALE_BLOCK" or "GRID_CLUSTER"
+  google.protobuf.Timestamp timestamp = 2; // Exact execution time (Whale) or 5s block anchor (Grid)
+  uint32 instrument_token = 3;
+  double price = 4;              // Trade execution price (Whale) or Price Bin base (Grid)
+  int64 buy_volume = 5;          // Aggressive taker buy shares logged
+  int64 sell_volume = 6;         // Aggressive taker sell shares logged
+  int64 total_volume = 7;        // Combined transaction volume
+  double peak_z_score = 8;       // Maximum volatility score reached
+  int32 tick_count = 9;          // Total executions combined inside the data frame
+  double cluster_vwap = 10;      // Localized volume weighted average price
 }

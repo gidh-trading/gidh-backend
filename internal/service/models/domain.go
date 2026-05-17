@@ -177,3 +177,24 @@ type PlayableAlert struct {
 	SellEnergy  float64   `json:"sell_energy"`
 	Timeframe   string    `json:"timeframe"`
 }
+
+type AnomalyGridRecord struct {
+	TimeBin         time.Time
+	InstrumentToken uint32
+	PriceBin        float64
+	BuyVolume       int64
+	SellVolume      int64
+	TotalVolume     int64
+	PeakZScore      float64
+	TickCount       int32
+	ClusterVWAP     float64
+}
+
+type WhaleBlockRecord struct {
+	Timestamp       time.Time
+	InstrumentToken uint32
+	Price           float64
+	Volume          int64
+	Side            string
+	VExpected       float64
+}

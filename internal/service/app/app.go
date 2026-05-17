@@ -36,7 +36,6 @@ type App struct {
 	instrumentList []models.InstrumentConfig
 	tokenToName    map[uint32]string
 	nameToToken    map[string]uint32
-	topPlayable    map[uint32]models.PlayableAlert
 	alertMu        sync.RWMutex
 	managerMu      sync.RWMutex
 	activePipe     *Pipeline
@@ -50,7 +49,6 @@ func NewApp(cfg *config.Config) (*App, error) {
 		Config:      cfg,
 		tokenToName: make(map[uint32]string),
 		nameToToken: make(map[string]uint32),
-		topPlayable: make(map[uint32]models.PlayableAlert),
 	}
 
 	app.initKiteClient()
@@ -142,7 +140,7 @@ func (a *App) loadMarketData(ctx context.Context) {
 	}
 }
 
-// initPipeline configures the data processing stages[cite: 4].
+// initPipeline configures the data processing stages.
 func (a *App) initPipeline(ctx context.Context) error {
 	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, a.pool, a.wsHub)
 
@@ -153,7 +151,17 @@ func (a *App) initPipeline(ctx context.Context) error {
 	}
 
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager)
-	a.AnalyticClient = analytic.NewClient("127.0.0.1:50051", 50000)
+
+	// Dynamic gRPC port selection based on execution mode
+	analyticAddr := "127.0.0.1:50051"
+	if a.Config.Mode == "backtest" {
+		analyticAddr = "127.0.0.1:50052"
+	}
+
+	// Pass the dynamically selected address to the gRPC client loader
+	a.AnalyticClient = analytic.NewClient(analyticAddr, 50000, a.DBWriter, a.wsHub, a.tokenToName)
+	a.AnalyticClient.Start()
+
 	barStage := pipeline.NewBarBuilderStage(a.DBWriter, a.wsHub)
 
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter, a.AnalyticClient)
@@ -222,10 +230,4 @@ func (a *App) Stop() {
 		a.AnalyticClient.Close()
 	}
 	db.CloseDB()
-}
-
-func (a *App) UpdateTopPlayable(alert models.PlayableAlert) {
-	a.alertMu.Lock()
-	defer a.alertMu.Unlock()
-	a.topPlayable[alert.Token] = alert
 }
