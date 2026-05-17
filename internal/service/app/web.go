@@ -112,25 +112,22 @@ func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
 	a.Config.BacktestDate = req.Date
 	a.Config.BacktestSpeedFactor = req.SpeedFactor
 
-	// 6. Reload Market Data & DNA for the specific date
-	parsedDate, _ := time.Parse("2006-01-02", req.Date)
-	dnaMap, advMap := a.loadMarketData(ctx, parsedDate)
-
-	// 7. RE-INITIALIZE PIPELINE (This resets all internal memory/maps)
-	if err := a.initPipeline(ctx, dnaMap, advMap); err != nil {
+	// 6. RE-INITIALIZE PIPELINE (This resets all internal memory/maps)
+	a.loadMarketData(ctx)
+	if err := a.initPipeline(ctx); err != nil {
 		a.managerMu.Unlock()
 		http.Error(w, "Pipeline init failed", http.StatusInternalServerError)
 		return
 	}
 
-	// 8. Re-init Stream Manager with new source
+	// 7. Re-init Stream Manager with new source
 	if err := a.initStreamManager(); err != nil {
 		a.managerMu.Unlock()
 		http.Error(w, "Stream Manager init failed", http.StatusInternalServerError)
 		return
 	}
 
-	// 9. Start Processing
+	// 8. Start Processing
 	go func() {
 		if err := a.StreamManager.Start(); err != nil {
 			logger.Errorf("Stream started with error: %v", err)

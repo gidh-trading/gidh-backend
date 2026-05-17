@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"gidh-backend/internal/service/analytic"
 	"gidh-backend/internal/service/order"
 	"net/http"
 	"sync"
@@ -27,6 +28,7 @@ type App struct {
 	Pipeline       *Pipeline
 	DBWriter       *writer.DBWriter
 	OrderManager   order.PositionManager
+	AnalyticClient *analytic.Client
 	kiteClient     *kiteconnect.Client
 	server         *http.Server
 	wsHub          *ws.Hub
@@ -64,9 +66,7 @@ func NewApp(cfg *config.Config) (*App, error) {
 	// If live, we load everything and start immediately.
 	// If backtest, we wait for the API call.
 	if cfg.Mode == "live" {
-
-		dnaMap, advMap := app.loadMarketData(ctx, time.Now())
-		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
+		if err := app.initPipeline(ctx); err != nil {
 			return nil, err
 		}
 		if err := app.initStreamManager(); err != nil {
@@ -118,19 +118,12 @@ func (a *App) initOrderManager() {
 }
 
 // loadMarketData fetches instrument and DNA baselines from DB for a specific date.
-func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]float64) {
+func (a *App) loadMarketData(ctx context.Context) {
 	if a.pool == nil {
-		return make(map[uint32]*models.MarketDNA), make(map[uint32]float64)
+		return
 	}
 
-	// 1. Load DNA Baselines for the specific target date
-	dnaReader := reader.NewDNAReader(a.pool)
-	dnaMap, err := dnaReader.FetchMarketDNA(ctx, targetDate)
-	if err != nil {
-		logger.Errorf("FAILED TO LOAD MARKET DNA for %s: %v", targetDate.Format("2006-01-02"), err)
-	}
-
-	// 2. Load Instruments based on current Mode (Live or Backtest)
+	// 1. Load Instruments based on current Mode (Live or Backtest)
 	instReader := reader.NewInstrumentReader(a.pool)
 	if a.Config.Mode == "live" {
 		a.instrumentList, _ = instReader.FetchActiveConfigs(ctx)
@@ -140,27 +133,17 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 		a.instrumentList, _ = instReader.FetchBacktestConfigs(ctx)
 	}
 
-	// 3. Load 30-day Average Daily Volume (ADV) profiles for Z-score normalization
-	advMap, err := instReader.FetchADVProfiles(ctx)
-	if err != nil {
-		logger.Errorf("FAILED TO LOAD ADV PROFILES: %v", err)
-	}
-
-	// 4. Reset and rebuild internal token/name mapping maps
-	// This ensures only the currently active instruments are in memory.
+	// 2. Reset and rebuild internal token/name mapping maps
 	a.tokenToName = make(map[uint32]string)
 	a.nameToToken = make(map[string]uint32)
 	for _, c := range a.instrumentList {
 		a.tokenToName[c.Token] = c.Name
 		a.nameToToken[c.Name] = c.Token
 	}
-
-	return dnaMap, advMap
 }
 
 // initPipeline configures the data processing stages[cite: 4].
-func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, advMap map[uint32]float64) error {
-
+func (a *App) initPipeline(ctx context.Context) error {
 	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, a.pool, a.wsHub)
 
 	if a.Config.Mode == "live" {
@@ -169,10 +152,11 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
-	enrichmentStage := pipeline.NewEnrichmentStage(dnaMap, a.OrderManager)
-	barStage := pipeline.NewBarBuilderStage(a.DBWriter, advMap, a.wsHub, a.UpdateTopPlayable)
+	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager)
+	a.AnalyticClient = analytic.NewClient("127.0.0.1:50051", 50000)
+	barStage := pipeline.NewBarBuilderStage(a.DBWriter, a.wsHub)
 
-	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
+	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter, a.AnalyticClient)
 	a.activePipe = a.Pipeline
 	return nil
 }
@@ -233,6 +217,9 @@ func (a *App) Stop() {
 	}
 	if a.DBWriter != nil {
 		a.DBWriter.Close()
+	}
+	if a.AnalyticClient != nil {
+		a.AnalyticClient.Close()
 	}
 	db.CloseDB()
 }

@@ -329,9 +329,6 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 			"timestamp", "instrument_token", "stock_name", "timeframe",
 			"open", "high", "low", "close", "volume",
 			"vwap", "poc", "vah", "val",
-			"buy_volume", "sell_volume",
-			"total_vol_energy", "buy_vol_energy", "sell_vol_energy",
-			"total_rng_energy", "buy_rng_energy", "sell_rng_energy",
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
@@ -339,9 +336,6 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
 				b.Open, b.High, b.Low, b.Close, b.Volume,
 				b.VWAP, b.POC, b.VAH, b.VAL,
-				b.BuyVolume, b.SellVolume,
-				b.TotalVolEnergy, b.BuyVolEnergy, b.SellVolEnergy,
-				b.TotalRngEnergy, b.BuyRngEnergy, b.SellRngEnergy,
 			}, nil
 		}),
 	)

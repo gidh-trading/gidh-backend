@@ -1,3 +1,5 @@
+// internal/service/pipeline/enrichment.go
+
 package pipeline
 
 import (
@@ -8,7 +10,6 @@ import (
 )
 
 type EnrichmentStage struct {
-	dnaMap          map[uint32]*models.MarketDNA
 	lastVolumeMap   map[uint32]int64
 	lastPriceMap    map[uint32]float64
 	positionManager order.PositionManager
@@ -17,11 +18,10 @@ type EnrichmentStage struct {
 	mu  sync.RWMutex
 }
 
-func NewEnrichmentStage(dnaMap map[uint32]*models.MarketDNA, pm order.PositionManager) *EnrichmentStage {
+func NewEnrichmentStage(pm order.PositionManager) *EnrichmentStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &EnrichmentStage{
-		dnaMap:          dnaMap,
 		lastVolumeMap:   make(map[uint32]int64),
 		lastPriceMap:    make(map[uint32]float64),
 		loc:             loc,
@@ -34,11 +34,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	defer s.mu.Unlock()
 
 	token := tick.Raw.InstrumentToken
-
-	// Attach DNA
-	if dna, ok := s.dnaMap[token]; ok {
-		tick.DNA = dna
-	}
 
 	// Tick volume
 	tick.TickVolume = s.calculateTickVolume(token, tick)

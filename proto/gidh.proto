@@ -1,0 +1,30 @@
+syntax = "proto3";
+
+package gidh;
+option go_package = "gidh-backend/grpc";
+
+import "google/protobuf/timestamp.proto";
+
+service AnalyticIngestor {
+  // Establishes a long-lived stream to push data seamlessly to Python
+  rpc StreamEnrichedTicks(stream EnrichedTickMessage) returns (IngestSummary);
+}
+
+message EnrichedTickMessage {
+  google.protobuf.Timestamp timestamp = 1;
+  uint32 instrument_token = 2;
+  string stock_name = 3;
+  double last_price = 4;
+  int64 tick_volume = 5;
+
+  // Intraday anchor points passed to Python
+  double vwap = 6;
+  double poc = 7;
+  double vah = 8;
+  double val = 9;
+}
+
+message IngestSummary {
+  bool success = 1;
+  string message = 2;
+}

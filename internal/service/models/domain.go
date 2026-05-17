@@ -1,3 +1,5 @@
+// internal/service/models/domain.go
+
 package models
 
 import (
@@ -13,32 +15,6 @@ type InstrumentConfig struct {
 	Token      uint32 `json:"instrument_token"`
 	Name       string `json:"stock_name"`
 	IsBacktest bool   `json:"is_backtest"`
-}
-
-type MarketDNA struct {
-	InstrumentToken uint32
-	StockName       string
-	TradingDate     time.Time
-	POC             float64
-	VAH             float64
-	VAL             float64
-	MacroHVNs       []VPExtrema
-	MacroLVNs       []VPExtrema
-	TimeBuckets     []TimeBucketDNA
-}
-
-type TimeBucketDNA struct {
-	MinuteIndex int `json:"minute_index"`
-
-	VolumeMean float64 `json:"volume_mean"`
-	VolumeStd  float64 `json:"volume_std"`
-
-	RangeMean float64 `json:"range_mean"`
-	RangeStd  float64 `json:"range_std"`
-
-	// Optional future extensions
-	VolumeP95 float64 `json:"volume_p95,omitempty"`
-	RangeP95  float64 `json:"range_p95,omitempty"`
 }
 
 // =====================================================================
@@ -78,47 +54,8 @@ type DepthLevel struct {
 // 3. PIPELINE TYPES
 // =====================================================================
 
-type TradeStats struct {
-	// --- Time context ---
-	MinuteIndex int
-	Timestamp   time.Time
-
-	// --- Rolling candle stats ---
-	Volume1m float64
-	Range1m  float64
-
-	// --- Session context ---
-	SessionVolume   float64
-	SessionAvgRange float64
-
-	// --- Normalized features (must match DNA logic) ---
-	NormVolume float64
-	NormRange  float64
-
-	// --- DNA reference (optional but useful for debugging) ---
-	VolumeMean float64
-	VolumeStd  float64
-	RangeMean  float64
-	RangeStd   float64
-
-	// --- Z-scores (core signal inputs) ---
-	VolumeZ float64
-	RangeZ  float64
-
-	// Live Energy accumulation
-	TotalVolEnergy float64 `json:"total_vol_energy"`
-	BuyVolEnergy   float64 `json:"buy_vol_energy"`
-	SellVolEnergy  float64 `json:"sell_vol_energy"`
-
-	TotalRngEnergy float64 `json:"total_rng_energy"`
-	BuyRngEnergy   float64 `json:"buy_rng_energy"`
-	SellRngEnergy  float64 `json:"sell_rng_energy"`
-}
-
 type EnrichedTick struct {
 	Raw            TickData
-	DNA            *MarketDNA
-	Stats          *TradeStats
 	TickVolume     int64
 	VolProfile     *VolumeProfileInfo
 	FullVolProfile *VolumeProfile
@@ -220,21 +157,6 @@ type Bar struct {
 	VAH  float64 `json:"vah"`
 	VAL  float64 `json:"val"`
 
-	BuyVolume  float64 `json:"buy_volume"`
-	SellVolume float64 `json:"sell_volume"`
-	BuyRange   float64 `json:"-"`
-	SellRange  float64 `json:"-"`
-
-	// Volume Energy
-	TotalVolEnergy float64 `json:"total_vol_energy"`
-	BuyVolEnergy   float64 `json:"buy_vol_energy"`
-	SellVolEnergy  float64 `json:"sell_vol_energy"`
-
-	// Range Energy
-	TotalRngEnergy float64 `json:"total_rng_energy"`
-	BuyRngEnergy   float64 `json:"buy_rng_energy"`
-	SellRngEnergy  float64 `json:"sell_rng_energy"`
-
 	// ---- UI Only Metrics (Not persisted in DB) ----
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
 	TotalBuyQty   float64 `json:"total_buy_qty"`
@@ -249,7 +171,7 @@ type PlayableAlert struct {
 	StockName   string    `json:"stock_name"`
 	Token       uint32    `json:"token"`
 	LastPrice   float64   `json:"last_price"`
-	EnergyDelta float64   `json:"energy_delta"` // buy_vol_energy - sell_vol_energy
+	EnergyDelta float64   `json:"energy_delta"`
 	TotalEnergy float64   `json:"total_energy"`
 	BuyEnergy   float64   `json:"buy_energy"`
 	SellEnergy  float64   `json:"sell_energy"`
