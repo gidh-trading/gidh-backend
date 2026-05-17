@@ -336,6 +336,7 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	// Below-average volume should mean 0 energy, not negative energy.
 	volumeZ = math.Max(0, volumeZ)
+	efficiency := r.DirectionalEfficiency()
 	rangeZ = math.Max(0, rangeZ)
 
 	// -------------------------
@@ -344,13 +345,13 @@ func (s *BarBuilderStage) Process(tick *models.EnrichedTick) error {
 
 	// OVERWRITE the Total Energy with the latest true Z-score (Do NOT use +=)
 	b1.TotalVolEnergy = volumeZ
-	b1.TotalRngEnergy = rangeZ
+	b1.TotalRngEnergy = efficiency
 
-	b3.TotalVolEnergy = volumeZ // 👈 Compute absolute Energy state
-	b3.TotalRngEnergy = rangeZ
+	b3.TotalVolEnergy = volumeZ
+	b3.TotalRngEnergy = efficiency
 
 	b5.TotalVolEnergy = volumeZ
-	b5.TotalRngEnergy = rangeZ
+	b5.TotalRngEnergy = efficiency
 
 	// 1M BAR: Split total energy into Buy/Sell using the actual raw volume ratios
 	if b1.Volume > 0 {
