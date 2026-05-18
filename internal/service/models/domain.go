@@ -54,11 +54,27 @@ type DepthLevel struct {
 // 3. PIPELINE TYPES
 // =====================================================================
 
+type WindowTick struct {
+	Price  float64
+	Volume float64
+}
+
 type EnrichedTick struct {
 	Raw            TickData
 	TickVolume     int64
 	VolProfile     *VolumeProfileInfo
 	FullVolProfile *VolumeProfile
+
+	// Stats populated by Enrichment
+	VolumeZ       float64
+	TickCountZ    float64
+	LiveVolume    float64
+	LiveTickCount int
+	HasBaseline   bool
+
+	// 🚀 New hand-off fields for the Analytics Stage
+	HasAnomaly bool    // True if this tick qualifies as an abnormal volume burst
+	AnomalyBin float64 // The snapped geometric price bucket coordinate
 }
 
 // VPNode represents a single price bucket and its accumulated volume.
@@ -161,6 +177,9 @@ type Bar struct {
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
 	TotalBuyQty   float64 `json:"total_buy_qty"`
 	TotalSellQty  float64 `json:"total_sell_qty"`
+
+	// ---- Microstructure Analytics Heatmap ----
+	Heatmap []HeatmapCell `json:"heatmap"`
 
 	// ---- Raw ticks ----
 	Ticks []TickData `json:"-"`

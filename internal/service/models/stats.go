@@ -15,17 +15,13 @@ type MarketDNA struct {
 }
 
 type TimeBucketDNA struct {
-	MinuteIndex int `json:"minute_index"`
-
-	VolumeMean float64 `json:"volume_mean"`
-	VolumeStd  float64 `json:"volume_std"`
-
-	RangeMean float64 `json:"range_mean"`
-	RangeStd  float64 `json:"range_std"`
-
-	// Optional future extensions
-	VolumeP95 float64 `json:"volume_p95,omitempty"`
-	RangeP95  float64 `json:"range_p95,omitempty"`
+	MinuteIndex   int     `json:"minute_index"`
+	VolumeMean    float64 `json:"volume_mean"`
+	VolumeStd     float64 `json:"volume_std"`
+	RangeMean     float64 `json:"range_mean"`
+	RangeStd      float64 `json:"range_std"`
+	TickCountMean float64 `json:"tick_count_mean"`
+	TickCountStd  float64 `json:"tick_count_std"`
 }
 
 type TradeStats struct {
@@ -63,4 +59,12 @@ type TradeStats struct {
 	TotalRngEnergy float64 `json:"total_rng_energy"`
 	BuyRngEnergy   float64 `json:"buy_rng_energy"`
 	SellRngEnergy  float64 `json:"sell_rng_energy"`
+}
+
+// HeatmapCell represents a discrete geometric price compartment inside a bar,
+// capturing the concentration and statistical strength of institutional volume bursts.
+type HeatmapCell struct {
+	PriceBin       float64 `json:"price_bin"`
+	AnomalyCount   int     `json:"anomaly_count"`
+	IntensityScore float64 `json:"intensity_score"` // Used by the frontend canvas to calculate the "glow" alpha opacity
 }
