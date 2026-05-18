@@ -1,7 +1,6 @@
 package app
 
 import (
-	"gidh-backend/internal/service/analytic"
 	"log"
 
 	"gidh-backend/internal/service/models"
@@ -14,7 +13,6 @@ type Pipeline struct {
 	enrichment *pipeline.EnrichmentStage
 	barBuilder *pipeline.BarBuilderStage
 	dbWriter   *writer.DBWriter
-	grpcClient *analytic.Client
 }
 
 func NewPipeline(
@@ -22,14 +20,12 @@ func NewPipeline(
 	enrichment *pipeline.EnrichmentStage,
 	barBuilder *pipeline.BarBuilderStage,
 	dbWriter *writer.DBWriter,
-	grpcClient *analytic.Client,
 ) *Pipeline {
 	return &Pipeline{
 		vpStage:    vpStage,
 		enrichment: enrichment,
 		barBuilder: barBuilder,
 		dbWriter:   dbWriter,
-		grpcClient: grpcClient,
 	}
 }
 
@@ -59,12 +55,7 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 4. FORWARD COMPUTE TO PYTHON VIA gRPC
-	if p.grpcClient != nil {
-		p.grpcClient.Forward(enrichedTick)
-	}
-
-	// 5. STAGE 3: BAR BUILDER (Runs after VP Stage)
+	// 4. STAGE 3: BAR BUILDER (Runs after VP Stage)
 	if p.barBuilder != nil {
 		if err := p.barBuilder.Process(enrichedTick); err != nil {
 			log.Printf("Pipeline Error: Failed to process bars: %v", err)

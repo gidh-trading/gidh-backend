@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"gidh-backend/internal/service/analytic"
 	"gidh-backend/internal/service/order"
 	"net/http"
 	"sync"
@@ -28,7 +27,6 @@ type App struct {
 	Pipeline       *Pipeline
 	DBWriter       *writer.DBWriter
 	OrderManager   order.PositionManager
-	AnalyticClient *analytic.Client
 	kiteClient     *kiteconnect.Client
 	server         *http.Server
 	wsHub          *ws.Hub
@@ -61,10 +59,10 @@ func NewApp(cfg *config.Config) (*App, error) {
 
 	app.initOrderManager()
 
-	// If live, we load everything and start immediately.
-	// If backtest, we wait for the API call.
 	if cfg.Mode == "live" {
-		if err := app.initPipeline(ctx); err != nil {
+
+		dnaMap, advMap := app.loadMarketData(ctx, time.Now())
+		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
 			return nil, err
 		}
 		if err := app.initStreamManager(); err != nil {
@@ -75,7 +73,6 @@ func NewApp(cfg *config.Config) (*App, error) {
 	return app, nil
 }
 
-// initDatabase handles DB connections and writer initialization.
 func (a *App) initDatabase(ctx context.Context) error {
 	dbURL := a.Config.LiveDBURL
 	if a.Config.Mode == "backtest" {
@@ -93,7 +90,6 @@ func (a *App) initDatabase(ctx context.Context) error {
 		}
 	}
 
-	// Initialize the high-speed DB Writer
 	skipPersistence := a.Config.SkipDatabaseInsert
 	if a.Config.Mode == "live" {
 		skipPersistence = false
@@ -116,12 +112,19 @@ func (a *App) initOrderManager() {
 }
 
 // loadMarketData fetches instrument and DNA baselines from DB for a specific date.
-func (a *App) loadMarketData(ctx context.Context) {
+func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]float64) {
 	if a.pool == nil {
-		return
+		return make(map[uint32]*models.MarketDNA), make(map[uint32]float64)
 	}
 
-	// 1. Load Instruments based on current Mode (Live or Backtest)
+	// 1. Load DNA Baselines for the specific target date
+	dnaReader := reader.NewDNAReader(a.pool)
+	dnaMap, err := dnaReader.FetchMarketDNA(ctx, targetDate)
+	if err != nil {
+		logger.Errorf("FAILED TO LOAD MARKET DNA for %s: %v", targetDate.Format("2006-01-02"), err)
+	}
+
+	// 2. Load Instruments based on current Mode (Live or Backtest)
 	instReader := reader.NewInstrumentReader(a.pool)
 	if a.Config.Mode == "live" {
 		a.instrumentList, _ = instReader.FetchActiveConfigs(ctx)
@@ -131,17 +134,26 @@ func (a *App) loadMarketData(ctx context.Context) {
 		a.instrumentList, _ = instReader.FetchBacktestConfigs(ctx)
 	}
 
-	// 2. Reset and rebuild internal token/name mapping maps
+	// 3. Load 30-day Average Daily Volume (ADV) profiles for Z-score normalization
+	advMap, err := instReader.FetchADVProfiles(ctx)
+	if err != nil {
+		logger.Errorf("FAILED TO LOAD ADV PROFILES: %v", err)
+	}
+
+	// 4. Reset and rebuild internal token/name mapping maps
+	// This ensures only the currently active instruments are in memory.
 	a.tokenToName = make(map[uint32]string)
 	a.nameToToken = make(map[string]uint32)
 	for _, c := range a.instrumentList {
 		a.tokenToName[c.Token] = c.Name
 		a.nameToToken[c.Name] = c.Token
 	}
+
+	return dnaMap, advMap
 }
 
-// initPipeline configures the data processing stages.
-func (a *App) initPipeline(ctx context.Context) error {
+func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, advMap map[uint32]float64) error {
+
 	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, a.pool, a.wsHub)
 
 	if a.Config.Mode == "live" {
@@ -151,25 +163,13 @@ func (a *App) initPipeline(ctx context.Context) error {
 	}
 
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager)
-
-	// Dynamic gRPC port selection based on execution mode
-	analyticAddr := "127.0.0.1:50051"
-	if a.Config.Mode == "backtest" {
-		analyticAddr = "127.0.0.1:50052"
-	}
-
-	// Pass the dynamically selected address to the gRPC client loader
-	a.AnalyticClient = analytic.NewClient(analyticAddr, 50000, a.DBWriter, a.wsHub, a.tokenToName)
-	a.AnalyticClient.Start()
-
 	barStage := pipeline.NewBarBuilderStage(a.DBWriter, a.wsHub)
 
-	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter, a.AnalyticClient)
+	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
 	a.activePipe = a.Pipeline
 	return nil
 }
 
-// initStreamManager creates the live or backtest data source[cite: 4].
 func (a *App) initStreamManager() error {
 	source, err := a.createDataSource()
 	if err != nil {
@@ -190,7 +190,6 @@ func (a *App) initKiteClient() {
 }
 
 func (a *App) Start(ctx context.Context) error {
-	// Always start the HTTP server (handles /ws, /api/backtest/start, etc.)
 	go func() {
 		logger.Infof("Server starting on %s", a.server.Addr)
 		if err := a.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
@@ -198,8 +197,6 @@ func (a *App) Start(ctx context.Context) error {
 		}
 	}()
 
-	// Only start the stream manager if it was initialized during NewApp (Live Mode)
-	// In Backtest Mode, this will be nil until handleBacktestStart is called.
 	if a.StreamManager != nil {
 		return a.StreamManager.Start()
 	}
@@ -226,8 +223,6 @@ func (a *App) Stop() {
 	if a.DBWriter != nil {
 		a.DBWriter.Close()
 	}
-	if a.AnalyticClient != nil {
-		a.AnalyticClient.Close()
-	}
+	// [Analytic Client close sequence removed from here]
 	db.CloseDB()
 }
