@@ -2,6 +2,7 @@ package writer
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -377,14 +378,30 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 		[]string{
 			"timestamp", "instrument_token", "stock_name", "timeframe",
 			"open", "high", "low", "close", "volume",
-			"vwap", "poc", "vah", "val",
+			"vwap", "poc", "vah", "val", "heatmap",
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
+
+			// 1. Marshaling slice metrics to raw JSON format inside stream buffer
+			var heatmapStr string
+			if len(b.Heatmap) > 0 {
+				bytes, err := json.Marshal(b.Heatmap)
+				if err != nil {
+					logger.Errorf("Failed to marshal heatmap for token %d: %v", b.InstrumentToken, err)
+					heatmapStr = "[]"
+				} else {
+					heatmapStr = string(bytes)
+				}
+			} else {
+				heatmapStr = "[]"
+			}
+
+			// 2. Append serialization text values straight to the copy record parameters layout
 			return []any{
 				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
 				b.Open, b.High, b.Low, b.Close, b.Volume,
-				b.VWAP, b.POC, b.VAH, b.VAL,
+				b.VWAP, b.POC, b.VAH, b.VAL, heatmapStr,
 			}, nil
 		}),
 	)

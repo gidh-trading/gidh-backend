@@ -111,37 +111,35 @@ func (a *App) initOrderManager() {
 	}
 }
 
-// loadMarketData fetches instrument and DNA baselines from DB for a specific date.
-func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]float64) {
+// loadMarketData fetches instrument definitions, DNA baselines, and execution profiles for a target date.
+func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]*models.InstrumentProfile) {
 	if a.pool == nil {
-		return make(map[uint32]*models.MarketDNA), make(map[uint32]float64)
+		return make(map[uint32]*models.MarketDNA), make(map[uint32]*models.InstrumentProfile)
 	}
 
-	// 1. Load DNA Baselines for the specific target date
+	// 1. Load DNA Baselines
 	dnaReader := reader.NewDNAReader(a.pool)
 	dnaMap, err := dnaReader.FetchMarketDNA(ctx, targetDate)
 	if err != nil {
 		logger.Errorf("FAILED TO LOAD MARKET DNA for %s: %v", targetDate.Format("2006-01-02"), err)
 	}
 
-	// 2. Load Instruments based on current Mode (Live or Backtest)
+	// 2. Load Active Instrument Config Mappings based on Mode
 	instReader := reader.NewInstrumentReader(a.pool)
 	if a.Config.Mode == "live" {
 		a.instrumentList, _ = instReader.FetchActiveConfigs(ctx)
 	} else {
-		// In backtest mode, this will return only the stocks
-		// updated via UpdateBacktestSelection in the start handler.
 		a.instrumentList, _ = instReader.FetchBacktestConfigs(ctx)
 	}
 
-	// 3. Load 30-day Average Daily Volume (ADV) profiles for Z-score normalization
-	advMap, err := instReader.FetchADVProfiles(ctx)
+	// 3. 🔥 Fetch full instrument profile parameters (bucket_size, adv_30d) from DB
+	profilesMap, err := instReader.FetchInstrumentProfiles(ctx)
 	if err != nil {
-		logger.Errorf("FAILED TO LOAD ADV PROFILES: %v", err)
+		logger.Errorf("FAILED TO LOAD INSTRUMENT PROFILES: %v", err)
+		profilesMap = make(map[uint32]*models.InstrumentProfile)
 	}
 
-	// 4. Reset and rebuild internal token/name mapping maps
-	// This ensures only the currently active instruments are in memory.
+	// Rebuild fast token internal lookups
 	a.tokenToName = make(map[uint32]string)
 	a.nameToToken = make(map[string]uint32)
 	for _, c := range a.instrumentList {
@@ -149,10 +147,10 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 		a.nameToToken[c.Name] = c.Token
 	}
 
-	return dnaMap, advMap
+	return dnaMap, profilesMap
 }
 
-func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, advMap map[uint32]float64) error {
+func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, profilesMap map[uint32]*models.InstrumentProfile) error {
 
 	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, a.pool, a.wsHub)
 
@@ -162,7 +160,13 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
+	advMap := make(map[uint32]float64)
+	for token, prof := range profilesMap {
+		advMap[token] = float64(prof.ADV30d)
+	}
+
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, advMap)
+	enrichmentStage.UpdateDNAMap(dnaMap)
 
 	analyticsStage := pipeline.NewAnalyticsStage(profilesMap)
 

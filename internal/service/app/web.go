@@ -113,10 +113,10 @@ func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
 
 	// 6. Reload Market Data & DNA for the specific date
 	parsedDate, _ := time.Parse("2006-01-02", req.Date)
-	dnaMap, advMap := a.loadMarketData(ctx, parsedDate)
+	dnaMap, profilesMap := a.loadMarketData(ctx, parsedDate)
 
 	// 7. RE-INITIALIZE PIPELINE (This resets all internal memory/maps)
-	if err := a.initPipeline(ctx, dnaMap, advMap); err != nil {
+	if err := a.initPipeline(ctx, dnaMap, profilesMap); err != nil {
 		a.managerMu.Unlock()
 		http.Error(w, "Pipeline init failed", http.StatusInternalServerError)
 		return

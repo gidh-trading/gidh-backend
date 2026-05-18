@@ -101,12 +101,13 @@ func (r *InstrumentReader) FetchConfigsByStockNames(ctx context.Context, stockNa
 	return configs, nil
 }
 
-// FetchADVProfiles retrieves the 30-day average daily volume for all instruments.
-func (r *InstrumentReader) FetchADVProfiles(ctx context.Context) (map[uint32]float64, error) {
-	advMap := make(map[uint32]float64)
+// FetchInstrumentProfiles retrieves complete parameter maps directly from the profile properties data table.
+func (r *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[uint32]*models.InstrumentProfile, error) {
+	profilesMap := make(map[uint32]*models.InstrumentProfile)
 
-	// Querying bigint adv_30d from public.instrument_profile[cite: 3]
-	query := `SELECT instrument_token, adv_30d FROM public.instrument_profile`
+	query := `
+		SELECT instrument_token, bucket_size, atr_14, adr_pct, adv_30d, adv_val_30d 
+		FROM public.instrument_profile`
 
 	rows, err := r.pool.Query(ctx, query)
 	if err != nil {
@@ -115,12 +116,11 @@ func (r *InstrumentReader) FetchADVProfiles(ctx context.Context) (map[uint32]flo
 	defer rows.Close()
 
 	for rows.Next() {
-		var token uint32
-		var adv int64 // DB type is bigint[cite: 3]
-		if err := rows.Scan(&token, &adv); err != nil {
+		var p models.InstrumentProfile
+		if err := rows.Scan(&p.InstrumentToken, &p.BucketSize, &p.ATR14, &p.ADRPct, &p.ADV30d, &p.ADVVal30d); err != nil {
 			return nil, err
 		}
-		advMap[token] = float64(adv) // Pipeline expects float64
+		profilesMap[p.InstrumentToken] = &p
 	}
-	return advMap, nil
+	return profilesMap, nil
 }
