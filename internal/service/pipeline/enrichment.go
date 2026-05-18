@@ -3,6 +3,7 @@
 package pipeline
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -58,12 +59,13 @@ type EnrichmentStage struct {
 
 	loc     *time.Location
 	dnaMap  map[uint32]*models.MarketDNA
+	advMap  map[uint32]float64
 	buffers map[uint32]*TokenRollingBuffer
 
 	mu sync.RWMutex
 }
 
-func NewEnrichmentStage(pm order.PositionManager) *EnrichmentStage {
+func NewEnrichmentStage(pm order.PositionManager, advMap map[uint32]float64) *EnrichmentStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
 	return &EnrichmentStage{
@@ -72,6 +74,7 @@ func NewEnrichmentStage(pm order.PositionManager) *EnrichmentStage {
 		positionManager: pm,
 		loc:             loc,
 		dnaMap:          make(map[uint32]*models.MarketDNA),
+		advMap:          advMap,
 		buffers:         make(map[uint32]*TokenRollingBuffer),
 	}
 }
@@ -105,7 +108,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	}
 	s.lastPriceMap[token] = price
 
-	// 2. Update continuous lookback buffer
+	// 2. Update continuous sliding framework loop
 	buf, exists := s.buffers[token]
 	if !exists {
 		buf = NewTokenRollingBuffer()
@@ -113,13 +116,24 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	}
 	buf.Push(ts, price, vol, 60*time.Second)
 
-	// 3. Compute pure statistics using Market DNA maps
+	liveVolume, liveTickCount := buf.GetMetrics()
+
+	// 3. Compute continuous Relative Volume (RVol) absolute intensity using ADV30d
+	var rVol float64
+	var expectedVolPerMin float64
+	if adv, ok := s.advMap[token]; ok && adv > 0 {
+		// Standard session length: 375 minutes (9:15 AM to 3:30 PM)
+		expectedVolPerMin = adv / 375.0
+		if expectedVolPerMin > 0 {
+			rVol = liveVolume / expectedVolPerMin
+		}
+	}
+
+	// 4. Compute statistics using Market DNA maps with Floor Regularization
 	dna := s.dnaMap[token]
 	var volumeZ float64
 	var tickCountZ float64
 	hasValidBaseline := false
-
-	liveVolume, liveTickCount := buf.GetMetrics()
 
 	if dna != nil {
 		localTime := ts.In(s.loc)
@@ -130,8 +144,12 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			bucket := dna.TimeBuckets[minuteIdx]
 			hasValidBaseline = true
 
-			if bucket.VolumeStd > 0 {
-				volumeZ = (liveVolume - bucket.VolumeMean) / bucket.VolumeStd
+			// Apply standard deviation regularization floor to prevent distortion spikes
+			vStdFloor := 0.01 * expectedVolPerMin
+			regVolumeStd := math.Max(bucket.VolumeStd, vStdFloor)
+
+			if regVolumeStd > 0 {
+				volumeZ = (liveVolume - bucket.VolumeMean) / regVolumeStd
 			}
 			if bucket.TickCountStd > 0 {
 				tickCountZ = (float64(liveTickCount) - bucket.TickCountMean) / bucket.TickCountStd
@@ -139,14 +157,14 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 	}
 
-	// 4. Attach pure descriptive metrics to pipeline context
+	// 5. Package context attributes to streaming pipeline context
 	tick.VolumeZ = volumeZ
 	tick.TickCountZ = tickCountZ
+	tick.RelativeVolume = rVol
 	tick.LiveVolume = liveVolume
 	tick.LiveTickCount = liveTickCount
 	tick.HasBaseline = hasValidBaseline
 
-	// Package a lightweight copy of the window timeline context for downstream usage
 	tick.WindowTicks = make([]models.WindowTick, len(buf.Ticks))
 	for i, t := range buf.Ticks {
 		tick.WindowTicks[i] = models.WindowTick{

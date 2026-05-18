@@ -17,6 +17,15 @@ type InstrumentConfig struct {
 	IsBacktest bool   `json:"is_backtest"`
 }
 
+type InstrumentProfile struct {
+	InstrumentToken uint32  `json:"instrument_token"`
+	BucketSize      float64 `json:"bucket_size"`
+	ATR14           float64 `json:"atr_14"`
+	ADRPct          float64 `json:"adr_pct"`
+	ADV30d          int64   `json:"adv_30d"`
+	ADVVal30d       float64 `json:"adv_val_30d"`
+}
+
 // =====================================================================
 // 2. RAW MARKET DATA
 // =====================================================================
@@ -66,15 +75,16 @@ type EnrichedTick struct {
 	FullVolProfile *VolumeProfile
 
 	// Stats populated by Enrichment
-	VolumeZ       float64
-	TickCountZ    float64
-	LiveVolume    float64
-	LiveTickCount int
-	HasBaseline   bool
-
-	// 🚀 New hand-off fields for the Analytics Stage
-	HasAnomaly bool    // True if this tick qualifies as an abnormal volume burst
-	AnomalyBin float64 // The snapped geometric price bucket coordinate
+	VolumeZ        float64
+	TickCountZ     float64
+	RelativeVolume float64 // 🔥 Multiplier metric: current 60s volume vs flat line expected minute volume
+	LiveVolume     float64
+	LiveTickCount  int
+	HasBaseline    bool
+	WindowTicks    []WindowTick
+	// Hand-off fields for the Analytics Stage
+	HasAnomaly bool
+	AnomalyBin float64
 }
 
 // VPNode represents a single price bucket and its accumulated volume.

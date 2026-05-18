@@ -162,10 +162,13 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
-	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager)
-	barStage := pipeline.NewBarBuilderStage(a.DBWriter, a.wsHub)
+	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, advMap)
 
-	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barStage, a.DBWriter)
+	analyticsStage := pipeline.NewAnalyticsStage(profilesMap)
+
+	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub)
+
+	a.Pipeline = NewPipeline(vpStage, enrichmentStage, analyticsStage, barManager, a.DBWriter)
 	a.activePipe = a.Pipeline
 	return nil
 }
