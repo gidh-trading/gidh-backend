@@ -85,3 +85,22 @@ type HeatmapCell struct {
 	// 🎯 Mathematical Equilibrium
 	MicroPrice float64 `json:"micro_price"` // Imbalance-adjusted true micro fair-value
 }
+
+type UIHeatmapCell struct {
+	P float64 `json:"p"` // Price Bin
+	V float64 `json:"v"` // Cell Volume
+	I float64 `json:"i"` // Intensity Score
+	O float64 `json:"o"` // Order Flow Delta
+}
+
+type TickMicrostructure struct {
+	AggressiveBuy    float64
+	AggressiveSell   float64
+	DepthImbalance   float64
+	NormalizedVOFI   float64
+	MicroPrice       float64
+	ConsumedAsk      float64
+	ConsumedBid      float64
+	ReplenishmentAsk float64
+	ReplenishmentBid float64
+}

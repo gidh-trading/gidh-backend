@@ -83,8 +83,9 @@ type EnrichedTick struct {
 	HasBaseline    bool
 	WindowTicks    []WindowTick
 	// Hand-off fields for the Analytics Stage
-	HasAnomaly bool
-	AnomalyBin float64
+	HasAnomaly     bool
+	AnomalyBin     float64
+	Microstructure TickMicrostructure
 }
 
 // VPNode represents a single price bucket and its accumulated volume.
@@ -189,7 +190,7 @@ type Bar struct {
 	TotalSellQty  float64 `json:"total_sell_qty"`
 
 	// ---- Microstructure Analytics Heatmap ----
-	Heatmap []HeatmapCell `json:"heatmap"`
+	Heatmap []UIHeatmapCell `json:"heatmap"`
 
 	// ---- Raw ticks ----
 	Ticks []TickData `json:"-"`
