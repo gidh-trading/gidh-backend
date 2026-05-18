@@ -183,12 +183,14 @@ func (c *Client) receiveAnomaliesLoop(stream gidhproto.AnalyticIngestor_StreamEn
 
 func (c *Client) processIncomingAnomaly(res *gidhproto.AnomalyResponse) {
 	ts := res.Timestamp.AsTime().Local()
+
+	// Reconcile the instrument token to a human-readable stock name mapping
 	symbol := c.tokenToName[res.InstrumentToken]
 	if symbol == "" {
 		symbol = "UNKNOWN"
 	}
 
-	// 1. UI Broadcasting layer across WebSocket channels
+	// 1. UI Broadcasting layer - STRICTLY isolated to stock-specific anomaly channels
 	if c.wsHub != nil {
 		payload := map[string]any{
 			"type": "anomaly_alert",
@@ -206,16 +208,14 @@ func (c *Client) processIncomingAnomaly(res *gidhproto.AnomalyResponse) {
 				"cluster_vwap":     res.ClusterVwap,
 			},
 		}
-		// Broadcast onto the main operational trading feed layout
-		c.wsHub.BroadcastJSON("global:trading", payload)
-		// Mirror down onto specific asset tracking channels
-		c.wsHub.BroadcastJSON(symbol+":1m", payload)
+
+		// Broadcast only to clients explicitly monitoring this stock's analytical stream
+		c.wsHub.BroadcastJSON(symbol+":anomalies", payload)
 	}
 
-	// 2. Database layer persistence routing based on message layout type
+	// 2. Database layer persistence routing (Unchanged)
 	if c.dbWriter != nil {
 		if res.AnomalyType == "WHALE_BLOCK" {
-			// Calculate side flag parameters
 			side := "BUY"
 			if res.SellVolume > res.BuyVolume {
 				side = "SELL"
@@ -227,7 +227,7 @@ func (c *Client) processIncomingAnomaly(res *gidhproto.AnomalyResponse) {
 				Price:           res.Price,
 				Volume:          res.TotalVolume,
 				Side:            side,
-				VExpected:       1.0, // Baseline modifier value
+				VExpected:       1.0,
 			})
 		} else if res.AnomalyType == "GRID_CLUSTER" {
 			c.dbWriter.AddAnomalyGrid(models.AnomalyGridRecord{
