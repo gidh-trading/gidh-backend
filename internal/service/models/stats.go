@@ -91,16 +91,10 @@ type UIHeatmapCell struct {
 	V float64 `json:"v"` // Cell Volume
 	I float64 `json:"i"` // Intensity Score
 	O float64 `json:"o"` // Order Flow Delta
+	D float64 `json:"d"`
 }
 
 type TickMicrostructure struct {
-	AggressiveBuy    float64
-	AggressiveSell   float64
-	DepthImbalance   float64
-	NormalizedVOFI   float64
-	MicroPrice       float64
-	ConsumedAsk      float64
-	ConsumedBid      float64
-	ReplenishmentAsk float64
-	ReplenishmentBid float64
+	AggressiveBuy  float64
+	AggressiveSell float64
 }

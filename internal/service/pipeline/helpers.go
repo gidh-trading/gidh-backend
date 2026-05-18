@@ -41,13 +41,6 @@ func (bm *BarManager) accumulateMicrostructure(cs *candleState, tick *models.Enr
 	cell.CellVolume += tickVol
 	cell.AggressiveBuyVol += ms.AggressiveBuy
 	cell.AggressiveSellVol += ms.AggressiveSell
-	cell.DepthImbalance = ms.DepthImbalance // You might want a moving average here eventually
-	cell.OrderFlowDelta += ms.NormalizedVOFI
-	cell.ConsumedBidLiq += ms.ConsumedBid
-	cell.ConsumedAskLiq += ms.ConsumedAsk
-	cell.ReplenishmentBid += ms.ReplenishmentBid
-	cell.ReplenishmentAsk += ms.ReplenishmentAsk
-	cell.MicroPrice = ms.MicroPrice
 
 	// Dynamic resizing
 	if cs.maxAnomalyCount > 0 {
