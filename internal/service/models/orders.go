@@ -19,18 +19,19 @@ type OrderRequest struct {
 // gidh-backend/internal/service/models/orders.go
 
 type OrderBookEntry struct {
-	OrderID       string    `json:"order_id"`
-	Symbol        string    `json:"symbol"`
-	Side          string    `json:"side"`
-	OrderType     string    `json:"order_type"`
-	Qty           int       `json:"qty"`
-	FilledQty     int       `json:"filled_qty"`
-	Price         float64   `json:"price"`
-	Status        string    `json:"status"`
-	Timestamp     time.Time `json:"timestamp"`
-	TargetPrice   float64   `json:"target_price,omitempty"`
-	StopLossPrice float64   `json:"stop_loss_price,omitempty"`
-	UserEmail     string    `json:"user_email,omitempty"`
+	OrderID        string    `json:"order_id"`
+	Symbol         string    `json:"symbol"`
+	Side           string    `json:"side"`
+	OrderType      string    `json:"order_type"`
+	Qty            int       `json:"qty"`
+	FilledQty      int       `json:"filled_qty"`
+	Price          float64   `json:"price"`
+	Status         string    `json:"status"`
+	Timestamp      time.Time `json:"timestamp"`
+	TargetPrice    float64   `json:"target_price,omitempty"`
+	StopLossPrice  float64   `json:"stop_loss_price,omitempty"`
+	UserEmail      string    `json:"user_email,omitempty"`
+	SiblingOrderID string    `json:"sibling_order_id,omitempty"`
 }
 
 type Position struct {

@@ -217,13 +217,6 @@ func (lm *LiveOrderManager) placeOCOLegs(filledEntry kiteconnect.Order, req *mod
 			lm.ocoLinks[slOrderID] = targetOrderID
 		}
 
-		// 🧠 Save the link to DB so we can reconstruct it after restart
-		pool := db.GetPool()
-		if pool != nil && targetOrderID != "" && slOrderID != "" {
-			ctx := context.Background()
-			pool.Exec(ctx, "UPDATE gidh_orders SET sibling_order_id = $1 WHERE order_id = $2", slOrderID, targetOrderID)
-			pool.Exec(ctx, "UPDATE gidh_orders SET sibling_order_id = $1 WHERE order_id = $2", targetOrderID, slOrderID)
-		}
 	}
 
 	// 4. Attach exchange IDs to position state
@@ -506,26 +499,27 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 	}
 
 	req, isTracked := lm.orderTracker[o.OrderID]
-	_, isBotLeg := lm.ocoLinks[o.OrderID]
+	siblingID, isBotLeg := lm.ocoLinks[o.OrderID]
 
-	email := "bot@gidh.tech" // Fallback if traded outside Gidh
+	email := "bot@gidh.tech"
 	if isTracked && req.UserEmail != "" {
-		email = req.UserEmail // User Entry or Manual Exit
+		email = req.UserEmail
 	} else if isBotLeg {
-		email = "bot.live@gidh.tech" // System automatically placed Limit/Stop leg
+		email = "bot.live@gidh.tech"
 	}
 
 	entry := models.OrderBookEntry{
-		OrderID:   o.OrderID,
-		Symbol:    o.TradingSymbol,
-		Side:      o.TransactionType,
-		OrderType: o.OrderType,
-		Qty:       int(o.Quantity),
-		FilledQty: int(o.FilledQuantity),
-		Price:     o.Price,
-		Status:    status,
-		Timestamp: o.OrderTimestamp.Time,
-		UserEmail: email,
+		OrderID:        o.OrderID,
+		Symbol:         o.TradingSymbol,
+		Side:           o.TransactionType,
+		OrderType:      o.OrderType,
+		Qty:            int(o.Quantity),
+		FilledQty:      int(o.FilledQuantity),
+		Price:          o.Price,
+		Status:         status,
+		Timestamp:      o.OrderTimestamp.Time,
+		UserEmail:      email,
+		SiblingOrderID: siblingID,
 	}
 
 	// Restore TP/SL intent so UI sees it while the limit order is PENDING
@@ -652,17 +646,21 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 	pool := db.GetPool()
 
 	for _, o := range orders {
-		entry := lm.mapKiteOrderToLocal(o)
-		lm.updateLocalOrderBook(entry) // This populates lm.orderBook
-
-		// 2. RECONSTRUCT OCO LINKS FROM DB
+		// 1. RECONSTRUCT OCO LINKS FROM DB FIRST!
 		var siblingID string
 		if pool != nil {
+			// Ignore sql.ErrNoRows, only map if a valid string is returned
 			err := pool.QueryRow(ctx, "SELECT sibling_order_id FROM gidh_orders WHERE order_id = $1", o.OrderID).Scan(&siblingID)
 			if err == nil && siblingID != "" {
 				lm.ocoLinks[o.OrderID] = siblingID
 			}
 		}
+
+		// 2. NOW map to local. It will correctly see the ocoLink we just loaded into RAM.
+		entry := lm.mapKiteOrderToLocal(o)
+
+		// 3. Update the local order book (which also safely re-persists to the DB)
+		lm.updateLocalOrderBook(entry)
 	}
 
 	// 3. SYNC POSITIONS SECOND

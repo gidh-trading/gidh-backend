@@ -157,19 +157,20 @@ func (w *DBWriter) PersistOrder(order models.OrderBookEntry) {
 	query := `
 		INSERT INTO gidh_orders (
 			order_id, symbol, product, side, order_type, quantity, 
-			filled_qty, price, status, timestamp, target_price, sl_price, trading_date, user_email
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+			filled_qty, price, status, timestamp, target_price, sl_price, trading_date, user_email, sibling_order_id
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
 		ON CONFLICT (order_id) DO UPDATE SET
 			status = EXCLUDED.status,
 			filled_qty = EXCLUDED.filled_qty,
 			price = EXCLUDED.price,
-			user_email = EXCLUDED.user_email;`
+			user_email = EXCLUDED.user_email,
+			sibling_order_id = EXCLUDED.sibling_order_id;`
 
 	// 🧠 Maps order.UserEmail directly to the 14th placeholder query argument ($14)
 	_, err := w.pool.Exec(ctx, query,
 		order.OrderID, order.Symbol, "MIS", order.Side, order.OrderType, order.Qty,
 		order.FilledQty, order.Price, order.Status, order.Timestamp,
-		order.TargetPrice, order.StopLossPrice, order.Timestamp, order.UserEmail)
+		order.TargetPrice, order.StopLossPrice, order.Timestamp, order.UserEmail, order.SiblingOrderID)
 
 	if err != nil {
 		logger.Errorf("DB Error persisting order %s: %v", order.OrderID, err)
