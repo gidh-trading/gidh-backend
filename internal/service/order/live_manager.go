@@ -231,44 +231,50 @@ func (lm *LiveOrderManager) placeOCOLegs(filledEntry kiteconnect.Order, req *mod
 // 2. Modifying & Exiting (Exchange Interactions)
 // ============================================================================
 
-func (lm *LiveOrderManager) UpdatePositionMetadata(symbol, product string, tp, sl float64) error {
+func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string, tp float64, sl float64) error {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
+	// 1. Identify the position
 	key := fmt.Sprintf("%s:%s", strings.ToUpper(symbol), strings.ToUpper(product))
 	pos, exists := lm.activePositions[key]
 	if !exists || pos.NetQuantity == 0 {
-		return fmt.Errorf("no active position found")
+		return fmt.Errorf("no active position found for %s", symbol)
 	}
 
-	// Modify Target Order
+	// 2. Modify Target Order (if exists)
 	if pos.TargetOrderID != "" && tp > 0 {
 		_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.TargetOrderID, kiteconnect.OrderParams{
 			OrderType: kiteconnect.OrderTypeLimit,
 			Price:     tp,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to modify target order: %v", err)
+			logger.Errorf("[Live] Failed to modify Target: %v", err)
+			return err
 		}
 		pos.TargetPrice = tp
 	}
 
-	// Modify SL-M Order
+	// 3. Modify Stop-Loss Order (if exists)
 	if pos.StopLossOrderID != "" && sl > 0 {
 		_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.StopLossOrderID, kiteconnect.OrderParams{
 			OrderType:    kiteconnect.OrderTypeSLM,
 			TriggerPrice: sl,
 		})
 		if err != nil {
-			return fmt.Errorf("failed to modify SL order: %v", err)
+			logger.Errorf("[Live] Failed to modify SL: %v", err)
+			return err
 		}
 		pos.StopLossPrice = sl
 	}
 
+	// 4. Persistence & Broadcast
 	if lm.dbWriter != nil {
 		lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
 	}
 	lm.broadcastPositionUpdate(pos)
+
+	logger.Infof("[Live] Metadata updated for %s: TP=%.2f, SL=%.2f", symbol, tp, sl)
 	return nil
 }
 
@@ -301,11 +307,27 @@ func (lm *LiveOrderManager) CancelOrder(orderID string, userEmail string) error 
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
+	// 1. Cancel on Exchange
 	_, err := lm.kiteClient.CancelOrder(kiteconnect.VarietyRegular, orderID, nil)
 	if err != nil {
 		return fmt.Errorf("failed to cancel order on exchange: %v", err)
 	}
-	return nil
+
+	// 2. Update the local order book state immediately so it reflects the requester
+	for i, o := range lm.orderBook {
+		if o.OrderID == orderID {
+			lm.orderBook[i].Status = "CANCELLED"
+			lm.orderBook[i].UserEmail = userEmail // 👈 Inject the requester's email here
+
+			// Persist to DB
+			if lm.dbWriter != nil {
+				lm.dbWriter.PersistOrder(lm.orderBook[i])
+			}
+			lm.broadcastOrderUpdate(lm.orderBook[i])
+			return nil
+		}
+	}
+	return fmt.Errorf("order not found locally")
 }
 
 func (lm *LiveOrderManager) ExitPosition(ctx context.Context, symbol string, product string, quantity int, userEmail string) error {
@@ -570,4 +592,41 @@ func (lm *LiveOrderManager) broadcastPositionUpdate(pos *models.Position) {
 			"data": pos,
 		})
 	}
+}
+
+func (lm *LiveOrderManager) SyncPositions() error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	// 1. Fetch current positions from Zerodha
+	positions, err := lm.kiteClient.GetPositions()
+	if err != nil {
+		return fmt.Errorf("failed to sync positions from kite: %w", err)
+	}
+
+	// 2. Rebuild local map
+	newPositions := make(map[string]*models.Position)
+	for _, pos := range positions.Day {
+		// Only track positions with net quantity
+		if pos.Quantity == 0 {
+			continue
+		}
+
+		key := fmt.Sprintf("%s:%s", strings.ToUpper(pos.Tradingsymbol), strings.ToUpper(pos.Product))
+		newPositions[key] = &models.Position{
+			Symbol:       strings.ToUpper(pos.Tradingsymbol),
+			Product:      pos.Product,
+			NetQuantity:  int(pos.Quantity),
+			AveragePrice: pos.AveragePrice,
+			Side:         "LONG", // You can refine this based on NetQuantity sign
+		}
+		if pos.Quantity < 0 {
+			newPositions[key].Side = "SHORT"
+		}
+
+		logger.Infof("[Sync] Loaded %s position: Qty %d", pos.Tradingsymbol, pos.Quantity)
+	}
+
+	lm.activePositions = newPositions
+	return nil
 }

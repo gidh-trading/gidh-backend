@@ -239,3 +239,14 @@ func (a *App) Stop() {
 	// [Analytic Client close sequence removed from here]
 	db.CloseDB()
 }
+
+func (a *App) initLiveState() {
+	if a.Config.Mode == "live" && a.OrderManager != nil {
+		// Cast the interface to the concrete LiveOrderManager
+		if liveMgr, ok := a.OrderManager.(*order.LiveOrderManager); ok {
+			if err := liveMgr.SyncPositions(); err != nil {
+				logger.Errorf("Failed to sync live positions: %v", err)
+			}
+		}
+	}
+}
