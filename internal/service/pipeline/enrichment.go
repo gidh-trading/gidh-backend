@@ -14,10 +14,16 @@ import (
 type EnrichmentTick struct {
 	Timestamp time.Time
 	Volume    float64
+	Price     float64 // NEW: Track price for regression
+	VWAP      float64 // NEW: Track VWAP for regression
+	X         float64 // NEW: Normalized time (seconds since midnight) to prevent float overflow
 }
 
 type TokenRollingBuffer struct {
-	Ticks []EnrichmentTick
+	Ticks    []EnrichmentTick
+	PriceReg RollingRegression
+	VWAPReg  RollingRegression
+	VolReg   RollingRegression
 }
 
 func NewTokenRollingBuffer() *TokenRollingBuffer {
@@ -26,15 +32,35 @@ func NewTokenRollingBuffer() *TokenRollingBuffer {
 	}
 }
 
-func (b *TokenRollingBuffer) Push(ts time.Time, vol float64, duration time.Duration) {
-	b.Ticks = append(b.Ticks, EnrichmentTick{
+func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, duration time.Duration) {
+	// Normalize X-axis to "seconds since midnight" for clean math
+	x := float64(ts.Hour()*3600 + ts.Minute()*60 + ts.Second())
+
+	tick := EnrichmentTick{
 		Timestamp: ts,
 		Volume:    vol,
-	})
+		Price:     price,
+		VWAP:      vwap,
+		X:         x,
+	}
+
+	b.Ticks = append(b.Ticks, tick)
+
+	// O(1) Add to regression running totals
+	b.PriceReg.Add(x, price)
+	b.VWAPReg.Add(x, vwap)
+	b.VolReg.Add(x, vol)
 
 	cutoff := ts.Add(-duration)
 	evictIdx := 0
 	for evictIdx < len(b.Ticks) && b.Ticks[evictIdx].Timestamp.Before(cutoff) {
+		oldTick := b.Ticks[evictIdx]
+
+		// O(1) Remove from regression running totals
+		b.PriceReg.Remove(oldTick.X, oldTick.Price)
+		b.VWAPReg.Remove(oldTick.X, oldTick.VWAP)
+		b.VolReg.Remove(oldTick.X, oldTick.Volume)
+
 		evictIdx++
 	}
 	if evictIdx > 0 {
@@ -118,7 +144,8 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		buf = NewTokenRollingBuffer()
 		s.buffers[token] = buf
 	}
-	buf.Push(ts, vol, 60*time.Second)
+	// Feed the VWAP (AverageTradedPrice), Price, and Vol into the buffer
+	buf.Push(ts, price, tick.Raw.AverageTradedPrice, vol, 60*time.Second)
 
 	// Get live rolling stats
 	liveVolume, liveTickCount := buf.GetStats()
@@ -157,6 +184,10 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	tick.VolumeZ = volZ
 	tick.TickCountZ = tcZ
+	pSlope, vSlope, volSlope := buf.GetMicroSlopes()
+	tick.MicroPriceSlope = pSlope
+	tick.MicroVWAPSlope = vSlope
+	tick.MicroVolumeSlope = volSlope
 
 	return nil
 }
@@ -177,4 +208,9 @@ func (s *EnrichmentStage) calculateTickVolume(token uint32, tick *models.Enriche
 
 	s.lastVolumeMap[token] = curr
 	return delta
+}
+
+// GetMicroSlopes instantly returns the current trajectory of the 60-second window
+func (b *TokenRollingBuffer) GetMicroSlopes() (priceSlope, vwapSlope, volSlope float64) {
+	return b.PriceReg.Slope(), b.VWAPReg.Slope(), b.VolReg.Slope()
 }

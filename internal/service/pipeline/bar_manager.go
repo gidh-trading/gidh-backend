@@ -80,24 +80,45 @@ func (bm *BarManager) updateTimeframe(
 	tick *models.EnrichedTick,
 ) {
 	cs := stateMap[token]
-
-	// Calculate the mathematical boundary for this duration (e.g., 09:15:00 for a 5m candle hit at 09:17:34)
 	candleStart := ts.Truncate(duration)
 
-	// If the current tick's boundary is strictly newer than the candle we are building, close the old one.
 	if cs.bar.Timestamp.Before(candleStart) {
 		// 1. Finalize the old bar to prepare it for database insertion
 		closedBar := cs.bar
 		closedBar.Heatmap = cs.finalizeTransformsForUI()
 
-		// 2. Write to the database (Assuming your DBWriter has a WriteBar/SaveBar method)
 		if bm.writer != nil {
 			bm.writer.AddBar(*closedBar)
 		}
 
-		// 3. Create a brand new, empty candle state starting at this new time boundary
-		cs = newCandleState(candleStart, price, token, tick.Raw.StockName, timeframe)
-		stateMap[token] = cs
+		// ----------------------------------------------------
+		// 📈 UPDATE MACRO REGRESSION (NEW)
+		// ----------------------------------------------------
+		// Normalize X-Axis to the minute of the day for stable math
+		x := float64(closedBar.Timestamp.Hour()*60 + closedBar.Timestamp.Minute())
+
+		// Add this closed bar to the running regression totals
+		cs.macroQueue = append(cs.macroQueue, macroPoint{
+			x: x, price: closedBar.Close, vwap: closedBar.VWAP, volume: closedBar.Volume,
+		})
+		cs.PriceReg.Add(x, closedBar.Close)
+		cs.VWAPReg.Add(x, closedBar.VWAP)
+		cs.VolReg.Add(x, closedBar.Volume)
+
+		// O(1) Eviction: Keep the macro window strictly at the last 10 bars
+		if len(cs.macroQueue) > 10 {
+			old := cs.macroQueue[0]
+			cs.macroQueue = cs.macroQueue[1:] // Pop the oldest bar
+
+			cs.PriceReg.Remove(old.x, old.price)
+			cs.VWAPReg.Remove(old.x, old.vwap)
+			cs.VolReg.Remove(old.x, old.volume)
+		}
+
+		// 3. Reset ONLY the bar and heatmap for the new candle boundary.
+		// DO NOT overwrite `cs`, otherwise you delete the regressions!
+		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
+		cs.heatmapMap = make(map[float64]*models.HeatmapCell)
 	}
 
 	// 4. Add the tick's data to the active candle

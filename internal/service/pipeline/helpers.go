@@ -5,16 +5,29 @@ import (
 	"time"
 )
 
-// candleState optimizes active high-frequency calculations via map caching.
+type macroPoint struct {
+	x      float64
+	price  float64
+	vwap   float64
+	volume float64
+}
+
 type candleState struct {
 	bar        *models.Bar
 	heatmapMap map[float64]*models.HeatmapCell
+
+	// MACRO ROLLING STATE (Tracks the last 10 closed bars)
+	macroQueue []macroPoint
+	PriceReg   RollingRegression
+	VWAPReg    RollingRegression
+	VolReg     RollingRegression
 }
 
 func newCandleState(ts time.Time, price float64, token uint32, name, timeframe string) *candleState {
 	return &candleState{
 		bar:        newBar(ts, price, token, name, timeframe),
 		heatmapMap: make(map[float64]*models.HeatmapCell),
+		macroQueue: make([]macroPoint, 0, 10),
 	}
 }
 
@@ -51,25 +64,35 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 	cs.bar.VWAP = tick.Raw.AverageTradedPrice
 
-	// 🕵️ NEW: Track Stealth Iceberg Activity
+	// Track Stealth Iceberg Activity
 	cs.bar.TickCount++
 	if tick.TickCountZ > cs.bar.MaxTickCountZ {
 		cs.bar.MaxTickCountZ = tick.TickCountZ
 	}
 
-	// Map the calculated Volume Profile metrics to the Bar
 	if tick.VolProfile != nil {
 		cs.bar.POC = tick.VolProfile.POC
 		cs.bar.VAH = tick.VolProfile.VAH
 		cs.bar.VAL = tick.VolProfile.VAL
 	}
 
-	// Store raw ticks only for the lowest timeframe if needed for historical replay
 	if timeframe == "1m" {
 		cs.bar.Ticks = append(cs.bar.Ticks, tick.Raw)
 	}
 
-	// 🔥 Process microstructure footprints (Only processes anomalous ticks)
+	// ----------------------------------------------------
+	// 🔥 ATTACH SLOPES (NEW)
+	// ----------------------------------------------------
+	// 1. Micro Slopes (Passed down directly from the EnrichedTick)
+	cs.bar.Slopes.MicroPrice = tick.MicroPriceSlope
+	cs.bar.Slopes.MicroVWAP = tick.MicroVWAPSlope
+	cs.bar.Slopes.MicroVolume = tick.MicroVolumeSlope
+
+	// 2. Macro Slopes (Extracted directly from the ongoing candleState regression)
+	cs.bar.Slopes.MacroPrice = cs.PriceReg.Slope()
+	cs.bar.Slopes.MacroVWAP = cs.VWAPReg.Slope()
+	cs.bar.Slopes.MacroVolume = cs.VolReg.Slope()
+
 	bm.accumulateMicrostructure(cs, tick, vol)
 
 	// Broadcast rolling live frames down WebSocket pipes

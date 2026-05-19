@@ -323,31 +323,31 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 		[]string{
 			"timestamp", "instrument_token", "stock_name", "timeframe",
 			"open", "high", "low", "close", "volume", "tick_count",
-			"max_tick_count_z", "vwap", "poc", "vah", "val", "heatmap",
+			"max_tick_count_z", "vwap", "poc", "vah", "val", "heatmap", "slopes", // Added "slopes"
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
 
-			// 1. Marshaling slice metrics to raw JSON format inside stream buffer
-			var heatmapStr string
-			if len(b.Heatmap) > 0 {
-				bytes, err := json.Marshal(b.Heatmap)
-				if err != nil {
-					logger.Errorf("Failed to marshal heatmap for token %d: %v", b.InstrumentToken, err)
-					heatmapStr = "[]"
-				} else {
-					heatmapStr = string(bytes)
-				}
-			} else {
-				heatmapStr = "[]"
+			// 1. Marshal Heatmap
+			heatmapBytes, err := json.Marshal(b.Heatmap)
+			if err != nil {
+				logger.Errorf("Failed to marshal heatmap for token %d: %v", b.InstrumentToken, err)
+				heatmapBytes = []byte("[]")
 			}
 
-			// 2. Append serialization text values straight to the copy record parameters layout
+			// 2. Marshal Slopes
+			slopesBytes, err := json.Marshal(b.Slopes)
+			if err != nil {
+				logger.Errorf("Failed to marshal slopes for token %d: %v", b.InstrumentToken, err)
+				slopesBytes = []byte("{}") // Empty JSON object for error case
+			}
+
+			// 3. Return parameters
 			return []any{
 				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
 				b.Open, b.High, b.Low, b.Close, b.Volume,
 				b.TickCount, b.MaxTickCountZ,
-				b.VWAP, b.POC, b.VAH, b.VAL, heatmapStr,
+				b.VWAP, b.POC, b.VAH, b.VAL, string(heatmapBytes), string(slopesBytes),
 			}, nil
 		}),
 	)

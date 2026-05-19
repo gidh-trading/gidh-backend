@@ -83,6 +83,10 @@ type EnrichedTick struct {
 	HasAnomaly     bool
 	AnomalyBin     float64
 	Microstructure TickMicrostructure
+
+	MicroPriceSlope  float64
+	MicroVWAPSlope   float64
+	MicroVolumeSlope float64
 }
 
 // VPNode represents a single price bucket and its accumulated volume.
@@ -160,6 +164,15 @@ func (vp *VolumeProfile) Copy() *VolumeProfile {
 	return clone
 }
 
+type TrendSlopes struct {
+	MicroPrice  float64 `json:"micro_price"`
+	MicroVWAP   float64 `json:"micro_vwap"`
+	MicroVolume float64 `json:"micro_volume"`
+	MacroPrice  float64 `json:"macro_price"`
+	MacroVWAP   float64 `json:"macro_vwap"`
+	MacroVolume float64 `json:"macro_volume"`
+}
+
 type Bar struct {
 	Timestamp       time.Time `json:"timestamp"`
 	InstrumentToken int32     `json:"instrument_token"`
@@ -192,6 +205,7 @@ type Bar struct {
 
 	// ---- Microstructure Analytics Heatmap ----
 	Heatmap []UIHeatmapCell `json:"heatmap"`
+	Slopes  TrendSlopes     `json:"slopes"`
 
 	// ---- Raw ticks ----
 	Ticks []TickData `json:"-"`

@@ -43,3 +43,47 @@ func (r *RollingState) DirectionalEfficiency() float64 {
 
 	return netDisplacement / totalRange
 }
+
+// RollingRegression maintains O(1) sufficient statistics for linear regression.
+type RollingRegression struct {
+	N     float64
+	SumX  float64
+	SumY  float64
+	SumXY float64
+	SumX2 float64
+}
+
+// Add incorporates a new data point into the running totals.
+func (r *RollingRegression) Add(x, y float64) {
+	r.N++
+	r.SumX += x
+	r.SumY += y
+	r.SumXY += (x * y)
+	r.SumX2 += (x * x)
+}
+
+// Remove takes an expiring data point out of the running totals.
+func (r *RollingRegression) Remove(x, y float64) {
+	if r.N <= 0 {
+		return // Safety check
+	}
+	r.N--
+	r.SumX -= x
+	r.SumY -= y
+	r.SumXY -= (x * y)
+	r.SumX2 -= (x * x)
+}
+
+// Slope calculates the current geometric trajectory.
+func (r *RollingRegression) Slope() float64 {
+	if r.N < 2 {
+		return 0.0 // Need at least 2 points to draw a line
+	}
+
+	denominator := (r.N * r.SumX2) - (r.SumX * r.SumX)
+	if denominator == 0 {
+		return 0.0 // Prevent divide-by-zero on flat vertical lines
+	}
+
+	return ((r.N * r.SumXY) - (r.SumX * r.SumY)) / denominator
+}

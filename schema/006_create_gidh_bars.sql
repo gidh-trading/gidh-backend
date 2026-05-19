@@ -20,7 +20,8 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     vah              DOUBLE PRECISION NOT NULL DEFAULT 0,
     val              DOUBLE PRECISION NOT NULL DEFAULT 0,
 
-    heatmap          JSONB,
+    heatmap          JSONB                     DEFAULT '{}',
+    slopes           JSONB                     DEFAULT '{}',
 
     -- Primary Key must include the partitioning column (timestamp) in TimescaleDB.
     PRIMARY KEY (timestamp, instrument_token, timeframe)
