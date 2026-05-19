@@ -73,7 +73,16 @@ type EnrichedTick struct {
 	TickVolume     int64
 	VolProfile     *VolumeProfileInfo
 	FullVolProfile *VolumeProfile
-	Microstructure TickMicrostructure // Just Buy/Sell now
+
+	// Statistical Triggers
+	VolumeZ        float64
+	TickCountZ     float64
+	RelativeVolume float64
+
+	// Anomaly & Heatmap Routing
+	HasAnomaly     bool
+	AnomalyBin     float64
+	Microstructure TickMicrostructure
 }
 
 // VPNode represents a single price bucket and its accumulated volume.

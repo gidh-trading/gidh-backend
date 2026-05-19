@@ -61,40 +61,22 @@ type TradeStats struct {
 	SellRngEnergy  float64 `json:"sell_rng_energy"`
 }
 
-// HeatmapCell represents a discrete geometric price compartment inside a bar,
-// capturing the concentration and statistical strength of institutional volume bursts.
-type HeatmapCell struct {
-	PriceBin       float64 `json:"price_bin"`       // Y-Axis target price level
-	AnomalyCount   int     `json:"anomaly_count"`   // Frequency of volume anomaly hits
-	IntensityScore float64 `json:"intensity_score"` // Incremental O(1) relative canvas alpha glow
-	CellVolume     float64 `json:"cell_volume"`     // Total absolute volume transacted at this bin
-	VolumeRatio    float64 `json:"volume_ratio"`    // CellVolume / TotalBarVolume for range bar layout width
-
-	// 📊 Trade Flow (Aggressive Executions)
-	AggressiveBuyVol  float64 `json:"aggressive_buy_vol"`  // Market orders hitting the Offer
-	AggressiveSellVol float64 `json:"aggressive_sell_vol"` // Market orders slamming the Bid
-
-	// 🌊 Order Book Flow (Passive Liquidity Deltas)
-	DepthImbalance   float64 `json:"depth_imbalance"`   // Step-weighted top-5 order depth ratio
-	OrderFlowDelta   float64 `json:"order_flow_delta"`  // Volume-regularized VOFI momentum scale
-	ConsumedBidLiq   float64 `json:"consumed_bid_liq"`  // Bid depth lifted without price moving
-	ConsumedAskLiq   float64 `json:"consumed_ask_liq"`  // Ask depth swept without price moving
-	ReplenishmentBid float64 `json:"replenishment_bid"` // Passive buy restocking (Iceberg behavior)
-	ReplenishmentAsk float64 `json:"replenishment_ask"` // Passive sell restocking (Iceberg behavior)
-
-	// 🎯 Mathematical Equilibrium
-	MicroPrice float64 `json:"micro_price"` // Imbalance-adjusted true micro fair-value
-}
-
 type UIHeatmapCell struct {
-	P float64 `json:"p"` // Price Bin
-	V float64 `json:"v"` // Cell Volume
-	I float64 `json:"i"` // Intensity Score
-	O float64 `json:"o"` // Order Flow Delta
-	D float64 `json:"d"`
+	P float64 `json:"p"` // Price Bin (Bucket)
+	V float64 `json:"v"` // Total Volume in this bucket
+	D float64 `json:"d"` // Trade Delta (Aggressive Buy - Aggressive Sell)
+	I float64 `json:"i"` // Intensity (Count of anomaly ticks in this bucket)
 }
 
 type TickMicrostructure struct {
 	AggressiveBuy  float64
 	AggressiveSell float64
+}
+
+type HeatmapCell struct {
+	PriceBin       float64
+	CellVolume     float64
+	AggressiveBuy  float64
+	AggressiveSell float64
+	IntensityScore float64
 }

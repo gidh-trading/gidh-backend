@@ -165,10 +165,9 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		advMap[token] = float64(prof.ADV30d)
 	}
 
-	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, advMap)
-	enrichmentStage.UpdateDNAMap(dnaMap)
+	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, advMap, dnaMap)
 
-	analyticsStage := pipeline.NewAnalyticsStage(profilesMap)
+	analyticsStage := pipeline.NewAnalyticsStage()
 
 	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub)
 

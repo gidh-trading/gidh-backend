@@ -2,20 +2,88 @@
 package pipeline
 
 import (
-	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/order"
 	"sync"
+	"time"
+
+	"gidh-backend/internal/service/models"
 )
 
-type EnrichmentStage struct {
-	lastVolumeMap map[uint32]int64
-	lastPriceMap  map[uint32]float64
-	mu            sync.Mutex
+// --- 1. Rolling Window Data Structures ---
+
+type EnrichmentTick struct {
+	Timestamp time.Time
+	Volume    float64
 }
 
-func NewEnrichmentStage() *EnrichmentStage {
+type TokenRollingBuffer struct {
+	Ticks []EnrichmentTick
+}
+
+func NewTokenRollingBuffer() *TokenRollingBuffer {
+	return &TokenRollingBuffer{
+		Ticks: make([]EnrichmentTick, 0, 500),
+	}
+}
+
+func (b *TokenRollingBuffer) Push(ts time.Time, vol float64, duration time.Duration) {
+	b.Ticks = append(b.Ticks, EnrichmentTick{
+		Timestamp: ts,
+		Volume:    vol,
+	})
+
+	cutoff := ts.Add(-duration)
+	evictIdx := 0
+	for evictIdx < len(b.Ticks) && b.Ticks[evictIdx].Timestamp.Before(cutoff) {
+		evictIdx++
+	}
+	if evictIdx > 0 {
+		b.Ticks = b.Ticks[evictIdx:]
+	}
+}
+
+// GetStats returns the total volume AND the number of ticks inside the rolling window
+func (b *TokenRollingBuffer) GetStats() (float64, int) {
+	var totalVol float64
+	for _, t := range b.Ticks {
+		totalVol += t.Volume
+	}
+	return totalVol, len(b.Ticks)
+}
+
+// --- 2. Enrichment Stage ---
+
+type EnrichmentStage struct {
+	lastVolumeMap   map[uint32]int64
+	lastPriceMap    map[uint32]float64
+	positionManager order.PositionManager
+	advMap          map[uint32]float64
+	dnaMap          map[uint32]map[int]models.TimeBucketDNA
+	buffers         map[uint32]*TokenRollingBuffer
+	loc             *time.Location
+	mu              sync.Mutex
+}
+
+func NewEnrichmentStage(pm order.PositionManager, advMap map[uint32]float64, rawDnaMap map[uint32]*models.MarketDNA) *EnrichmentStage {
+	loc, _ := time.LoadLocation("Asia/Kolkata")
+
+	// Pre-process the DNA arrays into an O(1) nested map for lightning-fast tick lookups
+	fastDnaMap := make(map[uint32]map[int]models.TimeBucketDNA)
+	for token, dna := range rawDnaMap {
+		fastDnaMap[token] = make(map[int]models.TimeBucketDNA)
+		for _, bucket := range dna.TimeBuckets {
+			fastDnaMap[token][bucket.MinuteIndex] = bucket
+		}
+	}
+
 	return &EnrichmentStage{
-		lastVolumeMap: make(map[uint32]int64),
-		lastPriceMap:  make(map[uint32]float64),
+		lastVolumeMap:   make(map[uint32]int64),
+		lastPriceMap:    make(map[uint32]float64),
+		positionManager: pm,
+		advMap:          advMap,
+		dnaMap:          fastDnaMap,
+		buffers:         make(map[uint32]*TokenRollingBuffer),
+		loc:             loc,
 	}
 }
 
@@ -25,15 +93,71 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	token := tick.Raw.InstrumentToken
 	price := tick.Raw.LastPrice
+	ts := tick.Raw.Timestamp.In(s.loc) // Ensure time is strictly IST
 
-	// 1. Calculate actual tick volume (delta)
+	// 1. Calculate actual tick volume
 	tick.TickVolume = s.calculateTickVolume(token, tick)
+	vol := float64(tick.TickVolume)
 
+	// Skip dead updates
 	if tick.TickVolume == 0 && price == s.lastPriceMap[token] {
 		return nil
 	}
 
+	priceChanged := tick.Raw.LastPrice != s.lastPriceMap[token]
+
+	if priceChanged && s.positionManager != nil {
+		s.positionManager.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice, tick.Raw.Timestamp)
+	}
+
 	s.lastPriceMap[token] = price
+
+	// 2. Maintain Continuous 60-Second Sliding Window
+	buf, exists := s.buffers[token]
+	if !exists {
+		buf = NewTokenRollingBuffer()
+		s.buffers[token] = buf
+	}
+	buf.Push(ts, vol, 60*time.Second)
+
+	// Get live rolling stats
+	liveVolume, liveTickCount := buf.GetStats()
+
+	// 3. Compute Standard Relative Volume (RVol)
+	var rVol float64
+	if adv, ok := s.advMap[token]; ok && adv > 0 {
+		expectedVolPerMin := adv / 375.0 // Indian market 375 mins
+		if expectedVolPerMin > 0 {
+			rVol = liveVolume / expectedVolPerMin
+		}
+	}
+	tick.RelativeVolume = rVol
+
+	// 4. Calculate Minute Index & DNA Z-Scores
+	// 09:15 AM = (9*60)+15 = 555 minutes from midnight
+	minOfDay := (ts.Hour() * 60) + ts.Minute()
+	minuteIndex := minOfDay - 555
+
+	var volZ, tcZ float64
+
+	if tokenDna, exists := s.dnaMap[token]; exists {
+		if baseline, ok := tokenDna[minuteIndex]; ok {
+
+			// Volume Z-Score: (Live Vol - Historical Mean) / Historical StdDev
+			if baseline.VolumeStd > 0 {
+				volZ = (liveVolume - baseline.VolumeMean) / baseline.VolumeStd
+			}
+
+			// Tick Count Z-Score: (Live Ticks - Historical Mean) / Historical StdDev
+			if baseline.TickCountStd > 0 {
+				tcZ = (float64(liveTickCount) - baseline.TickCountMean) / baseline.TickCountStd
+			}
+		}
+	}
+
+	tick.VolumeZ = volZ
+	tick.TickCountZ = tcZ
+
 	return nil
 }
 
