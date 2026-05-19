@@ -231,6 +231,16 @@ func (lm *LiveOrderManager) placeOCOLegs(filledEntry kiteconnect.Order, req *mod
 	if pos, ok := lm.activePositions[key]; ok {
 		pos.TargetOrderID = targetOrderID
 		pos.StopLossOrderID = slOrderID
+
+		// 🔥 FIX 1: Map the actual requested prices to the Position struct for the UI
+		pos.TargetPrice = req.TargetPrice
+		pos.StopLossPrice = req.StopLossPrice
+
+		// 🔥 FIX 2: Save this updated intent to the DB
+		if lm.dbWriter != nil {
+			lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+		}
+
 		lm.broadcastPositionUpdate(pos)
 	}
 }
@@ -250,33 +260,88 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 		return fmt.Errorf("no active position found for %s", symbol)
 	}
 
-	// 2. Modify Target Order (if exists)
-	if pos.TargetOrderID != "" && tp > 0 {
-		_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.TargetOrderID, kiteconnect.OrderParams{
-			OrderType: kiteconnect.OrderTypeLimit,
-			Price:     tp,
-		})
-		if err != nil {
-			logger.Errorf("[Live] Failed to modify Target: %v", err)
-			return err
+	// Determine the exit side (opposite of the position)
+	exitSide := kiteconnect.TransactionTypeSell
+	if pos.Side == "SHORT" {
+		exitSide = kiteconnect.TransactionTypeBuy
+	}
+	absQty := int(math.Abs(float64(pos.NetQuantity)))
+
+	// 2. Modify or Place Target Order
+	if tp > 0 {
+		if pos.TargetOrderID != "" {
+			// Modify existing
+			_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.TargetOrderID, kiteconnect.OrderParams{
+				OrderType: kiteconnect.OrderTypeLimit,
+				Price:     tp,
+			})
+			if err != nil {
+				logger.Errorf("[Live] Failed to modify Target: %v", err)
+				return err
+			}
+		} else {
+			// Place NEW Target Leg if one didn't exist
+			tpParams := kiteconnect.OrderParams{
+				Exchange:        kiteconnect.ExchangeNSE,
+				Tradingsymbol:   pos.Symbol,
+				TransactionType: exitSide,
+				Quantity:        absQty,
+				Product:         kiteconnect.ProductMIS,
+				OrderType:       kiteconnect.OrderTypeLimit,
+				Price:           tp,
+				Validity:        kiteconnect.ValidityDay,
+			}
+			resp, err := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, tpParams)
+			if err != nil {
+				logger.Errorf("[Live] Failed to place new Target Leg: %v", err)
+				return err
+			}
+			pos.TargetOrderID = resp.OrderID
 		}
 		pos.TargetPrice = tp
 	}
 
-	// 3. Modify Stop-Loss Order (if exists)
-	if pos.StopLossOrderID != "" && sl > 0 {
-		_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.StopLossOrderID, kiteconnect.OrderParams{
-			OrderType:    kiteconnect.OrderTypeSLM,
-			TriggerPrice: sl,
-		})
-		if err != nil {
-			logger.Errorf("[Live] Failed to modify SL: %v", err)
-			return err
+	// 3. Modify or Place Stop-Loss Order
+	if sl > 0 {
+		if pos.StopLossOrderID != "" {
+			// Modify existing
+			_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.StopLossOrderID, kiteconnect.OrderParams{
+				OrderType:    kiteconnect.OrderTypeSLM,
+				TriggerPrice: sl,
+			})
+			if err != nil {
+				logger.Errorf("[Live] Failed to modify SL: %v", err)
+				return err
+			}
+		} else {
+			// Place NEW SL Leg if one didn't exist
+			slParams := kiteconnect.OrderParams{
+				Exchange:        kiteconnect.ExchangeNSE,
+				Tradingsymbol:   pos.Symbol,
+				TransactionType: exitSide,
+				Quantity:        absQty,
+				Product:         kiteconnect.ProductMIS,
+				OrderType:       kiteconnect.OrderTypeSLM,
+				TriggerPrice:    sl,
+				Validity:        kiteconnect.ValidityDay,
+			}
+			resp, err := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, slParams)
+			if err != nil {
+				logger.Errorf("[Live] Failed to place new SL Leg: %v", err)
+				return err
+			}
+			pos.StopLossOrderID = resp.OrderID
 		}
 		pos.StopLossPrice = sl
 	}
 
-	// 4. Persistence & Broadcast
+	// 4. Update OCO Links if both were just created
+	if pos.TargetOrderID != "" && pos.StopLossOrderID != "" {
+		lm.ocoLinks[pos.TargetOrderID] = pos.StopLossOrderID
+		lm.ocoLinks[pos.StopLossOrderID] = pos.TargetOrderID
+	}
+
+	// 5. Persistence & Broadcast
 	if lm.dbWriter != nil {
 		lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
 	}
