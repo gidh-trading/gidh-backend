@@ -39,15 +39,22 @@ func (s *AnalyticsStage) Process(tick *models.EnrichedTick) error {
 	vol := float64(tick.TickVolume)
 
 	// --- 1. ANOMALY DETECTION & PRICE BINNING ---
-	bucketSize := 1.0
-
+	bucketSize := 1.0 // Fallback default
 	if bs, exists := s.bucketSizes[token]; exists && bs > 0 {
-		bucketSize = bs
+		bucketSize = bs // Use the dynamic stock-specific bucket size
 	}
 
 	tick.AnomalyBin = math.Floor(price/bucketSize) * bucketSize
 
-	if tick.VolumeZ > 2.0 && tick.RelativeVolume > 2.5 {
+	// 🕵️ THE DUAL-ANOMALY ENGINE
+	// 1. Volume Anomaly (The Whale): Massive volume spikes compared to the 30-day average.
+	isVolumeAnomaly := tick.VolumeZ > 2.0 && tick.RelativeVolume > 2.5
+
+	// 2. Frequency Anomaly (The Stealth Iceberg): Transaction counts are +2 StdDevs above the historical mean for this specific minute.
+	isTickFrequencyAnomaly := tick.TickCountZ > 2.0
+
+	// Trigger the heatmap rendering if EITHER of these institutional footprints are detected
+	if isVolumeAnomaly || isTickFrequencyAnomaly {
 		tick.HasAnomaly = true
 	} else {
 		tick.HasAnomaly = false

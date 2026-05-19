@@ -175,6 +175,10 @@ type Bar struct {
 	// ---- Volume ----
 	Volume float64 `json:"volume"`
 
+	// ---- Tick Activity (NEW) ----
+	TickCount     int64   `json:"tick_count"`
+	MaxTickCountZ float64 `json:"max_tick_count_z"`
+
 	// ---- Optional Auction Metrics ----
 	VWAP float64 `json:"vwap"`
 	POC  float64 `json:"poc"`

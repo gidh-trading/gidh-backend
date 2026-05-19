@@ -50,6 +50,14 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	cs.bar.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
 	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 	cs.bar.VWAP = tick.Raw.AverageTradedPrice
+
+	// 🕵️ NEW: Track Stealth Iceberg Activity
+	cs.bar.TickCount++
+	if tick.TickCountZ > cs.bar.MaxTickCountZ {
+		cs.bar.MaxTickCountZ = tick.TickCountZ
+	}
+
+	// Map the calculated Volume Profile metrics to the Bar
 	if tick.VolProfile != nil {
 		cs.bar.POC = tick.VolProfile.POC
 		cs.bar.VAH = tick.VolProfile.VAH

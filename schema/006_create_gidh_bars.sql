@@ -11,6 +11,8 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     low              DOUBLE PRECISION NOT NULL,
     close            DOUBLE PRECISION NOT NULL,
     volume           DOUBLE PRECISION NOT NULL DEFAULT 0,
+    tick_count       INTEGER          NOT NULL DEFAULT 0,
+    max_tick_count_z DOUBLE PRECISION NOT NULL DEFAULT 0,
 
     -- Value Area / Profile Stats
     vwap             DOUBLE PRECISION NOT NULL DEFAULT 0,
