@@ -136,15 +136,18 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 	if siblingID, isLeg := lm.ocoLinks[o.OrderID]; isLeg {
 		if o.Status == kiteconnect.OrderStatusComplete {
 			logger.Infof("[Live] Exit Leg Filled: %s. Cancelling sibling: %s", o.OrderID, siblingID)
-			// Cancel the sibling leg
-			_, err := lm.kiteClient.CancelOrder(kiteconnect.VarietyRegular, siblingID, nil)
-			if err != nil {
-				logger.Errorf("[Live] Failed to cancel sibling OCO leg %s: %v", siblingID, err)
+
+			// Cancel the sibling leg only if one exists
+			if siblingID != "" {
+				_, err := lm.kiteClient.CancelOrder(kiteconnect.VarietyRegular, siblingID, nil)
+				if err != nil {
+					logger.Errorf("[Live] Failed to cancel sibling OCO leg %s: %v", siblingID, err)
+				}
+				delete(lm.ocoLinks, siblingID)
 			}
+
 			delete(lm.ocoLinks, o.OrderID)
-			delete(lm.ocoLinks, siblingID)
 		} else if o.Status == kiteconnect.OrderStatusCancelled || o.Status == kiteconnect.OrderStatusRejected {
-			// If one leg is manually cancelled, untrack it
 			delete(lm.ocoLinks, o.OrderID)
 		}
 		return
@@ -205,9 +208,14 @@ func (lm *LiveOrderManager) placeOCOLegs(filledEntry kiteconnect.Order, req *mod
 	}
 
 	// 3. Link them for OCO logic
-	if targetOrderID != "" && slOrderID != "" {
-		lm.ocoLinks[targetOrderID] = slOrderID
-		lm.ocoLinks[slOrderID] = targetOrderID
+	if targetOrderID != "" || slOrderID != "" {
+		// Even if one is empty (""), we add it to ocoLinks so the system knows the bot placed it
+		if targetOrderID != "" {
+			lm.ocoLinks[targetOrderID] = slOrderID
+		}
+		if slOrderID != "" {
+			lm.ocoLinks[slOrderID] = targetOrderID
+		}
 	}
 
 	// 4. Attach exchange IDs to position state
@@ -327,9 +335,13 @@ func (lm *LiveOrderManager) ExitPosition(ctx context.Context, symbol string, pro
 		Validity:         kiteconnect.ValidityDay,
 	}
 
-	_, err := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, params)
+	resp, err := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, params)
 	if err != nil {
 		return fmt.Errorf("failed to place exit order: %v", err)
+	}
+
+	lm.orderTracker[resp.OrderID] = &models.OrderRequest{
+		UserEmail: userEmail,
 	}
 
 	// 2. Cancel active OCO legs immediately
@@ -463,6 +475,16 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		status = "PENDING"
 	}
 
+	req, isTracked := lm.orderTracker[o.OrderID]
+	_, isBotLeg := lm.ocoLinks[o.OrderID]
+
+	email := "bot@gidh.tech" // Fallback if traded outside Gidh
+	if isTracked && req.UserEmail != "" {
+		email = req.UserEmail // User Entry or Manual Exit
+	} else if isBotLeg {
+		email = "bot.live@gidh.tech" // System automatically placed Limit/Stop leg
+	}
+
 	entry := models.OrderBookEntry{
 		OrderID:   o.OrderID,
 		Symbol:    o.TradingSymbol,
@@ -473,16 +495,13 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		Price:     o.Price,
 		Status:    status,
 		Timestamp: o.OrderTimestamp.Time,
-		UserEmail: "live@gidh.tech",
+		UserEmail: email,
 	}
 
 	// Restore TP/SL intent so UI sees it while the limit order is PENDING
-	if req, exists := lm.orderTracker[o.OrderID]; exists {
+	if isTracked {
 		entry.TargetPrice = req.TargetPrice
 		entry.StopLossPrice = req.StopLossPrice
-		if req.UserEmail != "" {
-			entry.UserEmail = req.UserEmail
-		}
 	}
 
 	return entry

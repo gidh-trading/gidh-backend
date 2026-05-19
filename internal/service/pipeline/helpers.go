@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
-	"sort"
 	"time"
 )
 
@@ -130,6 +129,7 @@ func (cs *candleState) finalizeTransformsForUI() []models.UIHeatmapCell {
 			continue
 		}
 
+		// Calculate the net direction for this price bucket
 		tradeDelta := cell.AggressiveBuy - cell.AggressiveSell
 
 		uiCells = append(uiCells, models.UIHeatmapCell{
@@ -139,25 +139,5 @@ func (cs *candleState) finalizeTransformsForUI() []models.UIHeatmapCell {
 			I: cell.IntensityScore,
 		})
 	}
-
-	// 1. Sort the cells by Intensity (Highest to Lowest)
-	sort.Slice(uiCells, func(i, j int) bool {
-		return uiCells[i].I > uiCells[j].I
-	})
-
-	// 2. THE ABSOLUTE WINNER LOGIC
-	if len(uiCells) > 0 {
-		winner := uiCells[0]
-
-		// Optional Safety Check: Ensure the "winner" actually has significant intensity.
-		// This prevents marking a winner in a dead candle where the highest volume was still tiny.
-		// if winner.I < YOUR_MINIMUM_THRESHOLD {
-		//     return []models.UIHeatmapCell{}
-		// }
-
-		// Return ONLY the absolute dominant level to the UI
-		return []models.UIHeatmapCell{winner}
-	}
-
 	return uiCells
 }
