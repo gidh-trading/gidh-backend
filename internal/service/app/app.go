@@ -60,7 +60,7 @@ func NewApp(cfg *config.Config) (*App, error) {
 	app.initOrderManager()
 
 	if cfg.Mode == "live" {
-
+		app.initLiveState(ctx)
 		dnaMap, advMap := app.loadMarketData(ctx, time.Now())
 		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
 			return nil, err
@@ -240,12 +240,12 @@ func (a *App) Stop() {
 	db.CloseDB()
 }
 
-func (a *App) initLiveState() {
+func (a *App) initLiveState(ctx context.Context) {
 	if a.Config.Mode == "live" && a.OrderManager != nil {
 		// Cast the interface to the concrete LiveOrderManager
 		if liveMgr, ok := a.OrderManager.(*order.LiveOrderManager); ok {
-			if err := liveMgr.SyncPositions(); err != nil {
-				logger.Errorf("Failed to sync live positions: %v", err)
+			if err := liveMgr.SyncExchangeState(ctx); err != nil {
+				logger.Errorf("Failed to sync exchange state: %v", err)
 			}
 		}
 	}

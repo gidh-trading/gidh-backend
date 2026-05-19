@@ -15,7 +15,8 @@ CREATE TABLE IF NOT EXISTS gidh_orders
     timestamp    TIMESTAMPTZ NOT NULL,
     target_price DOUBLE PRECISION,
     sl_price     DOUBLE PRECISION,
-    user_email   TEXT
+    user_email   TEXT,
+    sibling_order_id TEXT
 );
 
 CREATE TABLE IF NOT EXISTS gidh_positions

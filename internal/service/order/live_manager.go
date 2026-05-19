@@ -3,6 +3,7 @@ package order
 import (
 	"context"
 	"fmt"
+	"gidh-backend/internal/service/db"
 	"math"
 	"strings"
 	"sync"
@@ -164,7 +165,7 @@ func (lm *LiveOrderManager) placeOCOLegs(filledEntry kiteconnect.Order, req *mod
 		exitSide = kiteconnect.TransactionTypeBuy
 	}
 
-	filledQtyInt := int(filledEntry.FilledQuantity) // v4 returns float64, params require int
+	filledQtyInt := int(filledEntry.FilledQuantity)
 	var targetOrderID, slOrderID string
 
 	// 1. Place Target Leg (LIMIT)
@@ -196,7 +197,7 @@ func (lm *LiveOrderManager) placeOCOLegs(filledEntry kiteconnect.Order, req *mod
 			Quantity:        filledQtyInt,
 			Product:         kiteconnect.ProductMIS,
 			OrderType:       kiteconnect.OrderTypeSLM,
-			TriggerPrice:    req.StopLossPrice, // SL-M uses TriggerPrice
+			TriggerPrice:    req.StopLossPrice,
 			Validity:        kiteconnect.ValidityDay,
 		}
 		resp, slErr := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, slParams)
@@ -207,14 +208,21 @@ func (lm *LiveOrderManager) placeOCOLegs(filledEntry kiteconnect.Order, req *mod
 		}
 	}
 
-	// 3. Link them for OCO logic
+	// 3. Link them for OCO logic & Persist to DB
 	if targetOrderID != "" || slOrderID != "" {
-		// Even if one is empty (""), we add it to ocoLinks so the system knows the bot placed it
 		if targetOrderID != "" {
 			lm.ocoLinks[targetOrderID] = slOrderID
 		}
 		if slOrderID != "" {
 			lm.ocoLinks[slOrderID] = targetOrderID
+		}
+
+		// 🧠 Save the link to DB so we can reconstruct it after restart
+		pool := db.GetPool()
+		if pool != nil && targetOrderID != "" && slOrderID != "" {
+			ctx := context.Background()
+			pool.Exec(ctx, "UPDATE gidh_orders SET sibling_order_id = $1 WHERE order_id = $2", slOrderID, targetOrderID)
+			pool.Exec(ctx, "UPDATE gidh_orders SET sibling_order_id = $1 WHERE order_id = $2", targetOrderID, slOrderID)
 		}
 	}
 
@@ -628,5 +636,63 @@ func (lm *LiveOrderManager) SyncPositions() error {
 	}
 
 	lm.activePositions = newPositions
+	return nil
+}
+
+func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	// 1. SYNC ORDERS FIRST (Critical for partial fill math)
+	orders, err := lm.kiteClient.GetOrders()
+	if err != nil {
+		return fmt.Errorf("failed to get orders: %w", err)
+	}
+
+	pool := db.GetPool()
+
+	for _, o := range orders {
+		entry := lm.mapKiteOrderToLocal(o)
+		lm.updateLocalOrderBook(entry) // This populates lm.orderBook
+
+		// 2. RECONSTRUCT OCO LINKS FROM DB
+		var siblingID string
+		if pool != nil {
+			err := pool.QueryRow(ctx, "SELECT sibling_order_id FROM gidh_orders WHERE order_id = $1", o.OrderID).Scan(&siblingID)
+			if err == nil && siblingID != "" {
+				lm.ocoLinks[o.OrderID] = siblingID
+			}
+		}
+	}
+
+	// 3. SYNC POSITIONS SECOND
+	positions, err := lm.kiteClient.GetPositions()
+	if err != nil {
+		return fmt.Errorf("failed to get positions: %w", err)
+	}
+
+	for _, pos := range positions.Day {
+		if pos.Quantity == 0 {
+			continue
+		}
+
+		// Logic for direction based on sign of NetQuantity
+		txType := kiteconnect.TransactionTypeBuy
+		if pos.Quantity < 0 {
+			txType = kiteconnect.TransactionTypeSell
+		}
+
+		// Route back through the unified position reconciliation function
+		lm.updatePositionStateFromKite(kiteconnect.Order{
+			TradingSymbol:   pos.Tradingsymbol,
+			Product:         pos.Product,
+			TransactionType: txType,
+			FilledQuantity:  float64(math.Abs(float64(pos.Quantity))),
+			AveragePrice:    pos.AveragePrice,
+		}, int(math.Abs(float64(pos.Quantity))))
+
+		logger.Infof("[Sync] Reconstructed %s position: Qty %d", pos.Tradingsymbol, pos.Quantity)
+	}
+
 	return nil
 }
