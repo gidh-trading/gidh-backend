@@ -86,6 +86,14 @@ func (bm *BarManager) updateTimeframe(
 		// 1. Finalize the old bar to prepare it for database insertion
 		closedBar := cs.bar
 		closedBar.Heatmap = cs.finalizeTransformsForUI()
+		closedBar.Slopes = cs.finalizeSlopesForUI()
+
+		if bm.wsHub != nil {
+			bm.wsHub.BroadcastJSON(tick.Raw.StockName+":"+timeframe, map[string]any{
+				"type": "bar",
+				"data": closedBar,
+			})
+		}
 
 		if bm.writer != nil {
 			bm.writer.AddBar(*closedBar)
@@ -115,10 +123,19 @@ func (bm *BarManager) updateTimeframe(
 			cs.VolReg.Remove(old.x, old.volume)
 		}
 
-		// 3. Reset ONLY the bar and heatmap for the new candle boundary.
+		// 3. Reset ONLY the bar, heatmaps, and max values for the new candle
 		// DO NOT overwrite `cs`, otherwise you delete the regressions!
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
 		cs.heatmapMap = make(map[float64]*models.HeatmapCell)
+
+		cs.mpMap = make(map[int]float64)
+		cs.mvMap = make(map[int]float64)
+		cs.mvolMap = make(map[int]float64)
+
+		cs.maxMp = 0
+		cs.maxMv = 0
+		cs.maxMvol = 0
+
 	}
 
 	// 4. Add the tick's data to the active candle

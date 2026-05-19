@@ -1,7 +1,10 @@
 package pipeline
 
 import (
+	"fmt"
 	"gidh-backend/internal/service/models"
+	"math"
+	"sort"
 	"time"
 )
 
@@ -16,17 +19,34 @@ type candleState struct {
 	bar        *models.Bar
 	heatmapMap map[float64]*models.HeatmapCell
 
+	// Slope Maps keyed by offset
+	mpMap   map[int]float64
+	mvMap   map[int]float64
+	mvolMap map[int]float64
+
+	// Track the max magnitudes for opacity calculation
+	maxMp   float64
+	maxMv   float64
+	maxMvol float64
+
 	// MACRO ROLLING STATE (Tracks the last 10 closed bars)
 	macroQueue []macroPoint
 	PriceReg   RollingRegression
 	VWAPReg    RollingRegression
 	VolReg     RollingRegression
+
+	lastBroadcast time.Time
 }
 
 func newCandleState(ts time.Time, price float64, token uint32, name, timeframe string) *candleState {
 	return &candleState{
 		bar:        newBar(ts, price, token, name, timeframe),
 		heatmapMap: make(map[float64]*models.HeatmapCell),
+
+		mpMap:   make(map[int]float64),
+		mvMap:   make(map[int]float64),
+		mvolMap: make(map[int]float64),
+
 		macroQueue: make([]macroPoint, 0, 10),
 	}
 }
@@ -81,45 +101,37 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	}
 
 	// ----------------------------------------------------
-	// 🔥 ATTACH SLOPES
+	// 🔥 ATTACH SLOPES AND TRACK MAGNITUDES
 	// ----------------------------------------------------
-	// 1. Micro Slopes (Passed down directly from the EnrichedTick)
-	cs.bar.Slopes.MicroPrice = tick.MicroPriceSlope
-	cs.bar.Slopes.MicroVWAP = tick.MicroVWAPSlope
-	cs.bar.Slopes.MicroVolume = tick.MicroVolumeSlope
-
-	// 2. Macro Slopes (Extracted directly from the ongoing candleState regression)
-	cs.bar.Slopes.MacroPrice = cs.PriceReg.Slope()
-	cs.bar.Slopes.MacroVWAP = cs.VWAPReg.Slope()
-	cs.bar.Slopes.MacroVolume = cs.VolReg.Slope()
-
-	// ----------------------------------------------------
-	// 🔥 INTRA-BAR SLOPE SAMPLING
-	// ----------------------------------------------------
-	// Calculate how many seconds into the candle we currently are
 	offset := int(tick.Raw.Timestamp.Sub(cs.bar.Timestamp).Seconds())
-	historyLen := len(cs.bar.Slopes.History)
 
-	// Throttling: Only append if the array is empty OR at least 1 second
-	// has passed since the last snapshot.
-	if historyLen == 0 || cs.bar.Slopes.History[historyLen-1].Offset < offset {
-		cs.bar.Slopes.History = append(cs.bar.Slopes.History, models.SlopeSnapshot{
-			Offset: offset,
-			MP:     tick.MicroPriceSlope,
-			MV:     tick.MicroVWAPSlope,
-			MVol:   tick.MicroVolumeSlope,
-		})
+	cs.mpMap[offset] = tick.MicroPriceSlope
+	if absMp := math.Abs(tick.MicroPriceSlope); absMp > cs.maxMp {
+		cs.maxMp = absMp
+	}
+
+	cs.mvMap[offset] = tick.MicroVWAPSlope
+	if absMv := math.Abs(tick.MicroVWAPSlope); absMv > cs.maxMv {
+		cs.maxMv = absMv
+	}
+
+	cs.mvolMap[offset] = tick.MicroVolumeSlope
+	if absMvol := math.Abs(tick.MicroVolumeSlope); absMvol > cs.maxMvol {
+		cs.maxMvol = absMvol
 	}
 
 	bm.accumulateMicrostructure(cs, tick, vol)
 
 	// Broadcast rolling live frames down WebSocket pipes
-	if bm.wsHub != nil {
+	if bm.wsHub != nil && time.Since(cs.lastBroadcast) > 250*time.Millisecond {
 		cs.bar.Heatmap = cs.finalizeTransformsForUI()
+		cs.bar.Slopes = cs.finalizeSlopesForUI()
+
 		bm.wsHub.BroadcastJSON(tick.Raw.StockName+":"+timeframe, map[string]any{
 			"type": "bar",
 			"data": cs.bar,
 		})
+		cs.lastBroadcast = time.Now()
 	}
 }
 
@@ -181,4 +193,75 @@ func (cs *candleState) finalizeTransformsForUI() []models.UIHeatmapCell {
 		})
 	}
 	return uiCells
+}
+
+// Helper function to build the render arrays
+func buildRenderCells(dataMap map[int]float64, maxVal float64) []models.SlopeRenderCell {
+	cells := make([]models.SlopeRenderCell, 0, len(dataMap))
+
+	for o, val := range dataMap {
+		// 1. Calculate Opacity based on magnitude
+		opacity := 0.1 // Minimum baseline visibility
+		if maxVal > 0 {
+			opacity = math.Abs(val) / maxVal
+			if opacity < 0.1 {
+				opacity = 0.1
+			}
+		}
+
+		// 2. Determine Color Polarity
+		r, g, b := 255, 0, 0 // Default to Red (Negative)
+		if val > 0 {
+			r, g, b = 0, 255, 0 // Change to Green (Positive)
+		}
+
+		cells = append(cells, models.SlopeRenderCell{
+			O:     o,
+			V:     val,
+			Color: fmt.Sprintf("rgba(%d, %d, %d, %.2f)", r, g, b, opacity),
+		})
+	}
+
+	// 3. Sort chronologically so UI gets a clean timeline
+	sort.Slice(cells, func(i, j int) bool { return cells[i].O < cells[j].O })
+
+	return cells
+}
+
+func (cs *candleState) finalizeSlopesForUI() models.TrendSlopes {
+	// Since all 3 maps are populated simultaneously by offset, we just use mpMap's length
+	history := make([][]float64, 0, len(cs.mpMap))
+
+	// Get sorted keys for a deterministic timeline
+	offsets := make([]int, 0, len(cs.mpMap))
+	for o := range cs.mpMap {
+		offsets = append(offsets, o)
+	}
+	sort.Ints(offsets)
+
+	// Helper to normalize magnitude + polarity into a single float (-1.0 to 1.0)
+	normalize := func(val, maxVal float64) float64 {
+		if maxVal == 0 {
+			return 0
+		}
+		intensity := math.Abs(val) / maxVal
+		if intensity < 0.1 {
+			intensity = 0.1
+		} // baseline visibility
+		if val < 0 {
+			return -intensity
+		} // negative = red
+		return intensity // positive = green
+	}
+
+	for _, o := range offsets {
+		history = append(history, []float64{
+			float64(o),
+			normalize(cs.mpMap[o], cs.maxMp),
+			normalize(cs.mvMap[o], cs.maxMv),
+			normalize(cs.mvolMap[o], cs.maxMvol),
+		})
+	}
+
+	return models.TrendSlopes{History: history}
 }

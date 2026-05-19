@@ -164,21 +164,17 @@ func (vp *VolumeProfile) Copy() *VolumeProfile {
 	return clone
 }
 
-type SlopeSnapshot struct {
-	Offset int     `json:"o"`   // Seconds since the bar started
-	MP     float64 `json:"mp"`  // MicroPrice Slope
-	MV     float64 `json:"mv"`  // MicroVWAP Slope
-	MVol   float64 `json:"mvl"` // MicroVolume Slope
+type SlopeRenderCell struct {
+	O     int     `json:"o"`     // X-Axis: Time Offset in seconds
+	V     float64 `json:"v"`     // Raw Value (useful for UI tooltips)
+	Color string  `json:"color"` // Pre-calculated color string e.g., "rgba(0,255,0,0.5)"
 }
 
 type TrendSlopes struct {
-	MicroPrice  float64         `json:"micro_price"`
-	MicroVWAP   float64         `json:"micro_vwap"`
-	MicroVolume float64         `json:"micro_volume"`
-	MacroPrice  float64         `json:"macro_price"`
-	MacroVWAP   float64         `json:"macro_vwap"`
-	MacroVolume float64         `json:"macro_volume"`
-	History     []SlopeSnapshot `json:"history,omitempty"`
+	MicroPrice  []SlopeRenderCell `json:"micro_price"`
+	MicroVWAP   []SlopeRenderCell `json:"micro_vwap"`
+	MicroVolume []SlopeRenderCell `json:"micro_volume"`
+	History     [][]float64       `json:"history"`
 }
 
 type Bar struct {
