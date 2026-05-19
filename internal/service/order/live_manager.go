@@ -109,6 +109,13 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			break
 		}
 	}
+
+	// 🔥 FIX 1: Prevent out-of-order WebSocket updates from reversing the filled quantity
+	if fillQty < prevFillQty {
+		logger.Warnf("[Live] Ignoring out-of-order update for %s (Received: %d, Current: %d)", o.OrderID, fillQty, prevFillQty)
+		return
+	}
+
 	qtyDelta := fillQty - prevFillQty
 
 	// 2. Map and broadcast to UI & save to DB
@@ -475,6 +482,14 @@ func (lm *LiveOrderManager) updateLocalOrderBook(entry models.OrderBookEntry) {
 	updated := false
 	for i, o := range lm.orderBook {
 		if o.OrderID == entry.OrderID {
+			// 🔥 FIX 2: Prevent REST API syncs from reverting a completed order
+			if entry.FilledQty < o.FilledQty {
+				return // Ignore older state
+			}
+			if o.Status == "COMPLETE" && entry.Status != "COMPLETE" {
+				return // Do not revert a completed order to pending
+			}
+
 			lm.orderBook[i] = entry
 			updated = true
 			break
@@ -608,7 +623,7 @@ func (lm *LiveOrderManager) SyncPositions() error {
 
 	// 2. Rebuild local map
 	newPositions := make(map[string]*models.Position)
-	for _, pos := range positions.Day {
+	for _, pos := range positions.Net {
 		// Only track positions with net quantity
 		if pos.Quantity == 0 {
 			continue
@@ -669,7 +684,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		return fmt.Errorf("failed to get positions: %w", err)
 	}
 
-	for _, pos := range positions.Day {
+	for _, pos := range positions.Net {
 		if pos.Quantity == 0 {
 			continue
 		}
