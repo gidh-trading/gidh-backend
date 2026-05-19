@@ -81,7 +81,7 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	}
 
 	// ----------------------------------------------------
-	// 🔥 ATTACH SLOPES (NEW)
+	// 🔥 ATTACH SLOPES
 	// ----------------------------------------------------
 	// 1. Micro Slopes (Passed down directly from the EnrichedTick)
 	cs.bar.Slopes.MicroPrice = tick.MicroPriceSlope
@@ -92,6 +92,24 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	cs.bar.Slopes.MacroPrice = cs.PriceReg.Slope()
 	cs.bar.Slopes.MacroVWAP = cs.VWAPReg.Slope()
 	cs.bar.Slopes.MacroVolume = cs.VolReg.Slope()
+
+	// ----------------------------------------------------
+	// 🔥 INTRA-BAR SLOPE SAMPLING
+	// ----------------------------------------------------
+	// Calculate how many seconds into the candle we currently are
+	offset := int(tick.Raw.Timestamp.Sub(cs.bar.Timestamp).Seconds())
+	historyLen := len(cs.bar.Slopes.History)
+
+	// Throttling: Only append if the array is empty OR at least 1 second
+	// has passed since the last snapshot.
+	if historyLen == 0 || cs.bar.Slopes.History[historyLen-1].Offset < offset {
+		cs.bar.Slopes.History = append(cs.bar.Slopes.History, models.SlopeSnapshot{
+			Offset: offset,
+			MP:     tick.MicroPriceSlope,
+			MV:     tick.MicroVWAPSlope,
+			MVol:   tick.MicroVolumeSlope,
+		})
+	}
 
 	bm.accumulateMicrostructure(cs, tick, vol)
 
