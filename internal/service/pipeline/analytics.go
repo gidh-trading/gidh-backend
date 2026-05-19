@@ -51,7 +51,7 @@ func (s *AnalyticsStage) Process(tick *models.EnrichedTick) error {
 	isVolumeAnomaly := tick.VolumeZ > 2.0 && tick.RelativeVolume > 2.5
 
 	// 2. Frequency Anomaly (The Stealth Iceberg): Transaction counts are +2 StdDevs above the historical mean for this specific minute.
-	isTickFrequencyAnomaly := tick.TickCountZ > 2.0
+	isTickFrequencyAnomaly := tick.TickCountZ > 2.0 && tick.RelativeVolume > 1.0
 
 	// Trigger the heatmap rendering if EITHER of these institutional footprints are detected
 	if isVolumeAnomaly || isTickFrequencyAnomaly {

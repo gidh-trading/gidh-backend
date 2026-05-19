@@ -99,21 +99,32 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 
 	logger.Infof("[Live] Order Update: %s -> %s", o.OrderID, o.Status)
 
-	// Map and broadcast to UI & save to DB
+	// 1. Calculate qtyDelta BEFORE updating the local order book
+	fillQty := int(o.FilledQuantity)
+	prevFillQty := 0
+	for _, ob := range lm.orderBook {
+		if ob.OrderID == o.OrderID {
+			prevFillQty = ob.FilledQty
+			break
+		}
+	}
+	qtyDelta := fillQty - prevFillQty
+
+	// 2. Map and broadcast to UI & save to DB
 	entry := lm.mapKiteOrderToLocal(o)
 	lm.updateLocalOrderBook(entry)
 
-	// 1. Is this an ENTRY order that just COMPLETED?
+	// 3. ALWAYS update position state if there's a new fill (Fixes Exit Position bug)
+	if qtyDelta > 0 {
+		lm.updatePositionStateFromKite(o, qtyDelta)
+	}
+
+	// 4. Is this an ENTRY order?
 	if req, isEntry := lm.orderTracker[o.OrderID]; isEntry {
 		if o.Status == kiteconnect.OrderStatusComplete {
 			logger.Infof("[Live] Entry Filled! Avg Price: %.2f. Placing Exit Legs.", o.AveragePrice)
-
-			// Update local position state
-			lm.updatePositionStateFromKite(o)
-
 			// Fire OCO Legs
 			lm.placeOCOLegs(o, req)
-
 			delete(lm.orderTracker, o.OrderID)
 		} else if o.Status == kiteconnect.OrderStatusCancelled || o.Status == kiteconnect.OrderStatusRejected {
 			delete(lm.orderTracker, o.OrderID)
@@ -121,20 +132,15 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		return
 	}
 
-	// 2. Is this a Target or SL leg that just COMPLETED? (The OCO Trigger)
+	// 5. Is this a Target or SL leg that just COMPLETED? (The OCO Trigger)
 	if siblingID, isLeg := lm.ocoLinks[o.OrderID]; isLeg {
 		if o.Status == kiteconnect.OrderStatusComplete {
 			logger.Infof("[Live] Exit Leg Filled: %s. Cancelling sibling: %s", o.OrderID, siblingID)
-
-			// Update local position state
-			lm.updatePositionStateFromKite(o)
-
-			// Cancel the sibling leg (v4 requires the third param to be a string pointer for parent_order_id, usually nil)
+			// Cancel the sibling leg
 			_, err := lm.kiteClient.CancelOrder(kiteconnect.VarietyRegular, siblingID, nil)
 			if err != nil {
 				logger.Errorf("[Live] Failed to cancel sibling OCO leg %s: %v", siblingID, err)
 			}
-
 			delete(lm.ocoLinks, o.OrderID)
 			delete(lm.ocoLinks, siblingID)
 		} else if o.Status == kiteconnect.OrderStatusCancelled || o.Status == kiteconnect.OrderStatusRejected {
@@ -142,11 +148,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			delete(lm.ocoLinks, o.OrderID)
 		}
 		return
-	}
-
-	// Handle partial updates or manual adjustments directly on Kite
-	if o.Status == kiteconnect.OrderStatusComplete {
-		lm.updatePositionStateFromKite(o)
 	}
 }
 
@@ -366,7 +367,7 @@ func (lm *LiveOrderManager) OnPriceUpdate(symbol string, ltp float64, ts time.Ti
 }
 
 // updatePositionStateFromKite reconciles local position quantities using actual fill data
-func (lm *LiveOrderManager) updatePositionStateFromKite(o kiteconnect.Order) {
+func (lm *LiveOrderManager) updatePositionStateFromKite(o kiteconnect.Order, qtyDelta int) {
 	key := fmt.Sprintf("%s:%s", strings.ToUpper(o.TradingSymbol), strings.ToUpper(o.Product))
 	pos, exists := lm.activePositions[key]
 
@@ -379,15 +380,6 @@ func (lm *LiveOrderManager) updatePositionStateFromKite(o kiteconnect.Order) {
 	}
 
 	isBuy := o.TransactionType == kiteconnect.TransactionTypeBuy
-	fillQty := int(o.FilledQuantity) // Cast float64 to int
-
-	// For partial updates, we process only the newly filled quantity
-	qtyDelta := fillQty - pos.LastFillQty
-	if qtyDelta <= 0 {
-		return
-	}
-	pos.LastFillQty = fillQty
-
 	isIncreasing := (isBuy && pos.NetQuantity >= 0) || (!isBuy && pos.NetQuantity <= 0)
 
 	if isIncreasing {
@@ -427,7 +419,6 @@ func (lm *LiveOrderManager) updatePositionStateFromKite(o kiteconnect.Order) {
 			pos.UnrealizedPnL = 0
 			pos.TargetOrderID = ""
 			pos.StopLossOrderID = ""
-			pos.LastFillQty = 0 // Reset
 		}
 	}
 
@@ -465,18 +456,36 @@ func (lm *LiveOrderManager) updateLocalOrderBook(entry models.OrderBookEntry) {
 }
 
 func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.OrderBookEntry {
-	return models.OrderBookEntry{
+	status := o.Status
+
+	// Map Kite string statuses directly to internal UI statuses
+	if status == "OPEN" || status == "TRIGGER PENDING" {
+		status = "PENDING"
+	}
+
+	entry := models.OrderBookEntry{
 		OrderID:   o.OrderID,
 		Symbol:    o.TradingSymbol,
 		Side:      o.TransactionType,
 		OrderType: o.OrderType,
-		Qty:       int(o.Quantity),       // Cast float64 to int
-		FilledQty: int(o.FilledQuantity), // Cast float64 to int
+		Qty:       int(o.Quantity),
+		FilledQty: int(o.FilledQuantity),
 		Price:     o.Price,
-		Status:    o.Status,
+		Status:    status,
 		Timestamp: o.OrderTimestamp.Time,
 		UserEmail: "live@gidh.tech",
 	}
+
+	// Restore TP/SL intent so UI sees it while the limit order is PENDING
+	if req, exists := lm.orderTracker[o.OrderID]; exists {
+		entry.TargetPrice = req.TargetPrice
+		entry.StopLossPrice = req.StopLossPrice
+		if req.UserEmail != "" {
+			entry.UserEmail = req.UserEmail
+		}
+	}
+
+	return entry
 }
 
 // ============================================================================
