@@ -7,16 +7,8 @@ MAIN_GO = cmd/main.go
 # Default target
 all: build
 
-# Generate gRPC code from protobuf definitions
-proto:
-	@echo "Generating gRPC code from proto/gidh.proto..."
-	protoc --go_out=. --go_opt=module=gidh-backend \
-	       --go-grpc_out=. --go-grpc_opt=module=gidh-backend \
-	       proto/gidh.proto
-	@echo "Protobuf code generation completed."
-
 # Build the Go application
-build: proto
+build:
 	@echo "Building $(APP_NAME)..."
 	@mkdir -p bin
 	go build -o $(BINARY) $(MAIN_GO)
@@ -58,4 +50,4 @@ logs:
 # Clean build artifacts
 clean:
 	@echo "Cleaning up..."
-	rm -rf bin/ grpc/
+	rm -rf bin/
