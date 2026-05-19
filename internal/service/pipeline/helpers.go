@@ -50,6 +50,11 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	cs.bar.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
 	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 	cs.bar.VWAP = tick.Raw.AverageTradedPrice
+	if tick.VolProfile != nil {
+		cs.bar.POC = tick.VolProfile.POC
+		cs.bar.VAH = tick.VolProfile.VAH
+		cs.bar.VAL = tick.VolProfile.VAL
+	}
 
 	// Store raw ticks only for the lowest timeframe if needed for historical replay
 	if timeframe == "1m" {

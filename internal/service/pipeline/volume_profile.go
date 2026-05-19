@@ -22,7 +22,7 @@ type VolumeProfileStage struct {
 	wsHub    *ws.Hub
 }
 
-func NewVolumeProfileStage(configs []models.InstrumentConfig, pool *pgxpool.Pool, hub *ws.Hub) *VolumeProfileStage {
+func NewVolumeProfileStage(configs []models.InstrumentConfig, bucketSizes map[uint32]float64, pool *pgxpool.Pool, hub *ws.Hub) *VolumeProfileStage {
 	h := &VolumeProfileStage{
 		profiles: make(map[uint32]*models.VolumeProfile),
 		pool:     pool,
@@ -30,10 +30,15 @@ func NewVolumeProfileStage(configs []models.InstrumentConfig, pool *pgxpool.Pool
 	}
 
 	for _, cfg := range configs {
+		bSize := 1.0
+		if size, ok := bucketSizes[cfg.Token]; ok && size > 0 {
+			bSize = size
+		}
+
 		h.profiles[cfg.Token] = &models.VolumeProfile{
 			StockName:       cfg.Name,
 			InstrumentToken: cfg.Token,
-			BucketSize:      1.0, // Default to 1.0, adjust via config if needed
+			BucketSize:      bSize,
 			Buckets:         make(map[float64]int64),
 			SortedPrices:    make([]float64, 0),
 		}

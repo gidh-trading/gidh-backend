@@ -16,12 +16,17 @@ type tokenTickState struct {
 
 type AnalyticsStage struct {
 	lastTickState map[uint32]*tokenTickState
+	bucketSizes   map[uint32]float64
 	mu            sync.Mutex
 }
 
-func NewAnalyticsStage() *AnalyticsStage {
+func NewAnalyticsStage(bucketSizes map[uint32]float64) *AnalyticsStage {
+	if bucketSizes == nil {
+		bucketSizes = make(map[uint32]float64)
+	}
 	return &AnalyticsStage{
 		lastTickState: make(map[uint32]*tokenTickState),
+		bucketSizes:   bucketSizes,
 	}
 }
 
@@ -34,7 +39,12 @@ func (s *AnalyticsStage) Process(tick *models.EnrichedTick) error {
 	vol := float64(tick.TickVolume)
 
 	// --- 1. ANOMALY DETECTION & PRICE BINNING ---
-	bucketSize := 1.0 // Hardcoded or fetched from instrument profile
+	bucketSize := 1.0
+
+	if bs, exists := s.bucketSizes[token]; exists && bs > 0 {
+		bucketSize = bs
+	}
+
 	tick.AnomalyBin = math.Floor(price/bucketSize) * bucketSize
 
 	if tick.VolumeZ > 2.0 && tick.RelativeVolume > 2.5 {

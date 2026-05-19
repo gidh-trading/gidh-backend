@@ -152,7 +152,17 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 
 func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, profilesMap map[uint32]*models.InstrumentProfile) error {
 
-	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, a.pool, a.wsHub)
+	// 1. Build the maps FIRST
+	advMap := make(map[uint32]float64)
+	bucketSizeMap := make(map[uint32]float64)
+
+	for token, prof := range profilesMap {
+		advMap[token] = float64(prof.ADV30d)
+		bucketSizeMap[token] = prof.BucketSize
+	}
+
+	// 2. Pass the map into the Volume Profile Stage
+	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, bucketSizeMap, a.pool, a.wsHub)
 
 	if a.Config.Mode == "live" {
 		if err := vpStage.LoadExistingProfiles(ctx, time.Now()); err != nil {
@@ -160,14 +170,11 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
-	advMap := make(map[uint32]float64)
-	for token, prof := range profilesMap {
-		advMap[token] = float64(prof.ADV30d)
-	}
-
+	// 3. Continue initializing the rest of the pipeline
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, advMap, dnaMap)
 
-	analyticsStage := pipeline.NewAnalyticsStage()
+	// Pass the map into the Analytics stage (from the previous fix)
+	analyticsStage := pipeline.NewAnalyticsStage(bucketSizeMap)
 
 	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub)
 
