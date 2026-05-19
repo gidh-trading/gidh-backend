@@ -203,8 +203,9 @@ func (lm *LiveOrderManager) placeOCOLegs(filledEntry kiteconnect.Order, req *mod
 			TransactionType: exitSide,
 			Quantity:        filledQtyInt,
 			Product:         kiteconnect.ProductMIS,
-			OrderType:       kiteconnect.OrderTypeSLM,
+			OrderType:       kiteconnect.OrderTypeSL, // 🔥 CHANGED TO SL
 			TriggerPrice:    req.StopLossPrice,
+			Price:           req.StopLossPrice, // 🔥 SL LIMIT REQUIRES PRICE
 			Validity:        kiteconnect.ValidityDay,
 		}
 		resp, slErr := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, slParams)
@@ -306,8 +307,9 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 		if pos.StopLossOrderID != "" {
 			// Modify existing
 			_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.StopLossOrderID, kiteconnect.OrderParams{
-				OrderType:    kiteconnect.OrderTypeSLM,
+				OrderType:    kiteconnect.OrderTypeSL, // 🔥 CHANGED TO SL
 				TriggerPrice: sl,
+				Price:        sl, // 🔥 SL LIMIT REQUIRES PRICE
 			})
 			if err != nil {
 				logger.Errorf("[Live] Failed to modify SL: %v", err)
@@ -321,8 +323,9 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 				TransactionType: exitSide,
 				Quantity:        absQty,
 				Product:         kiteconnect.ProductMIS,
-				OrderType:       kiteconnect.OrderTypeSLM,
+				OrderType:       kiteconnect.OrderTypeSL, // 🔥 CHANGED TO SL
 				TriggerPrice:    sl,
+				Price:           sl, // 🔥 SL LIMIT REQUIRES PRICE
 				Validity:        kiteconnect.ValidityDay,
 			}
 			resp, err := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, slParams)
