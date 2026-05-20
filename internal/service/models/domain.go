@@ -165,9 +165,10 @@ func (vp *VolumeProfile) Copy() *VolumeProfile {
 }
 
 type TrendSlopes struct {
-	Price  float64 `json:"price_slope"`
-	VWAP   float64 `json:"vwap_slope"`
-	Volume float64 `json:"volume_slope"`
+	Price          float64 `json:"price_slope"`
+	VWAP           float64 `json:"vwap_slope"`
+	Volume         float64 `json:"volume_slope"`
+	PriceIntensity float64 `json:"price_intensity"`
 }
 
 type Bar struct {

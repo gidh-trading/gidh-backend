@@ -152,6 +152,8 @@ func (bm *BarManager) ClearState() {
 	bm.lastTickState = make(map[uint32]*tokenTickState)
 }
 
+// internal/service/pipeline/helpers.go
+
 func (cs *candleState) finalizeSlopesForUI() models.TrendSlopes {
 	var latestOffset int = -1
 	for o := range cs.mpMap {
@@ -164,23 +166,61 @@ func (cs *candleState) finalizeSlopesForUI() models.TrendSlopes {
 		return models.TrendSlopes{}
 	}
 
-	normalize := func(val, maxVal float64) float64 {
-		if maxVal == 0 {
-			return 0
-		}
-		intensity := math.Abs(val) / maxVal
-		if intensity < 0.1 {
-			intensity = 0.1
-		}
-		if val < 0 {
-			return -intensity
-		}
-		return intensity
+	// 1. Fetch raw, unaltered current slopes from your linear regression buffers
+	rawPriceSlope := cs.mpMap[latestOffset]
+	rawVwapSlope := cs.mvMap[latestOffset]
+	rawVolSlope := cs.mvolMap[latestOffset]
+
+	// 2. Extract statistical metrics across the current candle's microstructure history
+	priceMean, priceStdDev := calculateSlopeStats(cs.mpMap)
+
+	// 3. Compute the Statistical Z-Score for Price Slope
+	priceZScore := 0.0
+	if priceStdDev > 0 {
+		priceZScore = (rawPriceSlope - priceMean) / priceStdDev
+	}
+
+	// 4. Map the Z-Score to a clean Alpha Density (0.0 to 1.0)
+	// In statistics, a Z-score of 2.0 to 2.5 means an extreme velocity shift.
+	// We divide the absolute Z-score by a Target Threshold (e.g., 2.5) so that
+	// any highly unusual statistical movement results in an alpha near 1.0 (pure solid color).
+	absPriceZ := math.Abs(priceZScore)
+	statisticalAlpha := absPriceZ / 2.5
+
+	// Safe bounding limits to keep HTML5 Canvas alpha arguments from breaking
+	if statisticalAlpha > 0.95 {
+		statisticalAlpha = 0.95
+	}
+	if statisticalAlpha < 0.10 && absPriceZ > 0.2 {
+		statisticalAlpha = 0.15 // Solid base visibility floor for mild activity
 	}
 
 	return models.TrendSlopes{
-		Price:  normalize(cs.mpMap[latestOffset], cs.maxMp),
-		VWAP:   normalize(cs.mvMap[latestOffset], cs.maxMv),
-		Volume: normalize(cs.mvolMap[latestOffset], cs.maxMvol),
+		Price:          rawPriceSlope, // Transmitting raw slope over the wire for indicators
+		VWAP:           rawVwapSlope,
+		Volume:         rawVolSlope,
+		PriceIntensity: statisticalAlpha, // 👈 Handing the UI a statistically verified alpha value
 	}
+}
+
+func calculateSlopeStats(slopeMap map[int]float64) (mean float64, stdDev float64) {
+	if len(slopeMap) == 0 {
+		return 0, 0
+	}
+
+	var sum float64
+	for _, val := range slopeMap {
+		sum += val
+	}
+	mean = sum / float64(len(slopeMap))
+
+	var varianceSum float64
+	for _, val := range slopeMap {
+		diff := val - mean
+		varianceSum += diff * diff
+	}
+
+	variance := varianceSum / float64(len(slopeMap))
+	stdDev = math.Sqrt(variance)
+	return mean, stdDev
 }

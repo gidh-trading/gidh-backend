@@ -43,6 +43,7 @@ type TokenRollingBuffer struct {
 	SmoothedVolSlope   float64   // Moving average of the Volume slope
 	AccumulatedVolume  float64   // Buffers volume between sample windows
 	AccumulatedTicks   int
+	AccumulatedValue   float64
 }
 
 func NewTokenRollingBuffer() *TokenRollingBuffer {
@@ -55,7 +56,8 @@ func NewTokenRollingBuffer() *TokenRollingBuffer {
 func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, duration time.Duration, minSampleDelta time.Duration) bool {
 	// Buffer volume and ticks continually
 	b.AccumulatedVolume += vol
-	b.AccumulatedTicks++ // 👈 ADD THIS
+	b.AccumulatedTicks++
+	b.AccumulatedValue += price * vol
 
 	if !b.LastSampleTime.IsZero() && ts.Sub(b.LastSampleTime) < minSampleDelta {
 		return false
@@ -63,10 +65,17 @@ func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, durati
 
 	b.LastSampleTime = ts
 	sampledVol := b.AccumulatedVolume
-	sampledTicks := b.AccumulatedTicks // 👈 ADD THIS
+	sampledTicks := b.AccumulatedTicks
+	sampledValue := b.AccumulatedValue
 
 	b.AccumulatedVolume = 0
-	b.AccumulatedTicks = 0 // 👈 ADD THIS
+	b.AccumulatedTicks = 0
+	b.AccumulatedValue = 0
+
+	customRollingVwap := price
+	if sampledVol > 0 {
+		customRollingVwap = sampledValue / sampledVol
+	}
 
 	x := float64(ts.Hour()*3600 + ts.Minute()*60 + ts.Second())
 
@@ -74,7 +83,7 @@ func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, durati
 		Timestamp: ts,
 		Volume:    sampledVol,
 		Price:     price,
-		VWAP:      vwap,
+		VWAP:      customRollingVwap,
 		X:         x,
 		RawTicks:  sampledTicks,
 	}
@@ -83,7 +92,7 @@ func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, durati
 
 	// O(1) Add to regression running totals
 	b.PriceReg.Add(x, price)
-	b.VWAPReg.Add(x, vwap)
+	b.VWAPReg.Add(x, customRollingVwap)
 	b.VolReg.Add(x, sampledVol)
 
 	// Evict older than duration (e.g., 300 seconds)
