@@ -323,8 +323,7 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 		[]string{
 			"timestamp", "instrument_token", "stock_name", "timeframe",
 			"open", "high", "low", "close", "volume", "tick_count",
-			"max_tick_count_z", "vwap", "poc", "vah", "val", "heatmap", "slopes",
-			"bio_events", // 🔥 NEW ARRAY FIELD MAPPED TO JSONB
+			"max_tick_count_z", "vwap", "poc", "vah", "val", "heatmap", "slopes", // 🔥 NEW ARRAY FIELD MAPPED TO JSONB
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
@@ -341,20 +340,12 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 				slopesBytes = []byte("{}")
 			}
 
-			// 🔥 MARSHAL NEW DEDICATED BIOLOGICAL TRACKING MARKERS
-			bioEventsBytes, err := json.Marshal(b.BioEvents)
-			if err != nil {
-				logger.Errorf("Failed to marshal biological events for token %d: %v", b.InstrumentToken, err)
-				bioEventsBytes = []byte("[]")
-			}
-
 			return []any{
 				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
 				b.Open, b.High, b.Low, b.Close, b.Volume,
 				b.TickCount, b.MaxTickCountZ,
 				b.VWAP, b.POC, b.VAH, b.VAL,
 				string(heatmapBytes), string(slopesBytes),
-				string(bioEventsBytes),
 			}, nil
 		}),
 	)

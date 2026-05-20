@@ -87,8 +87,6 @@ type EnrichedTick struct {
 	MicroPriceSlope  float64
 	MicroVWAPSlope   float64
 	MicroVolumeSlope float64
-
-	ResolvedBioEvents []BioEventMarker
 }
 
 // VPNode represents a single price bucket and its accumulated volume.
@@ -203,9 +201,8 @@ type Bar struct {
 	TotalSellQty  float64 `json:"total_sell_qty"`
 
 	// ---- Microstructure Analytics Heatmap ----
-	Heatmap   []UIHeatmapCell  `json:"heatmap"`
-	Slopes    TrendSlopes      `json:"slopes"`
-	BioEvents []BioEventMarker `json:"bio_events"`
+	Heatmap []UIHeatmapCell `json:"heatmap"`
+	Slopes  TrendSlopes     `json:"slopes"`
 
 	// ---- Raw ticks ----
 	Ticks []TickData `json:"-"`
@@ -242,11 +239,4 @@ type WhaleBlockRecord struct {
 	Volume          int64
 	Side            string
 	VExpected       float64
-}
-
-type BioEventMarker struct {
-	PriceLevel float64   `json:"price_level"`
-	EventType  string    `json:"event_type"` // "ABSORPTION", "INITIATION_UP", "INITIATION_DOWN", "EXHAUSTION"
-	Intensity  float64   `json:"intensity"`  // Accumulated volume multiplier
-	Timestamp  time.Time `json:"timestamp"`
 }
