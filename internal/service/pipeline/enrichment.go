@@ -17,10 +17,9 @@ type EnrichmentTick struct {
 	Volume    float64
 	Price     float64
 	VWAP      float64
-	X         float64 // Normalized time (seconds since midnight)
+	X         float64
 }
 
-// Track state machine status for the Golden Rule per stock
 type ThresholdState struct {
 	IsTesting            bool
 	TimeCrossedThreshold time.Time
@@ -35,22 +34,42 @@ type TokenRollingBuffer struct {
 	// Golden Rule State Management
 	StateMu        sync.Mutex
 	ThresholdState ThresholdState
+
+	// --- 📈 SMOOTHING & SAMPLING VARIABLES (NEW) ---
+	LastSampleTime     time.Time // Tracks when we last added a node to the regression matrix
+	SmoothedPriceSlope float64   // Moving average of the price slope
+	SmoothedVWAPSlope  float64   // Moving average of the VWAP slope
+	SmoothedVolSlope   float64   // Moving average of the Volume slope
+	AccumulatedVolume  float64   // Buffers volume between sample windows
 }
 
 func NewTokenRollingBuffer() *TokenRollingBuffer {
 	return &TokenRollingBuffer{
-		Ticks: make([]EnrichmentTick, 0, 2000), // Larger starting allocation for 5 mins of ticks
+		Ticks: make([]EnrichmentTick, 0, 2000),
 	}
 }
 
-// Push now accepts a configurable duration (pass 300 * time.Second)
-func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, duration time.Duration) {
-	// Normalize X-axis to "seconds since midnight" for clean math
+// Push now samples data points to prevent high-frequency tick noise from warping regressions
+func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, duration time.Duration, minSampleDelta time.Duration) bool {
+	// Buffer volume continually so we don't lose transaction data between samples
+	b.AccumulatedVolume += vol
+
+	// ⏳ IDEA 2: RESAMPLING TIME WINDOWS
+	// If the incoming tick arrived too quickly since our last regression sample node,
+	// skip updating the linear regression model entirely.
+	if !b.LastSampleTime.IsZero() && ts.Sub(b.LastSampleTime) < minSampleDelta {
+		return false // Signals that regression stats did not change
+	}
+
+	b.LastSampleTime = ts
+	sampledVol := b.AccumulatedVolume
+	b.AccumulatedVolume = 0 // Reset buffer for next slice
+
 	x := float64(ts.Hour()*3600 + ts.Minute()*60 + ts.Second())
 
 	tick := EnrichmentTick{
 		Timestamp: ts,
-		Volume:    vol,
+		Volume:    sampledVol,
 		Price:     price,
 		VWAP:      vwap,
 		X:         x,
@@ -61,7 +80,7 @@ func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, durati
 	// O(1) Add to regression running totals
 	b.PriceReg.Add(x, price)
 	b.VWAPReg.Add(x, vwap)
-	b.VolReg.Add(x, vol)
+	b.VolReg.Add(x, sampledVol)
 
 	// Evict older than duration (e.g., 300 seconds)
 	cutoff := ts.Add(-duration)
@@ -79,9 +98,9 @@ func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, durati
 	if evictIdx > 0 {
 		b.Ticks = b.Ticks[evictIdx:]
 	}
+	return true // Regression statistics were updated
 }
 
-// GetStats returns the total volume AND the number of ticks inside the rolling window
 func (b *TokenRollingBuffer) GetStats() (float64, int) {
 	var totalVol float64
 	for _, t := range b.Ticks {
@@ -93,9 +112,17 @@ func (b *TokenRollingBuffer) GetStats() (float64, int) {
 // --- 2. Enrichment Stage ---
 
 const (
-	ContinuousWindowDuration = 300 * time.Second // 5 Minutes Continuous Window
-	SlopeThreshold           = 0.75              // Threshold for your linear regression slope change
-	GoldenRuleHoldSeconds    = 5.0               // Must hold past threshold for 5 seconds
+	ContinuousWindowDuration = 300 * time.Second
+
+	// 🛡️ IDEA 3: DUAL-BAND HYSTERESIS THRESHOLDS
+	ActivationThreshold   = 0.75 // Strong momentum required to alert
+	DeactivationThreshold = 0.45 // Lower threshold floor before dropping testing state
+
+	GoldenRuleHoldSeconds = 5.0 // Must hold past threshold for 5 seconds
+
+	// 📊 IDEA 1 & 2: FILTER PARAMETERS
+	SlopeAlpha            = 0.15            // EMA factor. Lower = smoother, higher = more responsive.
+	DefaultSampleInterval = 1 * time.Second // Time slice size for regression nodes
 )
 
 type EnrichmentStage struct {
@@ -112,7 +139,6 @@ type EnrichmentStage struct {
 func NewEnrichmentStage(pm order.PositionManager, advMap map[uint32]float64, rawDnaMap map[uint32]*models.MarketDNA) *EnrichmentStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
-	// Pre-process the DNA arrays into an O(1) nested map for lightning-fast tick lookups
 	fastDnaMap := make(map[uint32]map[int]models.TimeBucketDNA)
 	for token, dna := range rawDnaMap {
 		fastDnaMap[token] = make(map[int]models.TimeBucketDNA)
@@ -138,13 +164,11 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	token := tick.Raw.InstrumentToken
 	price := tick.Raw.LastPrice
-	ts := tick.Raw.Timestamp.In(s.loc) // Strictly IST
+	ts := tick.Raw.Timestamp.In(s.loc)
 
-	// 1. Calculate actual tick volume
 	tick.TickVolume = s.calculateTickVolume(token, tick)
 	vol := float64(tick.TickVolume)
 
-	// Skip dead updates
 	if tick.TickVolume == 0 && price == s.lastPriceMap[token] {
 		return nil
 	}
@@ -155,20 +179,57 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	}
 	s.lastPriceMap[token] = price
 
-	// 2. Maintain Continuous 300-Second Sliding Window (UPGRADED)
 	buf, exists := s.buffers[token]
 	if !exists {
 		buf = NewTokenRollingBuffer()
 		s.buffers[token] = buf
 	}
 
-	// Push with the updated 300s window limit
-	buf.Push(ts, price, tick.Raw.AverageTradedPrice, vol, ContinuousWindowDuration)
+	// Calculate Minute Index to interface with your structural DNA buckets
+	minOfDay := (ts.Hour() * 60) + ts.Minute()
+	minuteIndex := minOfDay - 555
 
-	// Get live rolling stats
+	// 🧠 INTERFACING WITH DNA BUCKETS:
+	// Optimize resampling delta based on historical volatility activity definitions!
+	sampleInterval := DefaultSampleInterval
+	if tokenDna, exists := s.dnaMap[token]; exists {
+		if baseline, ok := tokenDna[minuteIndex]; ok {
+			// If historical frequency activity is high, sample faster to capture institutional shifts
+			if baseline.TickCountMean > 500 {
+				sampleInterval = 500 * time.Millisecond
+			} else if baseline.TickCountMean < 50 {
+				sampleInterval = 2 * time.Second
+			}
+		}
+	}
+
+	// Push tick and check if a new regression coordinate slice was generated
+	statsUpdated := buf.Push(ts, price, tick.Raw.AverageTradedPrice, vol, ContinuousWindowDuration, sampleInterval)
+
+	// 📈 IDEA 1: APPLY EMA SMOOTHING MATRIX OVER THE RAW TRAJECTORY
+	if statsUpdated {
+		rawPSlope, rawVSlope, rawVolSlope := buf.PriceReg.Slope(), buf.VWAPReg.Slope(), buf.VolReg.Slope()
+
+		// Handle bootstrap state initialization
+		if buf.LastSampleTime.Equal(ts) && len(buf.Ticks) <= 2 {
+			buf.SmoothedPriceSlope = rawPSlope
+			buf.SmoothedVWAPSlope = rawVSlope
+			buf.SmoothedVolSlope = rawVolSlope
+		} else {
+			// Apply Exponential Moving Average math
+			buf.SmoothedPriceSlope = (SlopeAlpha * rawPSlope) + ((1.0 - SlopeAlpha) * buf.SmoothedPriceSlope)
+			buf.SmoothedVWAPSlope = (SlopeAlpha * rawVSlope) + ((1.0 - SlopeAlpha) * buf.SmoothedVWAPSlope)
+			buf.SmoothedVolSlope = (SlopeAlpha * rawVolSlope) + ((1.0 - SlopeAlpha) * buf.SmoothedVolSlope)
+		}
+	}
+
+	// Inject the clean, non-wiggling slope properties downstream
+	tick.MicroPriceSlope = buf.SmoothedPriceSlope
+	tick.MicroVWAPSlope = buf.SmoothedVWAPSlope
+	tick.MicroVolumeSlope = buf.SmoothedVolSlope
+
+	// Recompute standard Z-scores and RVol stats...
 	liveVolume, liveTickCount := buf.GetStats()
-
-	// 3. Compute Standard Relative Volume (RVol)
 	var rVol float64
 	if adv, ok := s.advMap[token]; ok && adv > 0 {
 		expectedVolPerMin := adv / 375.0
@@ -177,10 +238,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 	}
 	tick.RelativeVolume = rVol
-
-	// 4. Calculate Minute Index & DNA Z-Scores
-	minOfDay := (ts.Hour() * 60) + ts.Minute()
-	minuteIndex := minOfDay - 555
 
 	var volZ, tcZ float64
 	if tokenDna, exists := s.dnaMap[token]; exists {
@@ -193,41 +250,32 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			}
 		}
 	}
-
 	tick.VolumeZ = volZ
 	tick.TickCountZ = tcZ
 
-	// 5. GET CONTINUOUS 5-MINUTE LINEAR REGRESSION SLOPES
-	pSlope, vSlope, volSlope := buf.GetMicroSlopes()
-	tick.MicroPriceSlope = pSlope
-	tick.MicroVWAPSlope = vSlope
-	tick.MicroVolumeSlope = volSlope
-
-	// 6. 🛡️ THE GOLDEN RULE STATE MACHINE (Per-Stock Execution Engine)
+	// 🛡️ IDEA 3: THE DUAL-BAND HYSTERESIS STATE MACHINE
 	buf.StateMu.Lock()
+	absSlope := math.Abs(tick.MicroPriceSlope)
 
-	// We check if the absolute slope value beats the threshold
-	if math.Abs(pSlope) >= SlopeThreshold {
-		if !buf.ThresholdState.IsTesting {
-			// Cross-event verified: initialization entry point
+	if !buf.ThresholdState.IsTesting {
+		// Entry to entry confirmation mode requires breaching the strict upper ceiling
+		if absSlope >= ActivationThreshold {
 			buf.ThresholdState.IsTesting = true
 			buf.ThresholdState.TimeCrossedThreshold = ts
-		} else {
-			// Already printing past threshold. Evaluate persistence duration.
-			timeHeld := ts.Sub(buf.ThresholdState.TimeCrossedThreshold).Seconds()
-			if timeHeld >= GoldenRuleHoldSeconds {
-
-				// ⚡ CORE TRADING ACTION TRIGGER EVENT ⚡
-				// Anomaly confirmed, safe from micro wiggles!
-				s.triggerGoldenRuleAlert(tick, pSlope, timeHeld)
-
-				// Reset threshold timer state to avoid printing endless notifications
-				buf.ThresholdState.IsTesting = false
-			}
 		}
 	} else {
-		// Slope failed to sustain direction. Wipe out state to prevent false execution flags.
-		buf.ThresholdState.IsTesting = false
+		// Inside execution loops, do not wipe state on minor pullbacks.
+		// Only break out if momentum collapses completely past the deactivation floor.
+		if absSlope >= DeactivationThreshold {
+			timeHeld := ts.Sub(buf.ThresholdState.TimeCrossedThreshold).Seconds()
+			if timeHeld >= GoldenRuleHoldSeconds {
+				s.triggerGoldenRuleAlert(tick, tick.MicroPriceSlope, timeHeld)
+				buf.ThresholdState.IsTesting = false
+			}
+		} else {
+			// Pullback violated structural trend floor; drop validation parameters
+			buf.ThresholdState.IsTesting = false
+		}
 	}
 	buf.StateMu.Unlock()
 
@@ -235,7 +283,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 }
 
 func (s *EnrichmentStage) triggerGoldenRuleAlert(tick *models.EnrichedTick, confirmedSlope float64, duration float64) {
-	// Add your execution code or custom signal transmission pipeline logic here
 	println("🔥 [GOLDEN RULE CONFIRMED] Stock:", tick.Raw.StockName,
 		"| Slope:", confirmedSlope,
 		"| Held for:", duration, "seconds! Executing entry parameters near Structural Levels.")
@@ -257,9 +304,4 @@ func (s *EnrichmentStage) calculateTickVolume(token uint32, tick *models.Enriche
 
 	s.lastVolumeMap[token] = curr
 	return delta
-}
-
-// GetMicroSlopes instantly returns the current trajectory of the 60-second window
-func (b *TokenRollingBuffer) GetMicroSlopes() (priceSlope, vwapSlope, volSlope float64) {
-	return b.PriceReg.Slope(), b.VWAPReg.Slope(), b.VolReg.Slope()
 }
