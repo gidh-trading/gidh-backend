@@ -11,7 +11,6 @@ type Pipeline struct {
 	vpStage    *pipeline.VolumeProfileStage
 	enrichment *pipeline.EnrichmentStage
 	analytics  *pipeline.AnalyticsStage
-	bioStage   *pipeline.BiologicalStage
 	barManager *pipeline.BarManager
 	dbWriter   *writer.DBWriter
 }
@@ -20,7 +19,6 @@ func NewPipeline(
 	vpStage *pipeline.VolumeProfileStage,
 	enrichment *pipeline.EnrichmentStage,
 	analytics *pipeline.AnalyticsStage,
-	bioStage *pipeline.BiologicalStage,
 	barManager *pipeline.BarManager,
 	dbWriter *writer.DBWriter,
 ) *Pipeline {
@@ -28,7 +26,6 @@ func NewPipeline(
 		vpStage:    vpStage,
 		enrichment: enrichment,
 		analytics:  analytics,
-		bioStage:   bioStage,
 		barManager: barManager,
 		dbWriter:   dbWriter,
 	}
@@ -64,12 +61,6 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 	if p.analytics != nil {
 		if err := p.analytics.Process(enrichedTick); err != nil {
 			logger.Errorf("Pipeline Error: Failed microstructural analysis: %v", err)
-		}
-	}
-
-	if p.bioStage != nil {
-		if err := p.bioStage.Process(enrichedTick); err != nil {
-			logger.Errorf("Pipeline Error: Biological Stage failure: %v", err)
 		}
 	}
 

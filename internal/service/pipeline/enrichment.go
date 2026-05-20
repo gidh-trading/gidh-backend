@@ -18,6 +18,7 @@ type EnrichmentTick struct {
 	Price     float64
 	VWAP      float64
 	X         float64
+	RawTicks  int
 }
 
 type ThresholdState struct {
@@ -41,6 +42,7 @@ type TokenRollingBuffer struct {
 	SmoothedVWAPSlope  float64   // Moving average of the VWAP slope
 	SmoothedVolSlope   float64   // Moving average of the Volume slope
 	AccumulatedVolume  float64   // Buffers volume between sample windows
+	AccumulatedTicks   int
 }
 
 func NewTokenRollingBuffer() *TokenRollingBuffer {
@@ -51,19 +53,20 @@ func NewTokenRollingBuffer() *TokenRollingBuffer {
 
 // Push now samples data points to prevent high-frequency tick noise from warping regressions
 func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, duration time.Duration, minSampleDelta time.Duration) bool {
-	// Buffer volume continually so we don't lose transaction data between samples
+	// Buffer volume and ticks continually
 	b.AccumulatedVolume += vol
+	b.AccumulatedTicks++ // 👈 ADD THIS
 
-	// ⏳ IDEA 2: RESAMPLING TIME WINDOWS
-	// If the incoming tick arrived too quickly since our last regression sample node,
-	// skip updating the linear regression model entirely.
 	if !b.LastSampleTime.IsZero() && ts.Sub(b.LastSampleTime) < minSampleDelta {
-		return false // Signals that regression stats did not change
+		return false
 	}
 
 	b.LastSampleTime = ts
 	sampledVol := b.AccumulatedVolume
-	b.AccumulatedVolume = 0 // Reset buffer for next slice
+	sampledTicks := b.AccumulatedTicks // 👈 ADD THIS
+
+	b.AccumulatedVolume = 0
+	b.AccumulatedTicks = 0 // 👈 ADD THIS
 
 	x := float64(ts.Hour()*3600 + ts.Minute()*60 + ts.Second())
 
@@ -73,6 +76,7 @@ func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, durati
 		Price:     price,
 		VWAP:      vwap,
 		X:         x,
+		RawTicks:  sampledTicks,
 	}
 
 	b.Ticks = append(b.Ticks, tick)
@@ -103,14 +107,14 @@ func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, durati
 
 func (b *TokenRollingBuffer) GetStats() (float64, int) {
 	var totalVol float64
+	var totalTicks int
 	for _, t := range b.Ticks {
 		totalVol += t.Volume
+		totalTicks += t.RawTicks
 	}
-
-	// FIX: Include volume that is currently buffering and hasn't been sampled yet
 	totalVol += b.AccumulatedVolume
-
-	return totalVol, len(b.Ticks)
+	totalTicks += b.AccumulatedTicks
+	return totalVol, totalTicks
 }
 
 // --- 2. Enrichment Stage ---
@@ -234,26 +238,52 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	// Recompute standard Z-scores and RVol stats...
 	liveVolume, liveTickCount := buf.GetStats()
+	var volZ, tcZ float64
+	var rollingVolMean float64
+
+	if tokenDna, exists := s.dnaMap[token]; exists {
+		if currBaseline, ok := tokenDna[minuteIndex]; ok {
+			sec := float64(ts.Second())
+			prevBaseline := currBaseline
+
+			// Get previous minute baseline if available
+			if minuteIndex > 0 {
+				if pb, ok := tokenDna[minuteIndex-1]; ok {
+					prevBaseline = pb
+				}
+			}
+
+			// Calculate weights based on how far into the current minute we are
+			weightCurr := sec / 60.0
+			weightPrev := (60.0 - sec) / 60.0
+
+			// Interpolate means and standard deviations
+			rollingVolMean = (currBaseline.VolumeMean * weightCurr) + (prevBaseline.VolumeMean * weightPrev)
+			rollingVolStd := (currBaseline.VolumeStd * weightCurr) + (prevBaseline.VolumeStd * weightPrev)
+			rollingTcMean := (currBaseline.TickCountMean * weightCurr) + (prevBaseline.TickCountMean * weightPrev)
+			rollingTcStd := (currBaseline.TickCountStd * weightCurr) + (prevBaseline.TickCountStd * weightPrev)
+
+			// Calculate mathematically sound Z-Scores
+			if rollingVolStd > 0 {
+				volZ = (liveVolume - rollingVolMean) / rollingVolStd
+			}
+			if rollingTcStd > 0 {
+				tcZ = (float64(liveTickCount) - rollingTcMean) / rollingTcStd
+			}
+		}
+	}
+
 	var rVol float64
-	if adv, ok := s.advMap[token]; ok && adv > 0 {
-		expectedVolPerMin := adv / 375.0
-		if expectedVolPerMin > 0 {
+	if rollingVolMean > 0 {
+		rVol = liveVolume / rollingVolMean
+	} else if adv, ok := s.advMap[token]; ok && adv > 0 {
+		// Fallback to flat ADV only if DNA is missing
+		if expectedVolPerMin := adv / 375.0; expectedVolPerMin > 0 {
 			rVol = liveVolume / expectedVolPerMin
 		}
 	}
-	tick.RelativeVolume = rVol
 
-	var volZ, tcZ float64
-	if tokenDna, exists := s.dnaMap[token]; exists {
-		if baseline, ok := tokenDna[minuteIndex]; ok {
-			if baseline.VolumeStd > 0 {
-				volZ = (liveVolume - baseline.VolumeMean) / baseline.VolumeStd
-			}
-			if baseline.TickCountStd > 0 {
-				tcZ = (float64(liveTickCount) - baseline.TickCountMean) / baseline.TickCountStd
-			}
-		}
-	}
+	tick.RelativeVolume = rVol
 	tick.VolumeZ = volZ
 	tick.TickCountZ = tcZ
 
