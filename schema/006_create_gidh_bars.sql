@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS gidh_bars
 
     heatmap          JSONB                     DEFAULT '{}',
     slopes           JSONB                     DEFAULT '{}',
+    bio_events           JSONB                     DEFAULT '{}',
 
     -- Primary Key must include the partitioning column (timestamp) in TimescaleDB.
     PRIMARY KEY (timestamp, instrument_token, timeframe)

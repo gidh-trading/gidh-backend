@@ -127,6 +127,7 @@ func (bm *BarManager) updateTimeframe(
 		// 3. Reset ONLY the bar, heatmaps, and max values for the new candle
 		// DO NOT overwrite `cs`, otherwise you delete the regressions!
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
+		cs.bar.BioEvents = make([]models.BioEventMarker, 0)
 		cs.heatmapMap = make(map[float64]*models.HeatmapCell)
 
 		cs.mpMap = make(map[int]float64)

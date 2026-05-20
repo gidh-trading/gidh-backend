@@ -1,17 +1,17 @@
 package app
 
 import (
-	"log"
-
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/pipeline"
 	"gidh-backend/internal/service/writer"
+	"gidh-backend/pkg/logger"
 )
 
 type Pipeline struct {
 	vpStage    *pipeline.VolumeProfileStage
 	enrichment *pipeline.EnrichmentStage
 	analytics  *pipeline.AnalyticsStage
+	bioStage   *pipeline.BiologicalStage
 	barManager *pipeline.BarManager
 	dbWriter   *writer.DBWriter
 }
@@ -20,6 +20,7 @@ func NewPipeline(
 	vpStage *pipeline.VolumeProfileStage,
 	enrichment *pipeline.EnrichmentStage,
 	analytics *pipeline.AnalyticsStage,
+	bioStage *pipeline.BiologicalStage,
 	barManager *pipeline.BarManager,
 	dbWriter *writer.DBWriter,
 ) *Pipeline {
@@ -27,6 +28,7 @@ func NewPipeline(
 		vpStage:    vpStage,
 		enrichment: enrichment,
 		analytics:  analytics,
+		bioStage:   bioStage,
 		barManager: barManager,
 		dbWriter:   dbWriter,
 	}
@@ -54,21 +56,27 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 	// 3. VOLUME PROFILE STAGE (Handles dynamic session market layout structures)
 	if p.vpStage != nil {
 		if err := p.vpStage.Process(enrichedTick); err != nil {
-			log.Printf("Pipeline Error: Failed to process volume profile: %v", err)
+			logger.Errorf("Pipeline Error: Failed to process volume profile: %v", err)
 		}
 	}
 
 	// 4. ANALYTICS STAGE (Triggers dynamic volume burst flags and price bin placement mapping)
 	if p.analytics != nil {
 		if err := p.analytics.Process(enrichedTick); err != nil {
-			log.Printf("Pipeline Error: Failed microstructural analysis: %v", err)
+			logger.Errorf("Pipeline Error: Failed microstructural analysis: %v", err)
+		}
+	}
+
+	if p.bioStage != nil {
+		if err := p.bioStage.Process(enrichedTick); err != nil {
+			logger.Errorf("Pipeline Error: Biological Stage failure: %v", err)
 		}
 	}
 
 	// 5. BAR MANAGER AGGREGATION LAYER (Handles timeframes and aggregates anomalies)
 	if p.barManager != nil {
 		if err := p.barManager.Process(enrichedTick); err != nil {
-			log.Printf("Pipeline Error: Failed to process bar accumulation: %v", err)
+			logger.Errorf("Pipeline Error: Failed to process bar accumulation: %v", err)
 		}
 	}
 
