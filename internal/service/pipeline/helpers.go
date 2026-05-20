@@ -120,17 +120,7 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 
 	bm.accumulateMicrostructure(cs, tick, vol)
 
-	// Broadcast rolling live frames down WebSocket pipes
-	if bm.wsHub != nil && time.Since(cs.lastBroadcast) > 250*time.Millisecond {
-		cs.bar.Heatmap = cs.finalizeTransformsForUI()
-		cs.bar.Slopes = cs.finalizeSlopesForUI()
-
-		bm.wsHub.BroadcastJSON(tick.Raw.StockName+":"+timeframe, map[string]any{
-			"type": "bar",
-			"data": cs.bar,
-		})
-		cs.lastBroadcast = time.Now()
-	}
+	// ✂️ REMOVED THE EMBEDDED WEB_SOCKET BROADCAST INNER LOOP FROM HERE TO PREVENT FRONTEND FLASHING
 }
 
 // accumulateMicrostructure builds the institutional footprint map

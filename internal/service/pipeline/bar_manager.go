@@ -3,6 +3,7 @@
 package pipeline
 
 import (
+	"context"
 	"sync"
 	"time"
 
@@ -140,4 +141,47 @@ func (bm *BarManager) updateTimeframe(
 
 	// 4. Add the tick's data to the active candle
 	bm.processTickForCandle(cs, tick, vol, timeframe)
+}
+
+// StartBroadcastingEngine spins up a fixed-interval background worker that samples
+// tracking state maps and broadcasts stable layout frames completely decoupled from raw tick bursts.
+func (bm *BarManager) StartBroadcastingEngine(ctx context.Context, broadcastRate time.Duration) {
+	ticker := time.NewTicker(broadcastRate)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			bm.mu.Lock()
+			if bm.wsHub == nil {
+				bm.mu.Unlock()
+				continue
+			}
+
+			// Slice up all tracked interval categories so they all get smoothly sampled
+			timeframeMaps := []map[uint32]*candleState{bm.state1m, bm.state3m, bm.state5m}
+
+			for _, stateMap := range timeframeMaps {
+				for _, cs := range stateMap {
+					if cs == nil || cs.bar == nil {
+						continue
+					}
+
+					// Safely capture stable transforms without pipeline interruptions
+					cs.bar.Heatmap = cs.finalizeTransformsForUI()
+					cs.bar.Slopes = cs.finalizeSlopesForUI()
+
+					// Broadcast a single uniform layout down the specific WS channels
+					bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
+						"type": "bar",
+						"data": cs.bar,
+					})
+				}
+			}
+			bm.mu.Unlock()
+
+		case <-ctx.Done():
+			return
+		}
+	}
 }
