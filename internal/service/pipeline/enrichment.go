@@ -106,13 +106,17 @@ func (b *TokenRollingBuffer) GetStats() (float64, int) {
 	for _, t := range b.Ticks {
 		totalVol += t.Volume
 	}
+
+	// FIX: Include volume that is currently buffering and hasn't been sampled yet
+	totalVol += b.AccumulatedVolume
+
 	return totalVol, len(b.Ticks)
 }
 
 // --- 2. Enrichment Stage ---
 
 const (
-	ContinuousWindowDuration = 300 * time.Second
+	ContinuousWindowDuration = 60 * time.Second
 
 	// 🛡️ IDEA 3: DUAL-BAND HYSTERESIS THRESHOLDS
 	ActivationThreshold   = 0.75 // Strong momentum required to alert
