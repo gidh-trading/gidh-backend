@@ -1,10 +1,8 @@
 package pipeline
 
 import (
-	"fmt"
 	"gidh-backend/internal/service/models"
 	"math"
-	"sort"
 	"time"
 )
 
@@ -195,73 +193,39 @@ func (cs *candleState) finalizeTransformsForUI() []models.UIHeatmapCell {
 	return uiCells
 }
 
-// Helper function to build the render arrays
-func buildRenderCells(dataMap map[int]float64, maxVal float64) []models.SlopeRenderCell {
-	cells := make([]models.SlopeRenderCell, 0, len(dataMap))
-
-	for o, val := range dataMap {
-		// 1. Calculate Opacity based on magnitude
-		opacity := 0.1 // Minimum baseline visibility
-		if maxVal > 0 {
-			opacity = math.Abs(val) / maxVal
-			if opacity < 0.1 {
-				opacity = 0.1
-			}
-		}
-
-		// 2. Determine Color Polarity
-		r, g, b := 255, 0, 0 // Default to Red (Negative)
-		if val > 0 {
-			r, g, b = 0, 255, 0 // Change to Green (Positive)
-		}
-
-		cells = append(cells, models.SlopeRenderCell{
-			O:     o,
-			V:     val,
-			Color: fmt.Sprintf("rgba(%d, %d, %d, %.2f)", r, g, b, opacity),
-		})
-	}
-
-	// 3. Sort chronologically so UI gets a clean timeline
-	sort.Slice(cells, func(i, j int) bool { return cells[i].O < cells[j].O })
-
-	return cells
-}
-
 func (cs *candleState) finalizeSlopesForUI() models.TrendSlopes {
-	// Since all 3 maps are populated simultaneously by offset, we just use mpMap's length
-	history := make([][]float64, 0, len(cs.mpMap))
-
-	// Get sorted keys for a deterministic timeline
-	offsets := make([]int, 0, len(cs.mpMap))
+	// 1. Find the most recent offset (highest seconds from bar start)
+	var latestOffset int = -1
 	for o := range cs.mpMap {
-		offsets = append(offsets, o)
+		if o > latestOffset {
+			latestOffset = o
+		}
 	}
-	sort.Ints(offsets)
 
-	// Helper to normalize magnitude + polarity into a single float (-1.0 to 1.0)
+	// Return empty if no data exists yet
+	if latestOffset == -1 {
+		return models.TrendSlopes{}
+	}
+
+	// 2. Helper to normalize magnitude + polarity into a single float (-1.0 to 1.0)
 	normalize := func(val, maxVal float64) float64 {
 		if maxVal == 0 {
 			return 0
 		}
 		intensity := math.Abs(val) / maxVal
 		if intensity < 0.1 {
-			intensity = 0.1
-		} // baseline visibility
+			intensity = 0.1 // baseline visibility
+		}
 		if val < 0 {
-			return -intensity
-		} // negative = red
-		return intensity // positive = green
+			return -intensity // negative
+		}
+		return intensity // positive
 	}
 
-	for _, o := range offsets {
-		history = append(history, []float64{
-			float64(o),
-			normalize(cs.mpMap[o], cs.maxMp),
-			normalize(cs.mvMap[o], cs.maxMv),
-			normalize(cs.mvolMap[o], cs.maxMvol),
-		})
+	// 3. Return ONLY the latest normalized values
+	return models.TrendSlopes{
+		Price:  normalize(cs.mpMap[latestOffset], cs.maxMp),
+		VWAP:   normalize(cs.mvMap[latestOffset], cs.maxMv),
+		Volume: normalize(cs.mvolMap[latestOffset], cs.maxMvol),
 	}
-
-	return models.TrendSlopes{History: history}
 }
