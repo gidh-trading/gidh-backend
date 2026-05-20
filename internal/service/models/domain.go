@@ -201,8 +201,8 @@ type Bar struct {
 	TotalSellQty  float64 `json:"total_sell_qty"`
 
 	// ---- Microstructure Analytics Heatmap ----
-	Heatmap []UIHeatmapCell `json:"heatmap"`
-	Slopes  TrendSlopes     `json:"slopes"`
+	DominantAnomaly UIDominantAnomaly `json:"dominant_anomaly"`
+	Slopes          TrendSlopes       `json:"slopes"`
 
 	// ---- Raw ticks ----
 	Ticks []TickData `json:"-"`

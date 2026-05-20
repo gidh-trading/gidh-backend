@@ -206,7 +206,7 @@ func (a *App) Start(ctx context.Context) error {
 	// ⚡ START THE PURE TIME-DECOUPLED CLOCK ENGINE
 	if a.Pipeline != nil && a.Pipeline.barManager != nil {
 		logger.Info("Launching time-decoupled UI broadcasting engine at 500ms interval")
-		go a.Pipeline.barManager.StartBroadcastingEngine(ctx, 500*time.Millisecond)
+		go a.Pipeline.barManager.StartBroadcastingEngine(ctx, 250*time.Millisecond)
 	}
 
 	go func() {

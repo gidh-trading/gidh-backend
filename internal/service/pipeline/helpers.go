@@ -1,3 +1,5 @@
+// Update internal/service/pipeline/helpers.go completely with these functions and structs
+
 package pipeline
 
 import (
@@ -63,11 +65,9 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 	}
 }
 
-// processTickForCandle updates the running OHLCV and heatmap data for a specific timeframe candle
 func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.EnrichedTick, vol float64, timeframe string) {
 	price := tick.Raw.LastPrice
 
-	// Update OHLC
 	if price > cs.bar.High {
 		cs.bar.High = price
 	}
@@ -76,13 +76,11 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	}
 	cs.bar.Close = price
 
-	// Update Volume & Auction Data
 	cs.bar.Volume += vol
 	cs.bar.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
 	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 	cs.bar.VWAP = tick.Raw.AverageTradedPrice
 
-	// Track Stealth Iceberg Activity
 	cs.bar.TickCount++
 	if tick.TickCountZ > cs.bar.MaxTickCountZ {
 		cs.bar.MaxTickCountZ = tick.TickCountZ
@@ -98,9 +96,6 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 		cs.bar.Ticks = append(cs.bar.Ticks, tick.Raw)
 	}
 
-	// ----------------------------------------------------
-	// 🔥 ATTACH SLOPES AND TRACK MAGNITUDES
-	// ----------------------------------------------------
 	offset := int(tick.Raw.Timestamp.Sub(cs.bar.Timestamp).Seconds())
 
 	cs.mpMap[offset] = tick.MicroPriceSlope
@@ -119,39 +114,35 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	}
 
 	bm.accumulateMicrostructure(cs, tick, vol)
-
-	// ✂️ REMOVED THE EMBEDDED WEB_SOCKET BROADCAST INNER LOOP FROM HERE TO PREVENT FRONTEND FLASHING
 }
 
-// accumulateMicrostructure builds the institutional footprint map
 func (bm *BarManager) accumulateMicrostructure(cs *candleState, tick *models.EnrichedTick, tickVol float64) {
-	// 1. EARLY EXIT: If it's not an anomaly, drop it completely.
-	// Do not create a cell, do not track the volume.
 	if !tick.HasAnomaly {
 		return
 	}
 
 	bin := tick.AnomalyBin
 
-	// 2. Get or create the bucket cell for this price
 	cell, exists := cs.heatmapMap[bin]
 	if !exists {
 		cell = &models.HeatmapCell{PriceBin: bin}
 		cs.heatmapMap[bin] = cell
 	}
 
-	// 3. Add the Buy/Sell Volume to the bucket
 	cell.CellVolume += tickVol
 	cell.AggressiveBuy += tick.Microstructure.AggressiveBuy
 	cell.AggressiveSell += tick.Microstructure.AggressiveSell
-
-	// 4. Volume-Weighted Intensity Score
-	// Multiplies the physical volume by the RVol multiplier.
-	// This ensures massive whale drops glow heavily on the UI, not just repeated small ticks.
 	cell.IntensityScore += tickVol * tick.RelativeVolume
+
+	// 👈 NEW: Track peak execution metrics for historical DNA identification
+	if tick.VolumeZ > cell.MaxVolumeZ {
+		cell.MaxVolumeZ = tick.VolumeZ
+	}
+	if tick.TickCountZ > cell.MaxTickZ {
+		cell.MaxTickZ = tick.TickCountZ
+	}
 }
 
-// ClearState resets the BarManager maps (called on session reset or date change)
 func (bm *BarManager) ClearState() {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
@@ -161,30 +152,7 @@ func (bm *BarManager) ClearState() {
 	bm.lastTickState = make(map[uint32]*tokenTickState)
 }
 
-// finalizeTransformsForUI converts backend cells to lightweight UI cells
-func (cs *candleState) finalizeTransformsForUI() []models.UIHeatmapCell {
-	uiCells := make([]models.UIHeatmapCell, 0)
-
-	for _, cell := range cs.heatmapMap {
-		if cell.CellVolume <= 0 {
-			continue
-		}
-
-		// Calculate the net direction for this price bucket
-		tradeDelta := cell.AggressiveBuy - cell.AggressiveSell
-
-		uiCells = append(uiCells, models.UIHeatmapCell{
-			P: cell.PriceBin,
-			V: cell.CellVolume,
-			D: tradeDelta,
-			I: cell.IntensityScore,
-		})
-	}
-	return uiCells
-}
-
 func (cs *candleState) finalizeSlopesForUI() models.TrendSlopes {
-	// 1. Find the most recent offset (highest seconds from bar start)
 	var latestOffset int = -1
 	for o := range cs.mpMap {
 		if o > latestOffset {
@@ -192,27 +160,24 @@ func (cs *candleState) finalizeSlopesForUI() models.TrendSlopes {
 		}
 	}
 
-	// Return empty if no data exists yet
 	if latestOffset == -1 {
 		return models.TrendSlopes{}
 	}
 
-	// 2. Helper to normalize magnitude + polarity into a single float (-1.0 to 1.0)
 	normalize := func(val, maxVal float64) float64 {
 		if maxVal == 0 {
 			return 0
 		}
 		intensity := math.Abs(val) / maxVal
 		if intensity < 0.1 {
-			intensity = 0.1 // baseline visibility
+			intensity = 0.1
 		}
 		if val < 0 {
-			return -intensity // negative
+			return -intensity
 		}
-		return intensity // positive
+		return intensity
 	}
 
-	// 3. Return ONLY the latest normalized values
 	return models.TrendSlopes{
 		Price:  normalize(cs.mpMap[latestOffset], cs.maxMp),
 		VWAP:   normalize(cs.mvMap[latestOffset], cs.maxMv),

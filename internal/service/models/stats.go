@@ -42,4 +42,15 @@ type HeatmapCell struct {
 	AggressiveBuy  float64
 	AggressiveSell float64
 	IntensityScore float64
+	MaxVolumeZ     float64 // 👈 Track peak volume anomaly z-scores
+	MaxTickZ       float64 // 👈 Track peak algorithmic tracking counts
+}
+
+type UIDominantAnomaly struct {
+	IsPresent bool    `json:"is_present"`
+	Type      string  `json:"type"` // "WHALE" or "ICEBERG"
+	P         float64 `json:"p"`    // Price Bin level mapping
+	V         float64 `json:"v"`    // Total Volume accumulated inside bucket
+	D         float64 `json:"d"`    // Aggressive Volume net delta flow
+	I         float64 `json:"i"`    // Volume weighted intensity footprint mapping
 }
