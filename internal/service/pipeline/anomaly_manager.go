@@ -6,14 +6,14 @@ import (
 )
 
 type AnomalyManager struct {
-	MinImbalancePct   float64
-	MinIntensityFloor float64
+	MinImbalancePct        float64
+	MinNormalizedIntensity float64
 }
 
 func NewAnomalyManager() *AnomalyManager {
 	return &AnomalyManager{
-		MinImbalancePct:   0.15,
-		MinIntensityFloor: 50.0,
+		MinImbalancePct:        0.10, // Drop to 10% to catch more balanced fight zones
+		MinNormalizedIntensity: 1.5,  // Drop from 3.0 to 1.5 to show moderate high-volume nodes
 	}
 }
 
@@ -21,9 +21,6 @@ func NewAnomalyManager() *AnomalyManager {
 func (am *AnomalyManager) GetDominantAnomaly(rawCells map[float64]*models.HeatmapCell) models.UIDominantAnomaly {
 	var winner *models.HeatmapCell
 	var maxIntensity float64 = -1.0
-
-	// 🌟 FIX 1: Define a logical baseline intensity floor now that it's normalized
-	const MinNormalizedIntensityFloor = 3.0
 
 	for _, cell := range rawCells {
 		transactedVol := cell.AggressiveBuy + cell.AggressiveSell
@@ -38,11 +35,11 @@ func (am *AnomalyManager) GetDominantAnomaly(rawCells map[float64]*models.Heatma
 			continue
 		}
 
-		// 🌟 FIX 2: Normalize the massive raw intensity score by total volume
+		// Normalize the intensity score by total volume
 		normalizedIntensity := cell.IntensityScore / transactedVol
 
-		// Filter out weak baseline jitter
-		if normalizedIntensity < MinNormalizedIntensityFloor {
+		// 👈 Use the struct's configurable property to filter weak baseline jitter
+		if normalizedIntensity < am.MinNormalizedIntensity {
 			continue
 		}
 
@@ -61,7 +58,7 @@ func (am *AnomalyManager) GetDominantAnomaly(rawCells map[float64]*models.Heatma
 		anomalyType = "ICEBERG"
 	}
 
-	// 🌟 FIX 3: Return the clean normalized intensity to your UI/Analytics
+	// Return the clean normalized intensity to your UI/Analytics
 	return models.UIDominantAnomaly{
 		IsPresent: true,
 		Type:      anomalyType,

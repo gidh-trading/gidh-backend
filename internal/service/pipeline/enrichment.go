@@ -251,6 +251,13 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	var rollingVolMean float64
 	var rollingTcMean float64
 
+	// 🛠️ FIX 1: Calculate the live normalized volume using the 30-day ADV
+	adv, hasAdv := s.advMap[token]
+	var liveNormVol float64
+	if hasAdv && adv > 0 {
+		liveNormVol = liveVolume / adv // e.g., 5000 / 2500000 = 0.002
+	}
+
 	if tokenDna, exists := s.dnaMap[token]; exists {
 		if currBaseline, ok := tokenDna[minuteIndex]; ok {
 			sec := float64(ts.Second())
@@ -278,29 +285,33 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			rollingTcVariance := (weightCurr * currBaseline.TickCountStd * currBaseline.TickCountStd) + (weightPrev * prevBaseline.TickCountStd * prevBaseline.TickCountStd)
 			rollingTcStd := math.Sqrt(rollingTcVariance)
 
-			// 🌟 STABILITY FLOOR: Fallback protection against low volume/tick variance segments causing division-by-zero or infinite Z-scores
-			if rollingVolStd < 1.0 {
-				rollingVolStd = 1.0
+			// 🛠️ FIX 2: Separate the stability floors. Volume is a fraction, Ticks are integers.
+			if rollingVolStd < 0.00001 { // Tiny fraction floor for normalized volume
+				rollingVolStd = 0.00001
 			}
-			if rollingTcStd < 1.0 {
+			if rollingTcStd < 1.0 { // 1.0 is fine for raw tick counts
 				rollingTcStd = 1.0
 			}
 
 			// Calculate mathematically clean Z-Scores
-			if rollingVolStd > 0 {
-				volZ = (liveVolume - rollingVolMean) / rollingVolStd
+			if rollingVolStd > 0 && hasAdv && adv > 0 {
+				// Compare Normalized Live vs Normalized Mean
+				volZ = (liveNormVol - rollingVolMean) / rollingVolStd
 			}
 			if rollingTcStd > 0 {
+				// Tick counts were never normalized in Python, so Raw vs Raw is correct
 				tcZ = (float64(liveTickCount) - rollingTcMean) / rollingTcStd
 			}
 		}
 	}
 
 	var rVol float64
-	if rollingVolMean > 0 {
-		rVol = liveVolume / rollingVolMean
-	} else if adv, ok := s.advMap[token]; ok && adv > 0 {
-		// Fallback to flat ADV only if DNA is missing
+	// 🛠️ FIX 3: Relative Volume must compare apples to apples
+	if rollingVolMean > 0 && hasAdv && adv > 0 {
+		// Compare fraction to fraction
+		rVol = liveNormVol / rollingVolMean
+	} else if hasAdv && adv > 0 {
+		// Fallback to flat ADV only if DNA is missing (Raw vs Raw)
 		if expectedVolPerMin := adv / 375.0; expectedVolPerMin > 0 {
 			rVol = liveVolume / expectedVolPerMin
 		}
