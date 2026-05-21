@@ -209,7 +209,7 @@ func (h *VolumeProfileStage) syncAllBucketsToNodes(p *models.VolumeProfile) {
 	if h.wsHub != nil {
 		// Broadcast the profile to both common interval keys so any active
 		// subscriber for that stock receives it.
-		intervals := []string{"1m", "3m", "5m"}
+		intervals := []string{"1m", "3m", "5m", "10m", "15m"}
 		for _, interval := range intervals {
 			key := p.StockName + ":" + interval
 			h.wsHub.BroadcastJSON(key, map[string]any{

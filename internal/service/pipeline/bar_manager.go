@@ -14,6 +14,8 @@ type BarManager struct {
 	state1m        map[uint32]*candleState
 	state3m        map[uint32]*candleState
 	state5m        map[uint32]*candleState
+	state10m       map[uint32]*candleState // NEW: 10m state
+	state15m       map[uint32]*candleState // NEW: 15m state
 	lastTickState  map[uint32]*tokenTickState
 	anomalyManager *AnomalyManager
 	mu             sync.RWMutex
@@ -28,6 +30,8 @@ func NewBarManager(w *writer.DBWriter, hub *ws.Hub) *BarManager {
 		state1m:        make(map[uint32]*candleState),
 		state3m:        make(map[uint32]*candleState),
 		state5m:        make(map[uint32]*candleState),
+		state10m:       make(map[uint32]*candleState), // NEW
+		state15m:       make(map[uint32]*candleState), // NEW
 		lastTickState:  make(map[uint32]*tokenTickState),
 		anomalyManager: NewAnomalyManager(),
 		writer:         w,
@@ -54,6 +58,14 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	if bm.state5m[token] == nil {
 		bm.state5m[token] = newCandleState(ts.Truncate(5*time.Minute), price, token, name, "5m")
 	}
+	// NEW: Initialize 10m and 15m states
+	if bm.state10m[token] == nil {
+		bm.state10m[token] = newCandleState(ts.Truncate(10*time.Minute), price, token, name, "10m")
+	}
+	if bm.state15m[token] == nil {
+		bm.state15m[token] = newCandleState(ts.Truncate(15*time.Minute), price, token, name, "15m")
+	}
+
 	if bm.lastTickState[token] == nil {
 		bm.lastTickState[token] = &tokenTickState{lastPrice: price}
 	}
@@ -62,9 +74,14 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	bm.updateTimeframe(bm.state3m, token, ts, price, vol, 3*time.Minute, "3m", tick)
 	bm.updateTimeframe(bm.state5m, token, ts, price, vol, 5*time.Minute, "5m", tick)
 
+	// NEW: Update timeframes for 10m and 15m
+	bm.updateTimeframe(bm.state10m, token, ts, price, vol, 10*time.Minute, "10m", tick)
+	bm.updateTimeframe(bm.state15m, token, ts, price, vol, 15*time.Minute, "15m", tick)
+
 	// ⚡ FIXED: TICK-BY-TICK BROADCAST FOR ALL ACTIVE TIMEFRAMES
 	if bm.wsHub != nil {
-		timeframes := []map[uint32]*candleState{bm.state1m, bm.state3m, bm.state5m}
+		// NEW: Add bm.state10m and bm.state15m to the broadcast slice
+		timeframes := []map[uint32]*candleState{bm.state1m, bm.state3m, bm.state5m, bm.state10m, bm.state15m}
 		for _, stateMap := range timeframes {
 			cs := stateMap[token]
 			if cs != nil && cs.bar != nil {
@@ -72,7 +89,7 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 				cs.bar.DominantAnomaly = bm.anomalyManager.GetDominantAnomaly(cs.heatmapMap)
 				cs.bar.Slopes = cs.finalizeSlopesForUI()
 
-				// Broadcast to stock_name:1m, stock_name:3m, or stock_name:5m channels dynamically
+				// Broadcast to stock_name:1m, stock_name:3m, stock_name:5m, stock_name:10m, or stock_name:15m channels dynamically
 				bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
 					"type": "bar",
 					"data": cs.bar,

@@ -51,7 +51,7 @@ func Load() {
 		Port:                 activePort,
 		Mode:                 mode,
 		LogLevel:             getEnv("LOG_LEVEL", "info"),
-		BarIntervals:         getEnvSlice("BAR_INTERVALS", []string{"1m", "3m", "5m"}),
+		BarIntervals:         getEnvSlice("BAR_INTERVALS", []string{"1m", "3m", "5m", "10m", "15m"}),
 		KiteAPIKey:           getEnv("KITE_API_KEY", ""),
 		KiteAccessToken:      getEnv("KITE_ACCESS_TOKEN", ""),
 		LiveDBURL:            getEnv("LIVE_DB_URL", ""),

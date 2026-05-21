@@ -149,6 +149,8 @@ func (bm *BarManager) ClearState() {
 	bm.state1m = make(map[uint32]*candleState)
 	bm.state3m = make(map[uint32]*candleState)
 	bm.state5m = make(map[uint32]*candleState)
+	bm.state10m = make(map[uint32]*candleState) // NEW
+	bm.state15m = make(map[uint32]*candleState) // NEW
 	bm.lastTickState = make(map[uint32]*tokenTickState)
 }
 
