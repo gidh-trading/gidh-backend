@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"context"
 	"sync"
 	"time"
 
@@ -16,7 +15,7 @@ type BarManager struct {
 	state3m        map[uint32]*candleState
 	state5m        map[uint32]*candleState
 	lastTickState  map[uint32]*tokenTickState
-	anomalyManager *AnomalyManager // 👈 Added anomaly filter property
+	anomalyManager *AnomalyManager
 	mu             sync.RWMutex
 	writer         *writer.DBWriter
 	wsHub          *ws.Hub
@@ -30,7 +29,7 @@ func NewBarManager(w *writer.DBWriter, hub *ws.Hub) *BarManager {
 		state3m:        make(map[uint32]*candleState),
 		state5m:        make(map[uint32]*candleState),
 		lastTickState:  make(map[uint32]*tokenTickState),
-		anomalyManager: NewAnomalyManager(), // 👈 Instantiated manager here
+		anomalyManager: NewAnomalyManager(),
 		writer:         w,
 		wsHub:          hub,
 	}
@@ -63,6 +62,21 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	bm.updateTimeframe(bm.state3m, token, ts, price, vol, 3*time.Minute, "3m", tick)
 	bm.updateTimeframe(bm.state5m, token, ts, price, vol, 5*time.Minute, "5m", tick)
 
+	// ⚡ TICK-BY-TICK BROADCAST (For both Live & Backtest modes)
+	// Broadcasts the building 1m bar to the UI on every single processed tick
+	if bm.wsHub != nil {
+		cs := bm.state1m[token]
+		if cs != nil && cs.bar != nil {
+			cs.bar.DominantAnomaly = bm.anomalyManager.GetDominantAnomaly(cs.heatmapMap)
+			cs.bar.Slopes = cs.finalizeSlopesForUI()
+
+			bm.wsHub.BroadcastJSON(cs.bar.StockName+":1m", map[string]any{
+				"type": "bar",
+				"data": cs.bar,
+			})
+		}
+	}
+
 	return nil
 }
 
@@ -81,7 +95,7 @@ func (bm *BarManager) updateTimeframe(
 
 	if cs.bar.Timestamp.Before(candleStart) {
 		closedBar := cs.bar
-		closedBar.DominantAnomaly = bm.anomalyManager.GetDominantAnomaly(cs.heatmapMap) // 👈 Crown the single winner
+		closedBar.DominantAnomaly = bm.anomalyManager.GetDominantAnomaly(cs.heatmapMap)
 		closedBar.Slopes = cs.finalizeSlopesForUI()
 
 		if bm.wsHub != nil {
@@ -124,40 +138,6 @@ func (bm *BarManager) updateTimeframe(
 	bm.processTickForCandle(cs, tick, vol, timeframe)
 }
 
-func (bm *BarManager) StartBroadcastingEngine(ctx context.Context, broadcastRate time.Duration) {
-	ticker := time.NewTicker(broadcastRate)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			bm.mu.Lock()
-			if bm.wsHub == nil {
-				bm.mu.Unlock()
-				continue
-			}
-
-			timeframeMaps := []map[uint32]*candleState{bm.state1m, bm.state3m, bm.state5m}
-
-			for _, stateMap := range timeframeMaps {
-				for _, cs := range stateMap {
-					if cs == nil || cs.bar == nil {
-						continue
-					}
-
-					cs.bar.DominantAnomaly = bm.anomalyManager.GetDominantAnomaly(cs.heatmapMap) // 👈 Stream temporary real-time winners
-					cs.bar.Slopes = cs.finalizeSlopesForUI()
-
-					bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
-						"type": "bar",
-						"data": cs.bar,
-					})
-				}
-			}
-			bm.mu.Unlock()
-
-		case <-ctx.Done():
-			return
-		}
-	}
+func (bm *BarManager) AccumulateMicrostructure(cs *candleState, tick *models.EnrichedTick, tickVol float64) {
+	bm.processTickForCandle(cs, tick, tickVol, cs.bar.Timeframe)
 }
