@@ -326,9 +326,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 }
 
 func (s *EnrichmentStage) triggerGoldenRuleAlert(tick *models.EnrichedTick, confirmedSlope float64, duration float64) {
-	println("🔥 [GOLDEN RULE CONFIRMED] Stock:", tick.Raw.StockName,
-		"| Slope:", confirmedSlope,
-		"| Held for:", duration, "seconds! Executing entry parameters near Structural Levels.")
 }
 
 func (s *EnrichmentStage) calculateTickVolume(token uint32, tick *models.EnrichedTick) int64 {

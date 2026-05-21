@@ -65,6 +65,8 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 	}
 }
 
+// internal/service/pipeline/helpers.go
+
 func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.EnrichedTick, vol float64, timeframe string) {
 	price := tick.Raw.LastPrice
 
@@ -80,6 +82,16 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	cs.bar.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
 	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 	cs.bar.VWAP = tick.Raw.AverageTradedPrice
+
+	// 📈 CALCULATE & ASSIGN REAL-TIME CHANGE PERCENTAGE FOR UI
+	// Zerodha passes the net change amount in tick.Raw.Change.
+	// Previous Close = LastPrice - Change.
+	prevClose := tick.Raw.LastPrice - tick.Raw.Change
+	if prevClose > 0 {
+		cs.bar.ChangePct = (tick.Raw.Change / prevClose) * 100
+	} else {
+		cs.bar.ChangePct = 0.0
+	}
 
 	cs.bar.TickCount++
 	if tick.TickCountZ > cs.bar.MaxTickCountZ {

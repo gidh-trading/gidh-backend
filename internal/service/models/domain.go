@@ -196,10 +196,12 @@ type Bar struct {
 	VAH  float64 `json:"vah"`
 	VAL  float64 `json:"val"`
 
+	TotalBuyQty  float64 `json:"total_buy_qty"`
+	TotalSellQty float64 `json:"total_sell_qty"`
+	ChangePct    float64 `json:"change_pct"`
+
 	// ---- UI Only Metrics (Not persisted in DB) ----
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
-	TotalBuyQty   float64 `json:"total_buy_qty"`
-	TotalSellQty  float64 `json:"total_sell_qty"`
 
 	// ---- Microstructure Analytics Heatmap ----
 	DominantAnomaly UIDominantAnomaly `json:"dominant_anomaly"`

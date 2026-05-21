@@ -318,7 +318,7 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 			"timestamp", "instrument_token", "stock_name", "timeframe",
 			"open", "high", "low", "close", "volume", "tick_count",
 			"max_tick_count_z", "vwap", "poc", "vah", "val",
-			"total_buy_qty", "total_sell_qty", "dominant_anomaly", "slopes",
+			"total_buy_qty", "total_sell_qty", "change_pct", "dominant_anomaly", "slopes",
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
@@ -340,7 +340,7 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
 				b.Open, b.High, b.Low, b.Close, b.Volume,
 				b.TickCount, b.MaxTickCountZ,
-				b.VWAP, b.POC, b.VAH, b.VAL, b.TotalBuyQty, b.TotalSellQty,
+				b.VWAP, b.POC, b.VAH, b.VAL, b.TotalBuyQty, b.TotalSellQty, b.ChangePct,
 				string(anomalyBytes), string(slopesBytes), // Maps nicely into jsonb column layout
 			}, nil
 		}),
