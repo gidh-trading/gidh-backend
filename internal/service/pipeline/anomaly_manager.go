@@ -6,12 +6,14 @@ import (
 )
 
 type AnomalyManager struct {
-	MinImbalancePct float64
+	MinImbalancePct   float64
+	MinIntensityFloor float64
 }
 
 func NewAnomalyManager() *AnomalyManager {
 	return &AnomalyManager{
-		MinImbalancePct: 0.15, // Ignores noise when neither side possesses an imbalance edge
+		MinImbalancePct:   0.15,
+		MinIntensityFloor: 50.0,
 	}
 }
 
@@ -20,7 +22,9 @@ func (am *AnomalyManager) GetDominantAnomaly(rawCells map[float64]*models.Heatma
 	var winner *models.HeatmapCell
 	var maxIntensity float64 = -1.0
 
-	// 1. Battle Royale: Pick the footprint block with the highest intensity profile
+	// 🌟 FIX 1: Define a logical baseline intensity floor now that it's normalized
+	const MinNormalizedIntensityFloor = 3.0
+
 	for _, cell := range rawCells {
 		transactedVol := cell.AggressiveBuy + cell.AggressiveSell
 		if transactedVol == 0 {
@@ -30,34 +34,40 @@ func (am *AnomalyManager) GetDominantAnomaly(rawCells map[float64]*models.Heatma
 		tradeDelta := cell.AggressiveBuy - cell.AggressiveSell
 		imbalancePct := math.Abs(tradeDelta) / transactedVol
 
-		// Drop low directional intent blocks
 		if imbalancePct < am.MinImbalancePct {
 			continue
 		}
 
-		if cell.IntensityScore > maxIntensity {
-			maxIntensity = cell.IntensityScore
+		// 🌟 FIX 2: Normalize the massive raw intensity score by total volume
+		normalizedIntensity := cell.IntensityScore / transactedVol
+
+		// Filter out weak baseline jitter
+		if normalizedIntensity < MinNormalizedIntensityFloor {
+			continue
+		}
+
+		if normalizedIntensity > maxIntensity {
+			maxIntensity = normalizedIntensity
 			winner = cell
 		}
 	}
 
-	// 2. Fallback execution path if no anomaly breaks past thresholds
 	if winner == nil {
 		return models.UIDominantAnomaly{IsPresent: false}
 	}
 
-	// 3. Deduce footprint identity archetype: Whale vs Iceberg
 	anomalyType := "WHALE"
 	if winner.MaxTickZ > winner.MaxVolumeZ {
 		anomalyType = "ICEBERG"
 	}
 
+	// 🌟 FIX 3: Return the clean normalized intensity to your UI/Analytics
 	return models.UIDominantAnomaly{
 		IsPresent: true,
 		Type:      anomalyType,
 		P:         winner.PriceBin,
 		V:         winner.CellVolume,
 		D:         winner.AggressiveBuy - winner.AggressiveSell,
-		I:         winner.IntensityScore,
+		I:         maxIntensity,
 	}
 }

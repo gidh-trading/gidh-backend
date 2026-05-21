@@ -249,6 +249,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	liveVolume, liveTickCount := buf.GetStats()
 	var volZ, tcZ float64
 	var rollingVolMean float64
+	var rollingTcMean float64
 
 	if tokenDna, exists := s.dnaMap[token]; exists {
 		if currBaseline, ok := tokenDna[minuteIndex]; ok {
@@ -266,13 +267,26 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			weightCurr := sec / 60.0
 			weightPrev := (60.0 - sec) / 60.0
 
-			// Interpolate means and standard deviations
+			// 🌟 STATISTICAL CORRECTION: Interpolate means linearly
 			rollingVolMean = (currBaseline.VolumeMean * weightCurr) + (prevBaseline.VolumeMean * weightPrev)
-			rollingVolStd := (currBaseline.VolumeStd * weightCurr) + (prevBaseline.VolumeStd * weightPrev)
-			rollingTcMean := (currBaseline.TickCountMean * weightCurr) + (prevBaseline.TickCountMean * weightPrev)
-			rollingTcStd := (currBaseline.TickCountStd * weightCurr) + (prevBaseline.TickCountStd * weightPrev)
+			rollingTcMean = (currBaseline.TickCountMean * weightCurr) + (prevBaseline.TickCountMean * weightPrev)
 
-			// Calculate mathematically sound Z-Scores
+			// 🌟 STATISTICAL CORRECTION: Combine variances, then square-root to find rolling standard deviation
+			rollingVolVariance := (weightCurr * currBaseline.VolumeStd * currBaseline.VolumeStd) + (weightPrev * prevBaseline.VolumeStd * prevBaseline.VolumeStd)
+			rollingVolStd := math.Sqrt(rollingVolVariance)
+
+			rollingTcVariance := (weightCurr * currBaseline.TickCountStd * currBaseline.TickCountStd) + (weightPrev * prevBaseline.TickCountStd * prevBaseline.TickCountStd)
+			rollingTcStd := math.Sqrt(rollingTcVariance)
+
+			// 🌟 STABILITY FLOOR: Fallback protection against low volume/tick variance segments causing division-by-zero or infinite Z-scores
+			if rollingVolStd < 1.0 {
+				rollingVolStd = 1.0
+			}
+			if rollingTcStd < 1.0 {
+				rollingTcStd = 1.0
+			}
+
+			// Calculate mathematically clean Z-Scores
 			if rollingVolStd > 0 {
 				volZ = (liveVolume - rollingVolMean) / rollingVolStd
 			}
