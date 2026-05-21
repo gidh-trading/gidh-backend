@@ -19,8 +19,9 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     poc              DOUBLE PRECISION NOT NULL DEFAULT 0,
     vah              DOUBLE PRECISION NOT NULL DEFAULT 0,
     val              DOUBLE PRECISION NOT NULL DEFAULT 0,
-
-    dominant_anomaly          JSONB                     DEFAULT '{}',
+    total_buy_qty    INTEGER          NOT NULL DEFAULT 0,
+    total_sell_qty    INTEGER          NOT NULL DEFAULT 0,
+    dominant_anomaly JSONB                     DEFAULT '{}',
     slopes           JSONB                     DEFAULT '{}',
 
     -- Primary Key must include the partitioning column (timestamp) in TimescaleDB.

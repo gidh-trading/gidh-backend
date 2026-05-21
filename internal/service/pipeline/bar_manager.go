@@ -62,18 +62,22 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	bm.updateTimeframe(bm.state3m, token, ts, price, vol, 3*time.Minute, "3m", tick)
 	bm.updateTimeframe(bm.state5m, token, ts, price, vol, 5*time.Minute, "5m", tick)
 
-	// ⚡ TICK-BY-TICK BROADCAST (For both Live & Backtest modes)
-	// Broadcasts the building 1m bar to the UI on every single processed tick
+	// ⚡ FIXED: TICK-BY-TICK BROADCAST FOR ALL ACTIVE TIMEFRAMES
 	if bm.wsHub != nil {
-		cs := bm.state1m[token]
-		if cs != nil && cs.bar != nil {
-			cs.bar.DominantAnomaly = bm.anomalyManager.GetDominantAnomaly(cs.heatmapMap)
-			cs.bar.Slopes = cs.finalizeSlopesForUI()
+		timeframes := []map[uint32]*candleState{bm.state1m, bm.state3m, bm.state5m}
+		for _, stateMap := range timeframes {
+			cs := stateMap[token]
+			if cs != nil && cs.bar != nil {
+				// Calculate dominant anomalies and slopes on the building candles
+				cs.bar.DominantAnomaly = bm.anomalyManager.GetDominantAnomaly(cs.heatmapMap)
+				cs.bar.Slopes = cs.finalizeSlopesForUI()
 
-			bm.wsHub.BroadcastJSON(cs.bar.StockName+":1m", map[string]any{
-				"type": "bar",
-				"data": cs.bar,
-			})
+				// Broadcast to stock_name:1m, stock_name:3m, or stock_name:5m channels dynamically
+				bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
+					"type": "bar",
+					"data": cs.bar,
+				})
+			}
 		}
 	}
 
