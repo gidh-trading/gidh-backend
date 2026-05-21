@@ -68,25 +68,22 @@ type WindowTick struct {
 	Volume float64
 }
 
+// internal/service/models/domain.go
+
 type EnrichedTick struct {
 	Raw            TickData
 	TickVolume     int64
 	VolProfile     *VolumeProfileInfo
 	FullVolProfile *VolumeProfile
 
-	// Statistical Triggers
-	VolumeZ        float64
-	TickCountZ     float64
-	RelativeVolume float64
+	// Primary Objective Anomaly Metrics
+	VolumeZ        float64 // DNA-normalized participation score
+	TickCountZ     float64 // DNA-normalized execution frequency score
+	RelativeVolume float64 // Contextual participation magnitude
 
-	// Anomaly & Heatmap Routing
-	HasAnomaly     bool
-	AnomalyBin     float64
-	Microstructure TickMicrostructure
-
-	MicroPriceSlope  float64
-	MicroVWAPSlope   float64
-	MicroVolumeSlope float64
+	// Experimental Telemetry & Live Structural Metrics
+	Efficiency    float64 // realizedRange / max(1, liveVolume)
+	RealizedRange float64 // rollingHigh - rollingLow
 }
 
 // VPNode represents a single price bucket and its accumulated volume.

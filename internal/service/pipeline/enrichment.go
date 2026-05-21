@@ -1,147 +1,15 @@
-// internal/service/pipeline/enrichment.go
 package pipeline
 
 import (
-	"gidh-backend/internal/service/order"
 	"math"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/order"
 )
 
-// --- 1. Rolling Window Data Structures ---
-
-type EnrichmentTick struct {
-	Timestamp time.Time
-	Volume    float64
-	Price     float64
-	VWAP      float64
-	X         float64
-	RawTicks  int
-}
-
-type ThresholdState struct {
-	IsTesting            bool
-	TimeCrossedThreshold time.Time
-}
-
-type TokenRollingBuffer struct {
-	Ticks    []EnrichmentTick
-	PriceReg RollingRegression
-	VWAPReg  RollingRegression
-	VolReg   RollingRegression
-
-	// Golden Rule State Management
-	StateMu        sync.Mutex
-	ThresholdState ThresholdState
-
-	// --- 📈 SMOOTHING & SAMPLING VARIABLES (NEW) ---
-	LastSampleTime     time.Time // Tracks when we last added a node to the regression matrix
-	SmoothedPriceSlope float64   // Moving average of the price slope
-	SmoothedVWAPSlope  float64   // Moving average of the VWAP slope
-	SmoothedVolSlope   float64   // Moving average of the Volume slope
-	AccumulatedVolume  float64   // Buffers volume between sample windows
-	AccumulatedTicks   int
-	AccumulatedValue   float64
-}
-
-func NewTokenRollingBuffer() *TokenRollingBuffer {
-	return &TokenRollingBuffer{
-		Ticks: make([]EnrichmentTick, 0, 2000),
-	}
-}
-
-// Push now samples data points to prevent high-frequency tick noise from warping regressions
-func (b *TokenRollingBuffer) Push(ts time.Time, price, vwap, vol float64, duration time.Duration, minSampleDelta time.Duration) bool {
-	// Buffer volume and ticks continually
-	b.AccumulatedVolume += vol
-	b.AccumulatedTicks++
-	b.AccumulatedValue += price * vol
-
-	if !b.LastSampleTime.IsZero() && ts.Sub(b.LastSampleTime) < minSampleDelta {
-		return false
-	}
-
-	b.LastSampleTime = ts
-	sampledVol := b.AccumulatedVolume
-	sampledTicks := b.AccumulatedTicks
-	sampledValue := b.AccumulatedValue
-
-	b.AccumulatedVolume = 0
-	b.AccumulatedTicks = 0
-	b.AccumulatedValue = 0
-
-	customRollingVwap := price
-	if sampledVol > 0 {
-		customRollingVwap = sampledValue / sampledVol
-	}
-
-	x := float64(ts.Hour()*3600 + ts.Minute()*60 + ts.Second())
-
-	tick := EnrichmentTick{
-		Timestamp: ts,
-		Volume:    sampledVol,
-		Price:     price,
-		VWAP:      customRollingVwap,
-		X:         x,
-		RawTicks:  sampledTicks,
-	}
-
-	b.Ticks = append(b.Ticks, tick)
-
-	// O(1) Add to regression running totals
-	b.PriceReg.Add(x, price)
-	b.VWAPReg.Add(x, customRollingVwap)
-	b.VolReg.Add(x, sampledVol)
-
-	// Evict older than duration (e.g., 300 seconds)
-	cutoff := ts.Add(-duration)
-	evictIdx := 0
-	for evictIdx < len(b.Ticks) && b.Ticks[evictIdx].Timestamp.Before(cutoff) {
-		oldTick := b.Ticks[evictIdx]
-
-		// O(1) Remove from regression running totals
-		b.PriceReg.Remove(oldTick.X, oldTick.Price)
-		b.VWAPReg.Remove(oldTick.X, oldTick.VWAP)
-		b.VolReg.Remove(oldTick.X, oldTick.Volume)
-
-		evictIdx++
-	}
-	if evictIdx > 0 {
-		b.Ticks = b.Ticks[evictIdx:]
-	}
-	return true // Regression statistics were updated
-}
-
-func (b *TokenRollingBuffer) GetStats() (float64, int) {
-	var totalVol float64
-	var totalTicks int
-	for _, t := range b.Ticks {
-		totalVol += t.Volume
-		totalTicks += t.RawTicks
-	}
-	totalVol += b.AccumulatedVolume
-	totalTicks += b.AccumulatedTicks
-	return totalVol, totalTicks
-}
-
-// --- 2. Enrichment Stage ---
-
-const (
-	ContinuousWindowDuration = 60 * time.Second
-
-	// 🛡️ IDEA 3: DUAL-BAND HYSTERESIS THRESHOLDS
-	ActivationThreshold   = 0.75 // Strong momentum required to alert
-	DeactivationThreshold = 0.45 // Lower threshold floor before dropping testing state
-
-	GoldenRuleHoldSeconds = 5.0 // Must hold past threshold for 5 seconds
-
-	// 📊 IDEA 1 & 2: FILTER PARAMETERS
-	SlopeAlpha            = 0.15            // EMA factor. Lower = smoother, higher = more responsive.
-	DefaultSampleInterval = 1 * time.Second // Time slice size for regression nodes
-)
-
+// EnrichmentStage drives data orchestration mechanics for incoming tick flows.
 type EnrichmentStage struct {
 	lastVolumeMap   map[uint32]int64
 	lastPriceMap    map[uint32]float64
@@ -153,6 +21,7 @@ type EnrichmentStage struct {
 	mu              sync.Mutex
 }
 
+// NewEnrichmentStage constructs an enrichment operator and pre-indexes historical timeline records for optimized retrieval.
 func NewEnrichmentStage(pm order.PositionManager, advMap map[uint32]float64, rawDnaMap map[uint32]*models.MarketDNA) *EnrichmentStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
@@ -175,6 +44,7 @@ func NewEnrichmentStage(pm order.PositionManager, advMap map[uint32]float64, raw
 	}
 }
 
+// Process coordinates processing sequences cleanly across incoming context properties.
 func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -202,155 +72,82 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		s.buffers[token] = buf
 	}
 
-	// Calculate Minute Index to interface with your structural DNA buckets
+	// Update active rolling metrics status definitions
+	buf.Push(ts, price, vol, ContinuousWindowDuration)
+
 	minOfDay := (ts.Hour() * 60) + ts.Minute()
-	minuteIndex := minOfDay - 555
+	minuteIndex := minOfDay - 555 // Market opener timeline index synchronization offset
 
-	// 🧠 INTERFACING WITH DNA BUCKETS:
-	// Optimize resampling delta based on historical volatility activity definitions!
-	sampleInterval := DefaultSampleInterval
-	if tokenDna, exists := s.dnaMap[token]; exists {
-		if baseline, ok := tokenDna[minuteIndex]; ok {
-			// If historical frequency activity is high, sample faster to capture institutional shifts
-			if baseline.TickCountMean > 500 {
-				sampleInterval = 500 * time.Millisecond
-			} else if baseline.TickCountMean < 50 {
-				sampleInterval = 2 * time.Second
-			}
-		}
-	}
-
-	// Push tick and check if a new regression coordinate slice was generated
-	statsUpdated := buf.Push(ts, price, tick.Raw.AverageTradedPrice, vol, ContinuousWindowDuration, sampleInterval)
-
-	// 📈 IDEA 1: APPLY EMA SMOOTHING MATRIX OVER THE RAW TRAJECTORY
-	if statsUpdated {
-		rawPSlope, rawVSlope, rawVolSlope := buf.PriceReg.Slope(), buf.VWAPReg.Slope(), buf.VolReg.Slope()
-
-		// Handle bootstrap state initialization
-		if buf.LastSampleTime.Equal(ts) && len(buf.Ticks) <= 2 {
-			buf.SmoothedPriceSlope = rawPSlope
-			buf.SmoothedVWAPSlope = rawVSlope
-			buf.SmoothedVolSlope = rawVolSlope
-		} else {
-			// Apply Exponential Moving Average math
-			buf.SmoothedPriceSlope = (SlopeAlpha * rawPSlope) + ((1.0 - SlopeAlpha) * buf.SmoothedPriceSlope)
-			buf.SmoothedVWAPSlope = (SlopeAlpha * rawVSlope) + ((1.0 - SlopeAlpha) * buf.SmoothedVWAPSlope)
-			buf.SmoothedVolSlope = (SlopeAlpha * rawVolSlope) + ((1.0 - SlopeAlpha) * buf.SmoothedVolSlope)
-		}
-	}
-
-	// Inject the clean, non-wiggling slope properties downstream
-	tick.MicroPriceSlope = buf.SmoothedPriceSlope
-	tick.MicroVWAPSlope = buf.SmoothedVWAPSlope
-	tick.MicroVolumeSlope = buf.SmoothedVolSlope
-
-	// Recompute standard Z-scores and RVol stats...
 	liveVolume, liveTickCount := buf.GetStats()
-	var volZ, tcZ float64
-	var rollingVolMean float64
-	var rollingTcMean float64
+	var volZ, tcZ, rVol float64
 
-	// 🛠️ FIX 1: Calculate the live normalized volume using the 30-day ADV
 	adv, hasAdv := s.advMap[token]
-	var liveNormVol float64
+	liveNormVol := 0.0
 	if hasAdv && adv > 0 {
-		liveNormVol = liveVolume / adv // e.g., 5000 / 2500000 = 0.002
+		liveNormVol = liveVolume / adv
 	}
 
+	// Linearly interpolate baseline values against historical matrices
 	if tokenDna, exists := s.dnaMap[token]; exists {
 		if currBaseline, ok := tokenDna[minuteIndex]; ok {
 			sec := float64(ts.Second())
 			prevBaseline := currBaseline
 
-			// Get previous minute baseline if available
 			if minuteIndex > 0 {
 				if pb, ok := tokenDna[minuteIndex-1]; ok {
 					prevBaseline = pb
 				}
 			}
 
-			// Calculate weights based on how far into the current minute we are
 			weightCurr := sec / 60.0
 			weightPrev := (60.0 - sec) / 60.0
 
-			// 🌟 STATISTICAL CORRECTION: Interpolate means linearly
-			rollingVolMean = (currBaseline.VolumeMean * weightCurr) + (prevBaseline.VolumeMean * weightPrev)
-			rollingTcMean = (currBaseline.TickCountMean * weightCurr) + (prevBaseline.TickCountMean * weightPrev)
+			rollingVolMean := (currBaseline.VolumeMean * weightCurr) + (prevBaseline.VolumeMean * weightPrev)
+			rollingTcMean := (currBaseline.TickCountMean * weightCurr) + (prevBaseline.TickCountMean * weightPrev)
 
-			// 🌟 STATISTICAL CORRECTION: Combine variances, then square-root to find rolling standard deviation
 			rollingVolVariance := (weightCurr * currBaseline.VolumeStd * currBaseline.VolumeStd) + (weightPrev * prevBaseline.VolumeStd * prevBaseline.VolumeStd)
 			rollingVolStd := math.Sqrt(rollingVolVariance)
 
 			rollingTcVariance := (weightCurr * currBaseline.TickCountStd * currBaseline.TickCountStd) + (weightPrev * prevBaseline.TickCountStd * prevBaseline.TickCountStd)
 			rollingTcStd := math.Sqrt(rollingTcVariance)
 
-			// 🛠️ FIX 2: Separate the stability floors. Volume is a fraction, Ticks are integers.
-			if rollingVolStd < 0.00001 { // Tiny fraction floor for normalized volume
+			if rollingVolStd < 0.00001 {
 				rollingVolStd = 0.00001
 			}
-			if rollingTcStd < 1.0 { // 1.0 is fine for raw tick counts
+			if rollingTcStd < 1.0 {
 				rollingTcStd = 1.0
 			}
 
-			// Calculate mathematically clean Z-Scores
-			if rollingVolStd > 0 && hasAdv && adv > 0 {
-				// Compare Normalized Live vs Normalized Mean
+			if hasAdv && adv > 0 {
 				volZ = (liveNormVol - rollingVolMean) / rollingVolStd
+				rVol = liveNormVol / rollingVolMean
 			}
-			if rollingTcStd > 0 {
-				// Tick counts were never normalized in Python, so Raw vs Raw is correct
-				tcZ = (float64(liveTickCount) - rollingTcMean) / rollingTcStd
-			}
+			tcZ = (float64(liveTickCount) - rollingTcMean) / rollingTcStd
 		}
 	}
 
-	var rVol float64
-	// 🛠️ FIX 3: Relative Volume must compare apples to apples
-	if rollingVolMean > 0 && hasAdv && adv > 0 {
-		// Compare fraction to fraction
-		rVol = liveNormVol / rollingVolMean
-	} else if hasAdv && adv > 0 {
-		// Fallback to flat ADV only if DNA is missing (Raw vs Raw)
+	if rVol == 0 && hasAdv && adv > 0 {
 		if expectedVolPerMin := adv / 375.0; expectedVolPerMin > 0 {
 			rVol = liveVolume / expectedVolPerMin
 		}
 	}
 
+	// Populate structural context outcomes downstream
 	tick.RelativeVolume = rVol
 	tick.VolumeZ = volZ
 	tick.TickCountZ = tcZ
 
-	// 🛡️ IDEA 3: THE DUAL-BAND HYSTERESIS STATE MACHINE
-	buf.StateMu.Lock()
-	absSlope := math.Abs(tick.MicroPriceSlope)
-
-	if !buf.ThresholdState.IsTesting {
-		// Entry to entry confirmation mode requires breaching the strict upper ceiling
-		if absSlope >= ActivationThreshold {
-			buf.ThresholdState.IsTesting = true
-			buf.ThresholdState.TimeCrossedThreshold = ts
-		}
+	// Compute Experimental Telemetry Dimensions
+	if buf.RollingHigh > 0 && buf.RollingLow < math.MaxFloat64 {
+		tick.RealizedRange = buf.RollingHigh - buf.RollingLow
 	} else {
-		// Inside execution loops, do not wipe state on minor pullbacks.
-		// Only break out if momentum collapses completely past the deactivation floor.
-		if absSlope >= DeactivationThreshold {
-			timeHeld := ts.Sub(buf.ThresholdState.TimeCrossedThreshold).Seconds()
-			if timeHeld >= GoldenRuleHoldSeconds {
-				s.triggerGoldenRuleAlert(tick, tick.MicroPriceSlope, timeHeld)
-				buf.ThresholdState.IsTesting = false
-			}
-		} else {
-			// Pullback violated structural trend floor; drop validation parameters
-			buf.ThresholdState.IsTesting = false
-		}
+		tick.RealizedRange = 0.0
 	}
-	buf.StateMu.Unlock()
+
+	denomVolume := math.Max(1.0, liveVolume)
+	tick.Efficiency = tick.RealizedRange / denomVolume
 
 	return nil
-}
-
-func (s *EnrichmentStage) triggerGoldenRuleAlert(tick *models.EnrichedTick, confirmedSlope float64, duration float64) {
 }
 
 func (s *EnrichmentStage) calculateTickVolume(token uint32, tick *models.EnrichedTick) int64 {
