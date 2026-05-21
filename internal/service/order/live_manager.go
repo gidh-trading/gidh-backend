@@ -527,6 +527,8 @@ func (lm *LiveOrderManager) updatePositionStateFromKite(o kiteconnect.Order, qty
 		} else if pos.NetQuantity == 0 {
 			pos.AveragePrice = 0
 			pos.UnrealizedPnL = 0
+			pos.TargetPrice = 0
+			pos.StopLossPrice = 0
 			pos.TargetOrderID = ""
 			pos.StopLossOrderID = ""
 		}

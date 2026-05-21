@@ -377,6 +377,8 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		pos.Side = "SHORT"
 	} else {
 		pos.Side = ""
+		pos.TargetPrice = 0
+		pos.StopLossPrice = 0
 	}
 
 	if pm.dbWriter != nil {
