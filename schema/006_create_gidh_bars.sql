@@ -7,16 +7,16 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     stock_name       TEXT             NOT NULL,
     timeframe        TEXT             NOT NULL,
 
-    -- OHLC Data
+    -- OHLC & Core Transaction Activity Data
     open             DOUBLE PRECISION NOT NULL,
     high             DOUBLE PRECISION NOT NULL,
     low              DOUBLE PRECISION NOT NULL,
     close            DOUBLE PRECISION NOT NULL,
-
-    -- Transaction Activity Metrics
     volume           DOUBLE PRECISION NOT NULL DEFAULT 0,
     tick_count       INTEGER          NOT NULL DEFAULT 0,
-    max_tick_count_z DOUBLE PRECISION NOT NULL DEFAULT 0,
+
+    -- Dynamic Anomaly Metadata Document Storage
+    metrics          JSONB            NOT NULL,
 
     -- Core Auction Metrics
     vwap             DOUBLE PRECISION NOT NULL DEFAULT 0,

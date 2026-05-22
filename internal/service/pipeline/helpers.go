@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
+	"math"
 	"time"
 )
 
@@ -50,8 +51,9 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	}
 	cs.bar.Close = price
 
-	// 2. Aggregate Pure Participation Telemetry
+	// 2. Aggregate Core Root Level Fields
 	cs.bar.Volume += vol
+	cs.bar.TickCount++
 	cs.bar.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
 	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 	cs.bar.VWAP = tick.Raw.AverageTradedPrice
@@ -64,14 +66,39 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 		cs.bar.ChangePct = 0.0
 	}
 
-	cs.bar.TickCount++
-
-	// Track raw, live tick distribution frequency from enrichment layer
-	if tick.Enrichment.TickZ > cs.bar.MaxTickCountZ {
-		cs.bar.MaxTickCountZ = tick.Enrichment.TickZ
+	// 4. 🔥 PEAK TRACKING FOR STATISTICAL METRICS (Option A)
+	// Track the absolute maximum tick frequency burst seen during this candle window
+	if tick.Enrichment.TickZ > cs.bar.Metrics.MaxTickCountZ {
+		cs.bar.Metrics.MaxTickCountZ = tick.Enrichment.TickZ
 	}
 
-	// 4. Hydrate Auction Market Theory Matrix
+	// Track the highest absolute value for VolumeZ (captures both extreme selling/buying volume spikes)
+	if math.Abs(tick.Enrichment.VolumeZ) > math.Abs(cs.bar.Metrics.VolumeZ) {
+		cs.bar.Metrics.VolumeZ = tick.Enrichment.VolumeZ
+	}
+
+	// Track the highest absolute value for TickZ
+	if math.Abs(tick.Enrichment.TickZ) > math.Abs(cs.bar.Metrics.TickZ) {
+		cs.bar.Metrics.TickZ = tick.Enrichment.TickZ
+	}
+
+	// Keep the highest non-Gaussian percentile tier reached during the candle lifetime (e.g., lock in P99 or P95)
+	if tick.Enrichment.RangePercentile == "P99" ||
+		(tick.Enrichment.RangePercentile == "P95" && cs.bar.Metrics.RangePercentile != "P99") {
+		cs.bar.Metrics.RangePercentile = tick.Enrichment.RangePercentile
+	} else if cs.bar.Metrics.RangePercentile == "" {
+		cs.bar.Metrics.RangePercentile = "NORMAL"
+	}
+
+	// Keep the highest non-Gaussian efficiency percentile tier reached
+	if tick.Enrichment.EfficiencyPercentile == "P99" ||
+		(tick.Enrichment.EfficiencyPercentile == "P95" && cs.bar.Metrics.EfficiencyPercentile != "P99") {
+		cs.bar.Metrics.EfficiencyPercentile = tick.Enrichment.EfficiencyPercentile
+	} else if cs.bar.Metrics.EfficiencyPercentile == "" {
+		cs.bar.Metrics.EfficiencyPercentile = "NORMAL"
+	}
+
+	// 5. Hydrate Auction Market Theory Matrix
 	if tick.VolProfile != nil {
 		cs.bar.POC = tick.VolProfile.POC
 		cs.bar.VAH = tick.VolProfile.VAH

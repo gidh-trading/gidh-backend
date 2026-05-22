@@ -2,6 +2,7 @@ package writer
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -311,17 +312,22 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 		pgx.Identifier{"gidh_bars"},
 		[]string{
 			"timestamp", "instrument_token", "stock_name", "timeframe",
-			"open", "high", "low", "close", "volume", "tick_count",
-			"max_tick_count_z", "vwap", "poc", "vah", "val",
-			"total_buy_qty", "total_sell_qty", "change_pct",
+			"open", "high", "low", "close", "volume", "tick_count", "metrics",
+			"vwap", "poc", "vah", "val", "total_buy_qty", "total_sell_qty", "change_pct",
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
 
+			// Marshal nested microstructural values block cleanly
+			metricsJSON, err := json.Marshal(b.Metrics)
+			if err != nil {
+				logger.Errorf("Failed to marshal metrics properties sub-block for %s: %v", b.StockName, err)
+				metricsJSON = []byte(`{"range_percentile":"NORMAL","efficiency_percentile":"NORMAL"}`)
+			}
+
 			return []any{
 				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
-				b.Open, b.High, b.Low, b.Close, b.Volume,
-				b.TickCount, b.MaxTickCountZ,
+				b.Open, b.High, b.Low, b.Close, b.Volume, b.TickCount, metricsJSON, // Ordered matching column mapping
 				b.VWAP, b.POC, b.VAH, b.VAL, b.TotalBuyQty, b.TotalSellQty, b.ChangePct,
 			}, nil
 		}),
@@ -330,7 +336,7 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 	if err != nil {
 		logger.Errorf("Failed to insert bars: %v", err)
 	} else {
-		logger.Debugf("Inserted %d closed bars (background)", copyCount)
+		logger.Debugf("Inserted %d closed bars with split structural variables (background)", copyCount)
 	}
 }
 
