@@ -48,7 +48,8 @@ type EnrichedTick struct {
 	Telemetry  LiveTelemetry   `json:"telemetry"`
 	Enrichment EnrichmentState `json:"enrichment"`
 
-	MinuteIndex    int   `json:"minute_index"`
-	DNASampleCount int64 `json:"dna_sample_count"`
-	EnrichedAt     int64 `json:"enriched_at"`
+	MinuteIndex    int    `json:"minute_index"`
+	DNASampleCount int64  `json:"dna_sample_count"`
+	EnrichmentStr  string `json:"enrichment_str"`
+	EnrichedAt     int64  `json:"enriched_at"`
 }

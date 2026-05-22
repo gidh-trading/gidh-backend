@@ -80,13 +80,16 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 	cs.bar.VWAP = tick.Raw.AverageTradedPrice
 
-	// Relative Intraday Net Move Track
 	prevClose := tick.Raw.LastPrice - tick.Raw.Change
 	if prevClose > 0 {
 		cs.bar.ChangePct = (tick.Raw.Change / prevClose) * 100
 	}
 
-	// 3. CONTINUOUS LIVE TELEMETRY CRADLE DEFAULTS
+	// 3. CONTINUOUS LIVE TELEMETRY DEFAULT INITIALIZATION
+	if cs.bar.Metrics.PeakRelativeVolumePct == "" {
+		cs.bar.Metrics.PeakRelativeVolumePct = "NORMAL"
+		cs.bar.Metrics.PeakRelativeVolumeRank = 3
+	}
 	if cs.bar.Metrics.PeakRangePct == "" {
 		cs.bar.Metrics.PeakRangePct = "NORMAL"
 		cs.bar.Metrics.PeakRangeRank = 3
@@ -95,7 +98,7 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 		cs.bar.Metrics.PeakEfficiencyPct = "NORMAL"
 	}
 
-	// 4. INTRABAR PEAK ANOMALY EXTRACTION (State Envelope Retention)
+	// 4. METRIC BURST TRACKING
 	if tick.Enrichment.TickZ > cs.bar.Metrics.MaxTickCountZ {
 		cs.bar.Metrics.MaxTickCountZ = tick.Enrichment.TickZ
 	}
@@ -108,35 +111,36 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	if tick.Telemetry.Efficiency > cs.bar.Metrics.Efficiency {
 		cs.bar.Metrics.Efficiency = tick.Telemetry.Efficiency
 	}
-
-	// Legacy fallback sync
 	if getPercentileRank(tick.Enrichment.RangePercentile) > getPercentileRank(cs.bar.Metrics.RangePercentile) {
 		cs.bar.Metrics.RangePercentile = tick.Enrichment.RangePercentile
 	}
 
 	// ------------------------------------------------------------------------
-	// VISUALIZATION LAYER COMPRESSION ENGINE
+	// VISUALIZATION LAYER SYMMETRIC COMPRESSION ENGINE
 	// ------------------------------------------------------------------------
 
-	// A. Capture Peak Participation Anomaly Magnitude (Statistical Neutrality)
-	absVolZ := math.Abs(tick.Enrichment.VolumeZ)
-	if absVolZ > cs.bar.Metrics.AbsVolumeZ {
-		cs.bar.Metrics.AbsVolumeZ = absVolZ
+	// A. Capture Peak Participation Anomaly Envelope (Horizontal Heatmap Grid)
+	currentVolRank := getPercentileRank(tick.EnrichmentStr) // String parsed out of rVol calculation
+	if cs.bar.Metrics.PeakRelativeVolumeRank == 3 {
+		cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
+		cs.bar.Metrics.PeakRelativeVolumePct = tick.EnrichmentStr
+	} else {
+		// Prioritize extreme extensions (Expansion or total drought anomalies overrule NORMAL/P50)
+		if currentVolRank > 4 && currentVolRank > cs.bar.Metrics.PeakRelativeVolumeRank {
+			cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
+			cs.bar.Metrics.PeakRelativeVolumePct = tick.EnrichmentStr
+		} else if currentVolRank < 3 && currentVolRank < cs.bar.Metrics.PeakRelativeVolumeRank {
+			cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
+			cs.bar.Metrics.PeakRelativeVolumePct = tick.EnrichmentStr
+		}
 	}
 
-	// B. Track Response Excursion Extremes (Enforces UI Topology Stability)
+	// B. Capture Peak Response Anomaly Envelope (Vertical Heatmap Grid)
 	currentRangeRank := getPercentileRank(tick.Enrichment.RangePercentile)
-
-	// We check for priority rank dominance. For anomoloies, we want to log the
-	// most severe expansion (P95/P99) OR severe compressions (P05/P10).
-	// If the current bar state is still "NORMAL" (Rank 3), any deviation takes precedence.
 	if cs.bar.Metrics.PeakRangeRank == 3 {
 		cs.bar.Metrics.PeakRangeRank = currentRangeRank
 		cs.bar.Metrics.PeakRangePct = tick.Enrichment.RangePercentile
 	} else {
-		// If we are tracking an anomaly, prioritize highest statistical extremity.
-		// For expansions (Ranks 5,6,7), higher rank wins.
-		// For compressions (Ranks 1,2), lower rank represents a higher structural anomaly.
 		if currentRangeRank > 4 && currentRangeRank > cs.bar.Metrics.PeakRangeRank {
 			cs.bar.Metrics.PeakRangeRank = currentRangeRank
 			cs.bar.Metrics.PeakRangePct = tick.Enrichment.RangePercentile
@@ -149,7 +153,6 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	// C. Capture Peak Efficiency Anomaly (Bar Chart Target)
 	currentEffRank := getPercentileRank(tick.Enrichment.EfficiencyPercentile)
 	targetEffRank := getPercentileRank(cs.bar.Metrics.PeakEfficiencyPct)
-
 	if currentEffRank > 4 && currentEffRank > targetEffRank {
 		cs.bar.Metrics.PeakEfficiencyPct = tick.Enrichment.EfficiencyPercentile
 	} else if currentEffRank < 3 && currentEffRank < targetEffRank {

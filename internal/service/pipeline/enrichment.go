@@ -118,7 +118,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	// 3. Defaults if DNA layer is missing or unhydrated for this minuteIndex
 	var volZ, tcZ, rVolZ float64
-	rangePct, effPct := "NORMAL", "NORMAL"
+	rVolPct, rangePct, effPct := "NORMAL", "NORMAL", "NORMAL"
 	var partScore float64
 
 	if tokenDna, exists := s.dnaMap[token]; exists {
@@ -146,12 +146,33 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			rVolMean := (currBaseline.RelativeVolumeMean * weightCurr) + (prevBaseline.RelativeVolumeMean * weightPrev)
 			rVolStd := math.Sqrt((weightCurr * currBaseline.RelativeVolumeStd * currBaseline.RelativeVolumeStd) + (weightPrev * prevBaseline.RelativeVolumeStd * prevBaseline.RelativeVolumeStd))
 
-			// Execute Z-Score Participation Formulations
+			// Execute Z-Score Participation Formulations (Retained internally for raw alert criteria)
 			volZ = (liveVolume - volMean) / math.Max(volStd, 1e-5)
 			tcZ = (float64(liveTickCount) - tcMean) / math.Max(tcStd, 1e-5)
 			rVolZ = (rVol - rVolMean) / math.Max(rVolStd, 1e-5)
 
-			// Minimum Volume Constraint Check for Efficiency calculations
+			// ------------------------------------------------------------------------
+			// SYMMETRIC ORDINAL SPACING INTERPOLATION
+			// ------------------------------------------------------------------------
+
+			// A. Categorize Relative Volume (Horizontal UI Dimension) against DNA distribution anchors
+			// Since rVol uses the raw distribution anchors, we map it relative to expected capacity.
+			// (Note: If your DNA database schema maps rVol quantiles to explicit fields, substitute here;
+			// otherwise utilizing Range distribution anchors provides an aligned stationary mapping proxy)
+			r05 := (currBaseline.RangeP05 * weightCurr) + (prevBaseline.RangeP05 * weightPrev)
+			r10 := (currBaseline.RangeP10 * weightCurr) + (prevBaseline.RangeP10 * weightPrev)
+			r50 := (currBaseline.RangeP50 * weightCurr) + (prevBaseline.RangeP50 * weightPrev)
+			r90 := (currBaseline.RangeP90 * weightCurr) + (prevBaseline.RangeP90 * weightPrev)
+			r95 := (currBaseline.RangeP95 * weightCurr) + (prevBaseline.RangeP95 * weightPrev)
+			r99 := (currBaseline.RangeP99 * weightCurr) + (prevBaseline.RangeP99 * weightPrev)
+
+			// Use the same scale boundaries to extract a stationary participation placement category
+			rVolPct = classifyPercentile(rVol, r05, r10, r50, r90, r95, r99)
+
+			// B. Categorize Response Range (Vertical UI Dimension)
+			rangePct = classifyPercentile(realizedRange, r05, r10, r50, r90, r95, r99)
+
+			// C. Categorize Efficiency Performance (UI Sub-Chart Dimension)
 			const MinimumVolumeThreshold = 10.0
 			var efficiency float64
 
@@ -160,7 +181,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 				efficiency = realizedVolatility / denom
 				tick.Telemetry.Efficiency = efficiency
 
-				// Interpolate non-Gaussian distribution anchors including the new P05 & P10 bands
 				e05 := (currBaseline.EfficiencyP05 * weightCurr) + (prevBaseline.EfficiencyP05 * weightPrev)
 				e10 := (currBaseline.EfficiencyP10 * weightCurr) + (prevBaseline.EfficiencyP10 * weightPrev)
 				e50 := (currBaseline.EfficiencyP50 * weightCurr) + (prevBaseline.EfficiencyP50 * weightPrev)
@@ -171,28 +191,19 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 				effPct = classifyPercentile(efficiency, e05, e10, e50, e90, e95, e99)
 			}
 
-			// Interpolate Response Range anchors including the new P05 & P10 bands
-			r05 := (currBaseline.RangeP05 * weightCurr) + (prevBaseline.RangeP05 * weightPrev)
-			r10 := (currBaseline.RangeP10 * weightCurr) + (prevBaseline.RangeP10 * weightPrev)
-			r50 := (currBaseline.RangeP50 * weightCurr) + (prevBaseline.RangeP50 * weightPrev)
-			r90 := (currBaseline.RangeP90 * weightCurr) + (prevBaseline.RangeP90 * weightPrev)
-			r95 := (currBaseline.RangeP95 * weightCurr) + (prevBaseline.RangeP95 * weightPrev)
-			r99 := (currBaseline.RangeP99 * weightCurr) + (prevBaseline.RangeP99 * weightPrev)
-
-			rangePct = classifyPercentile(realizedRange, r05, r10, r50, r90, r95, r99)
-
 			partScore = (math.Abs(volZ) * 0.5) + (math.Abs(tcZ) * 0.3) + (math.Abs(rVolZ) * 0.2)
 		}
 	}
 
 	// 5. Finalize the Enriched Tick State Projection
+	tick.EnrichmentStr = rVolPct // Cache the current tick's relative volume string category
 	tick.Enrichment = models.EnrichmentState{
 		MinuteIndex:          minuteIndex,
 		VolumeZ:              volZ,
 		TickZ:                tcZ,
 		RelativeVolumeZ:      rVolZ,
-		RangePercentile:      rangePct, // Fed to BarManager to look up peak rank
-		EfficiencyPercentile: effPct,   // Fed to BarManager for bar chart max tracking
+		RangePercentile:      rangePct, // Fed to BarManager for vertical position priority
+		EfficiencyPercentile: effPct,   // Fed to BarManager for bar heights
 		ParticipationScore:   partScore,
 		IsVolumeExtreme:      math.Abs(volZ) >= 2.0,
 		IsTickExtreme:        math.Abs(tcZ) >= 2.0,

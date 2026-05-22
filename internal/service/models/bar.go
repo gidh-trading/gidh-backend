@@ -10,12 +10,13 @@ type BarMetrics struct {
 	Efficiency      float64 `json:"efficiency"`
 
 	// ------------------------------------------------------------------------
-	// COMPRESSED INTRABAR ANOMALY STATE ENVELOPE (UI HEATMAP TARGETS)
+	// COMPRESSED INTRABAR SYMMETRIC STATE SPACE (UI HEATMAP TARGETS)
 	// ------------------------------------------------------------------------
-	AbsVolumeZ        float64 `json:"abs_volume_z"`        // Max absolute participation intensity |VolZ|
-	PeakRangeRank     int     `json:"peak_range_rank"`     // Bounded index (1-7) for stable UI Y-axis grid mapping
-	PeakRangePct      string  `json:"peak_range_pct"`      // Highest string tier reached (P05 -> P99)
-	PeakEfficiencyPct string  `json:"peak_efficiency_pct"` // Highest string tier reached for Bar Chart overlay
+	PeakRelativeVolumeRank int    `json:"peak_relative_volume_rank"` // Bounded horizontal grid coordinate (1-7)
+	PeakRelativeVolumePct  string `json:"peak_relative_volume_pct"`  // Clean string category for participation ribbons
+	PeakRangeRank          int    `json:"peak_range_rank"`           // Bounded vertical grid coordinate (1-7)
+	PeakRangePct           string `json:"peak_range_pct"`            // Clean string category for response ribbons
+	PeakEfficiencyPct      string `json:"peak_efficiency_pct"`       // Sub-Chart bar height category
 }
 
 type Bar struct {
