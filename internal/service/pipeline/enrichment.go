@@ -100,15 +100,17 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		adv = 1.0 // Prevent structural division problems
 	}
 
-	liveNormVol := liveVolume / adv
+	// FIX 1: True Relative Volume matches Python: df_core["v"] / adv_30d
+	rVol := liveVolume / adv
 
 	// 2. Hydrate Live Telemetry State (Pure Measurements)
 	tick.Telemetry = models.LiveTelemetry{
 		MinuteIndex:        minuteIndex,
-		Volume:             liveNormVol,
+		Volume:             liveVolume, // FIX 2: Use RAW volume here, not normalized
 		TickCount:          liveTickCount,
 		RealizedRange:      realizedRange,
 		RealizedVolatility: realizedVolatility,
+		RelativeVolume:     rVol, // Set the accurate Relative Volume here
 	}
 
 	// 3. Defaults if DNA is missing
@@ -142,16 +144,14 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			rVolMean := (currBaseline.RelativeVolumeMean * weightCurr) + (prevBaseline.RelativeVolumeMean * weightPrev)
 			rVolStd := math.Sqrt((weightCurr * currBaseline.RelativeVolumeStd * currBaseline.RelativeVolumeStd) + (weightPrev * prevBaseline.RelativeVolumeStd * prevBaseline.RelativeVolumeStd))
 
-			// Calculate Live Relative Volume
-			rVol := 0.0
-			if volMean > 0 {
-				rVol = liveNormVol / volMean
-			}
-			tick.Telemetry.RelativeVolume = rVol
-
 			// Execute Z-Score Participation Formulations (Using Max to prevent infinity)
-			volZ = (liveNormVol - volMean) / math.Max(volStd, 1e-5)
+
+			// FIX 3: Execute Z-Score comparing RAW Live Volume vs RAW Mean
+			volZ = (liveVolume - volMean) / math.Max(volStd, 1e-5)
+
 			tcZ = (float64(liveTickCount) - tcMean) / math.Max(tcStd, 1e-5)
+
+			// FIX 4: Execute Z-Score for Relative Volume correctly against morphed RVol baselines
 			rVolZ = (rVol - rVolMean) / math.Max(rVolStd, 1e-5)
 
 			// Minimum Volume Constraint Check for Efficiency
@@ -159,6 +159,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			var efficiency float64
 
 			if liveVolume >= MinimumVolumeThreshold {
+				// FIX 5: Denom is now the correct rVol (e.g., 0.05) instead of near-zero causing infinity
 				denom := math.Max(rVol, 1e-9)
 				efficiency = realizedVolatility / denom
 				tick.Telemetry.Efficiency = efficiency
