@@ -9,8 +9,8 @@ import (
 	"gidh-backend/internal/service/order"
 )
 
-// classifyPercentile safely maps a raw value against its historical T-Digest bounds
-func classifyPercentile(value, p50, p90, p95, p99 float64) string {
+// classifyPercentile safely maps a raw value against its historical distribution anchors
+func classifyPercentile(value, p05, p10, p50, p90, p95, p99 float64) string {
 	switch {
 	case value >= p99:
 		return "P99"
@@ -20,6 +20,10 @@ func classifyPercentile(value, p50, p90, p95, p99 float64) string {
 		return "P90"
 	case value >= p50:
 		return "P50"
+	case value >= p10:
+		return "P10"
+	case value >= p05:
+		return "P05"
 	default:
 		return "NORMAL"
 	}
@@ -97,23 +101,22 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	adv, hasAdv := s.advMap[token]
 	if !hasAdv || adv <= 0 {
-		adv = 1.0 // Prevent structural division problems
+		adv = 1.0
 	}
 
-	// FIX 1: True Relative Volume matches Python: df_core["v"] / adv_30d
 	rVol := liveVolume / adv
 
 	// 2. Hydrate Live Telemetry State (Pure Measurements)
 	tick.Telemetry = models.LiveTelemetry{
 		MinuteIndex:        minuteIndex,
-		Volume:             liveVolume, // FIX 2: Use RAW volume here, not normalized
+		Volume:             liveVolume,
 		TickCount:          liveTickCount,
 		RealizedRange:      realizedRange,
 		RealizedVolatility: realizedVolatility,
-		RelativeVolume:     rVol, // Set the accurate Relative Volume here
+		RelativeVolume:     rVol,
 	}
 
-	// 3. Defaults if DNA is missing
+	// 3. Defaults if DNA layer is missing or unhydrated for this minuteIndex
 	var volZ, tcZ, rVolZ float64
 	rangePct, effPct := "NORMAL", "NORMAL"
 	var partScore float64
@@ -122,7 +125,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		if currBaseline, ok := tokenDna[minuteIndex]; ok {
 			tick.DNASampleCount = currBaseline.SampleCount
 
-			// Second-by-second continuous window temporal morphing
 			sec := float64(ts.Second())
 			prevBaseline := currBaseline
 			if minuteIndex > 0 {
@@ -134,7 +136,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			weightCurr := sec / 60.0
 			weightPrev := (60.0 - sec) / 60.0
 
-			// Morph Participation Baselines (Means & Variances)
+			// Morph Participation Baselines dynamically across boundary seconds
 			volMean := (currBaseline.VolumeMean * weightCurr) + (prevBaseline.VolumeMean * weightPrev)
 			volStd := math.Sqrt((weightCurr * currBaseline.VolumeStd * currBaseline.VolumeStd) + (weightPrev * prevBaseline.VolumeStd * prevBaseline.VolumeStd))
 
@@ -144,56 +146,53 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			rVolMean := (currBaseline.RelativeVolumeMean * weightCurr) + (prevBaseline.RelativeVolumeMean * weightPrev)
 			rVolStd := math.Sqrt((weightCurr * currBaseline.RelativeVolumeStd * currBaseline.RelativeVolumeStd) + (weightPrev * prevBaseline.RelativeVolumeStd * prevBaseline.RelativeVolumeStd))
 
-			// Execute Z-Score Participation Formulations (Using Max to prevent infinity)
-
-			// FIX 3: Execute Z-Score comparing RAW Live Volume vs RAW Mean
+			// Execute Z-Score Participation Formulations
 			volZ = (liveVolume - volMean) / math.Max(volStd, 1e-5)
-
 			tcZ = (float64(liveTickCount) - tcMean) / math.Max(tcStd, 1e-5)
-
-			// FIX 4: Execute Z-Score for Relative Volume correctly against morphed RVol baselines
 			rVolZ = (rVol - rVolMean) / math.Max(rVolStd, 1e-5)
 
-			// Minimum Volume Constraint Check for Efficiency
+			// Minimum Volume Constraint Check for Efficiency calculations
 			const MinimumVolumeThreshold = 10.0
 			var efficiency float64
 
 			if liveVolume >= MinimumVolumeThreshold {
-				// FIX 5: Denom is now the correct rVol (e.g., 0.05) instead of near-zero causing infinity
 				denom := math.Max(rVol, 1e-9)
 				efficiency = realizedVolatility / denom
 				tick.Telemetry.Efficiency = efficiency
 
-				// Morph non-Gaussian distribution threshold percentiles
+				// Interpolate non-Gaussian distribution anchors including the new P05 & P10 bands
+				e05 := (currBaseline.EfficiencyP05 * weightCurr) + (prevBaseline.EfficiencyP05 * weightPrev)
+				e10 := (currBaseline.EfficiencyP10 * weightCurr) + (prevBaseline.EfficiencyP10 * weightPrev)
 				e50 := (currBaseline.EfficiencyP50 * weightCurr) + (prevBaseline.EfficiencyP50 * weightPrev)
 				e90 := (currBaseline.EfficiencyP90 * weightCurr) + (prevBaseline.EfficiencyP90 * weightPrev)
 				e95 := (currBaseline.EfficiencyP95 * weightCurr) + (prevBaseline.EfficiencyP95 * weightPrev)
 				e99 := (currBaseline.EfficiencyP99 * weightCurr) + (prevBaseline.EfficiencyP99 * weightPrev)
 
-				effPct = classifyPercentile(efficiency, e50, e90, e95, e99)
+				effPct = classifyPercentile(efficiency, e05, e10, e50, e90, e95, e99)
 			}
 
-			// Morph Range Percentiles
+			// Interpolate Response Range anchors including the new P05 & P10 bands
+			r05 := (currBaseline.RangeP05 * weightCurr) + (prevBaseline.RangeP05 * weightPrev)
+			r10 := (currBaseline.RangeP10 * weightCurr) + (prevBaseline.RangeP10 * weightPrev)
 			r50 := (currBaseline.RangeP50 * weightCurr) + (prevBaseline.RangeP50 * weightPrev)
 			r90 := (currBaseline.RangeP90 * weightCurr) + (prevBaseline.RangeP90 * weightPrev)
 			r95 := (currBaseline.RangeP95 * weightCurr) + (prevBaseline.RangeP95 * weightPrev)
 			r99 := (currBaseline.RangeP99 * weightCurr) + (prevBaseline.RangeP99 * weightPrev)
 
-			rangePct = classifyPercentile(realizedRange, r50, r90, r95, r99)
+			rangePct = classifyPercentile(realizedRange, r05, r10, r50, r90, r95, r99)
 
-			// 4. Calculate Master Anomaly Meter
 			partScore = (math.Abs(volZ) * 0.5) + (math.Abs(tcZ) * 0.3) + (math.Abs(rVolZ) * 0.2)
 		}
 	}
 
-	// 5. Finalize the Enrichment State Projection
+	// 5. Finalize the Enriched Tick State Projection
 	tick.Enrichment = models.EnrichmentState{
 		MinuteIndex:          minuteIndex,
 		VolumeZ:              volZ,
 		TickZ:                tcZ,
 		RelativeVolumeZ:      rVolZ,
-		RangePercentile:      rangePct,
-		EfficiencyPercentile: effPct,
+		RangePercentile:      rangePct, // Fed to BarManager to look up peak rank
+		EfficiencyPercentile: effPct,   // Fed to BarManager for bar chart max tracking
 		ParticipationScore:   partScore,
 		IsVolumeExtreme:      math.Abs(volZ) >= 2.0,
 		IsTickExtreme:        math.Abs(tcZ) >= 2.0,

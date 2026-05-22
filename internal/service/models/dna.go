@@ -44,15 +44,6 @@ type TimeBucketDNA struct {
 	RangeStd  float64 `json:"range_std"`
 
 	// Response-per-participation telemetry
-	//
-	// IMPORTANT:
-	// We do NOT use mean/std normalization live
-	// for efficiency currently.
-	//
-	// These are stored for:
-	// - diagnostics
-	// - distribution analysis
-	// - research validation
 	EfficiencyMean float64 `json:"efficiency_mean"`
 	EfficiencyStd  float64 `json:"efficiency_std"`
 
@@ -60,15 +51,17 @@ type TimeBucketDNA struct {
 	// ROBUST RESPONSE DISTRIBUTION
 	// --------------------------------------------------
 
-	// Recommended live normalization source
-	// for EfficiencyPct calculations.
+	// Recommended live normalization source for EfficiencyPct calculations.
+	EfficiencyP05 float64 `json:"efficiency_p05"`
+	EfficiencyP10 float64 `json:"efficiency_p10"`
 	EfficiencyP50 float64 `json:"efficiency_p50"`
 	EfficiencyP90 float64 `json:"efficiency_p90"`
 	EfficiencyP95 float64 `json:"efficiency_p95"`
 	EfficiencyP99 float64 `json:"efficiency_p99"`
 
-	// Optional:
-	// useful for response percentile validation
+	// Useful for response percentile validation
+	RangeP05 float64 `json:"range_p05"`
+	RangeP10 float64 `json:"range_p10"`
 	RangeP50 float64 `json:"range_p50"`
 	RangeP90 float64 `json:"range_p90"`
 	RangeP95 float64 `json:"range_p95"`
@@ -78,8 +71,7 @@ type TimeBucketDNA struct {
 	// SAMPLE STRENGTH
 	// --------------------------------------------------
 
-	// Number of historical observations used
-	// to construct this bucket DNA.
+	// Number of historical observations used to construct this bucket DNA.
 	SampleCount int64 `json:"sample_count"`
 }
 

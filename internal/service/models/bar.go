@@ -6,8 +6,16 @@ type BarMetrics struct {
 	MaxTickCountZ   float64 `json:"max_tick_count_z"`
 	VolumeZ         float64 `json:"volume_z"`
 	TickZ           float64 `json:"tick_z"`
-	RangePercentile string  `json:"range_percentile"`
+	RangePercentile string  `json:"range_percentile"` // Legacy/System fallback
 	Efficiency      float64 `json:"efficiency"`
+
+	// ------------------------------------------------------------------------
+	// COMPRESSED INTRABAR ANOMALY STATE ENVELOPE (UI HEATMAP TARGETS)
+	// ------------------------------------------------------------------------
+	AbsVolumeZ        float64 `json:"abs_volume_z"`        // Max absolute participation intensity |VolZ|
+	PeakRangeRank     int     `json:"peak_range_rank"`     // Bounded index (1-7) for stable UI Y-axis grid mapping
+	PeakRangePct      string  `json:"peak_range_pct"`      // Highest string tier reached (P05 -> P99)
+	PeakEfficiencyPct string  `json:"peak_efficiency_pct"` // Highest string tier reached for Bar Chart overlay
 }
 
 type Bar struct {
@@ -22,14 +30,14 @@ type Bar struct {
 	Low   float64 `json:"low"`
 	Close float64 `json:"close"`
 
-	// ---- Aggregated Data Metrics (Outside JSON) ----
+	// ---- Aggregated Quantities ----
 	Volume    float64 `json:"volume"`
 	TickCount int64   `json:"tick_count"`
 
 	// ---- Dynamic Metrics Block ----
 	Metrics BarMetrics `json:"metrics"`
 
-	// ---- Optional Auction Metrics ----
+	// ---- Auction Framework Elements ----
 	VWAP float64 `json:"vwap"`
 	POC  float64 `json:"poc"`
 	VAH  float64 `json:"vah"`
@@ -39,7 +47,7 @@ type Bar struct {
 	TotalSellQty float64 `json:"total_sell_qty"`
 	ChangePct    float64 `json:"change_pct"`
 
-	// ---- UI Only Metrics (Not persisted in DB) ----
+	// ---- UI Only Local State ----
 	UnrealizedPnL float64 `json:"unrealized_pnl"`
 
 	Ticks []TickData `json:"-"`
