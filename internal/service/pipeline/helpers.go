@@ -90,12 +90,9 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 		cs.bar.Metrics.RangePercentile = "NORMAL"
 	}
 
-	// Keep the highest non-Gaussian efficiency percentile tier reached
-	if tick.Enrichment.EfficiencyPercentile == "P99" ||
-		(tick.Enrichment.EfficiencyPercentile == "P95" && cs.bar.Metrics.EfficiencyPercentile != "P99") {
-		cs.bar.Metrics.EfficiencyPercentile = tick.Enrichment.EfficiencyPercentile
-	} else if cs.bar.Metrics.EfficiencyPercentile == "" {
-		cs.bar.Metrics.EfficiencyPercentile = "NORMAL"
+	// CHANGE: Track the absolute maximum raw efficiency value seen during this candle window instead of a string percentile
+	if tick.Telemetry.Efficiency > cs.bar.Metrics.Efficiency {
+		cs.bar.Metrics.Efficiency = tick.Telemetry.Efficiency
 	}
 
 	// 5. Hydrate Auction Market Theory Matrix

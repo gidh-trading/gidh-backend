@@ -3,11 +3,11 @@ package models
 import "time"
 
 type BarMetrics struct {
-	MaxTickCountZ        float64 `json:"max_tick_count_z"`
-	VolumeZ              float64 `json:"volume_z"`
-	TickZ                float64 `json:"tick_z"`
-	RangePercentile      string  `json:"range_percentile"`
-	EfficiencyPercentile string  `json:"efficiency_percentile"`
+	MaxTickCountZ   float64 `json:"max_tick_count_z"`
+	VolumeZ         float64 `json:"volume_z"`
+	TickZ           float64 `json:"tick_z"`
+	RangePercentile string  `json:"range_percentile"`
+	Efficiency      float64 `json:"efficiency"`
 }
 
 type Bar struct {

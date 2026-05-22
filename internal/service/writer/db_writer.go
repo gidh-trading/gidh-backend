@@ -322,7 +322,7 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 			metricsJSON, err := json.Marshal(b.Metrics)
 			if err != nil {
 				logger.Errorf("Failed to marshal metrics properties sub-block for %s: %v", b.StockName, err)
-				metricsJSON = []byte(`{"range_percentile":"NORMAL","efficiency_percentile":"NORMAL"}`)
+				metricsJSON = []byte(`{"range_percentile":"NORMAL","efficiency":0.0}`)
 			}
 
 			return []any{
