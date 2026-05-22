@@ -10,7 +10,6 @@ import (
 type Pipeline struct {
 	vpStage    *pipeline.VolumeProfileStage
 	enrichment *pipeline.EnrichmentStage
-	analytics  *pipeline.AnalyticsStage
 	barManager *pipeline.BarManager
 	dbWriter   *writer.DBWriter
 }
@@ -18,14 +17,12 @@ type Pipeline struct {
 func NewPipeline(
 	vpStage *pipeline.VolumeProfileStage,
 	enrichment *pipeline.EnrichmentStage,
-	analytics *pipeline.AnalyticsStage,
 	barManager *pipeline.BarManager,
 	dbWriter *writer.DBWriter,
 ) *Pipeline {
 	return &Pipeline{
 		vpStage:    vpStage,
 		enrichment: enrichment,
-		analytics:  analytics,
 		barManager: barManager,
 		dbWriter:   dbWriter,
 	}
@@ -57,14 +54,7 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 4. ANALYTICS STAGE (Triggers dynamic volume burst flags and price bin placement mapping)
-	if p.analytics != nil {
-		if err := p.analytics.Process(enrichedTick); err != nil {
-			logger.Errorf("Pipeline Error: Failed microstructural analysis: %v", err)
-		}
-	}
-
-	// 5. BAR MANAGER AGGREGATION LAYER (Handles timeframes and aggregates anomalies)
+	// 4. BAR MANAGER AGGREGATION LAYER (Handles timeframes and aggregates anomalies)
 	if p.barManager != nil {
 		if err := p.barManager.Process(enrichedTick); err != nil {
 			logger.Errorf("Pipeline Error: Failed to process bar accumulation: %v", err)

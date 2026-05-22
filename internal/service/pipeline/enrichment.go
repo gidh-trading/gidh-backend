@@ -9,7 +9,6 @@ import (
 	"gidh-backend/internal/service/order"
 )
 
-// EnrichmentStage drives data orchestration mechanics for incoming tick flows.
 type EnrichmentStage struct {
 	lastVolumeMap   map[uint32]int64
 	lastPriceMap    map[uint32]float64
@@ -21,7 +20,6 @@ type EnrichmentStage struct {
 	mu              sync.Mutex
 }
 
-// NewEnrichmentStage constructs an enrichment operator and pre-indexes historical timeline records for optimized retrieval.
 func NewEnrichmentStage(pm order.PositionManager, advMap map[uint32]float64, rawDnaMap map[uint32]*models.MarketDNA) *EnrichmentStage {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 
@@ -44,7 +42,6 @@ func NewEnrichmentStage(pm order.PositionManager, advMap map[uint32]float64, raw
 	}
 }
 
-// Process coordinates processing sequences cleanly across incoming context properties.
 func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -54,14 +51,13 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	ts := tick.Raw.Timestamp.In(s.loc)
 
 	tick.TickVolume = s.calculateTickVolume(token, tick)
-	vol := float64(tick.TickVolume)
+	volDelta := float64(tick.TickVolume)
 
 	if tick.TickVolume == 0 && price == s.lastPriceMap[token] {
 		return nil
 	}
 
-	priceChanged := tick.Raw.LastPrice != s.lastPriceMap[token]
-	if priceChanged && s.positionManager != nil {
+	if price != s.lastPriceMap[token] && s.positionManager != nil {
 		s.positionManager.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice, tick.Raw.Timestamp)
 	}
 	s.lastPriceMap[token] = price
@@ -72,27 +68,42 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		s.buffers[token] = buf
 	}
 
-	// Update active rolling metrics status definitions
-	buf.Push(ts, price, vol, ContinuousWindowDuration)
+	buf.Push(ts, price, volDelta)
 
+	// Pull 60s continuous window parameters
+	liveVolume, liveTickCount, realizedRange, realizedVolatility := buf.GetProductionMetrics()
+
+	// Assign raw structures
+	tick.Participation.TickVolume = int64(liveVolume)
+	tick.Participation.TickCount = liveTickCount
+	tick.Response.RealizedRange = realizedRange
+	tick.Response.RealizedVolatility = realizedVolatility
+
+	// Market Opener Alignment Index Math Mapping
 	minOfDay := (ts.Hour() * 60) + ts.Minute()
-	minuteIndex := minOfDay - 555 // Market opener timeline index synchronization offset
-
-	liveVolume, liveTickCount := buf.GetStats()
-	var volZ, tcZ, rVol float64
+	minuteIndex := minOfDay - 555
+	tick.MinuteIndex = minuteIndex
+	tick.EnrichedAt = time.Now().UnixMilli()
 
 	adv, hasAdv := s.advMap[token]
-	liveNormVol := 0.0
-	if hasAdv && adv > 0 {
-		liveNormVol = liveVolume / adv
+	if !hasAdv || adv <= 0 {
+		adv = 1.0 // Prevent structural division problems
 	}
 
-	// Linearly interpolate baseline values against historical matrices
+	liveNormVol := liveVolume / adv
+	rVol := 0.0
+
+	// Default Fallback Baselines
+	var volZ, tcZ, rVolZ float64
+	effPct := 50.0 // Default center band empirical value fallback
+
 	if tokenDna, exists := s.dnaMap[token]; exists {
 		if currBaseline, ok := tokenDna[minuteIndex]; ok {
+			tick.DNASampleCount = currBaseline.SampleCount
+
+			// Second-by-second continuous window temporal morphing
 			sec := float64(ts.Second())
 			prevBaseline := currBaseline
-
 			if minuteIndex > 0 {
 				if pb, ok := tokenDna[minuteIndex-1]; ok {
 					prevBaseline = pb
@@ -102,50 +113,80 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			weightCurr := sec / 60.0
 			weightPrev := (60.0 - sec) / 60.0
 
-			rollingVolMean := (currBaseline.VolumeMean * weightCurr) + (prevBaseline.VolumeMean * weightPrev)
-			rollingTcMean := (currBaseline.TickCountMean * weightCurr) + (prevBaseline.TickCountMean * weightPrev)
+			// Morph Participation Baselines
+			volMean := (currBaseline.VolumeMean * weightCurr) + (prevBaseline.VolumeMean * weightPrev)
+			volStd := math.Sqrt((weightCurr * currBaseline.VolumeStd * currBaseline.VolumeStd) + (weightPrev * prevBaseline.VolumeStd * prevBaseline.VolumeStd))
 
-			rollingVolVariance := (weightCurr * currBaseline.VolumeStd * currBaseline.VolumeStd) + (weightPrev * prevBaseline.VolumeStd * prevBaseline.VolumeStd)
-			rollingVolStd := math.Sqrt(rollingVolVariance)
+			tcMean := (currBaseline.TickCountMean * weightCurr) + (prevBaseline.TickCountMean * weightPrev)
+			tcStd := math.Sqrt((weightCurr * currBaseline.TickCountStd * currBaseline.TickCountStd) + (weightPrev * prevBaseline.TickCountStd * prevBaseline.TickCountStd))
 
-			rollingTcVariance := (weightCurr * currBaseline.TickCountStd * currBaseline.TickCountStd) + (weightPrev * prevBaseline.TickCountStd * prevBaseline.TickCountStd)
-			rollingTcStd := math.Sqrt(rollingTcVariance)
+			rVolMean := (currBaseline.RelativeVolumeMean * weightCurr) + (prevBaseline.RelativeVolumeMean * weightPrev)
+			rVolStd := math.Sqrt((weightCurr * currBaseline.RelativeVolumeStd * currBaseline.RelativeVolumeStd) + (weightPrev * prevBaseline.RelativeVolumeStd * prevBaseline.RelativeVolumeStd))
 
-			if rollingVolStd < 0.00001 {
-				rollingVolStd = 0.00001
+			// Prevent bounds explosions inside volatility metrics
+			if volStd < 0.00001 {
+				volStd = 0.00001
 			}
-			if rollingTcStd < 1.0 {
-				rollingTcStd = 1.0
+			if tcStd < 1.0 {
+				tcStd = 1.0
+			}
+			if rVolStd < 0.00001 {
+				rVolStd = 0.00001
 			}
 
-			if hasAdv && adv > 0 {
-				volZ = (liveNormVol - rollingVolMean) / rollingVolStd
-				rVol = liveNormVol / rollingVolMean
+			// Execute Z-Score Participation Formulations
+			volZ = (liveNormVol - volMean) / volStd
+			tcZ = (float64(liveTickCount) - tcMean) / tcStd
+
+			if volMean > 0 {
+				rVol = liveNormVol / volMean
 			}
-			tcZ = (float64(liveTickCount) - rollingTcMean) / rollingTcStd
+			rVolZ = (rVol - rVolMean) / rVolStd
+
+			// Morph non-Gaussian distribution threshold percentiles for precise empirical mapping
+			p50 := (currBaseline.EfficiencyP50 * weightCurr) + (prevBaseline.EfficiencyP50 * weightPrev)
+			p90 := (currBaseline.EfficiencyP90 * weightCurr) + (prevBaseline.EfficiencyP90 * weightPrev)
+			p95 := (currBaseline.EfficiencyP95 * weightCurr) + (prevBaseline.EfficiencyP95 * weightPrev)
+			p99 := (currBaseline.EfficiencyP99 * weightCurr) + (prevBaseline.EfficiencyP99 * weightPrev)
+
+			// Minimum Volume Constraint Check to isolate thin liquidity artifacts
+			const MinimumVolumeThreshold = 10.0
+			var efficiency float64
+
+			if liveVolume >= MinimumVolumeThreshold {
+				denom := math.Max(rVol, 1e-9) // Production denominator structural adjustment limit
+				efficiency = realizedVolatility / denom
+				tick.Response.Efficiency = efficiency
+
+				// Coarse-band contextual distribution mapping rank evaluation pass
+				switch {
+				case efficiency >= p99:
+					effPct = 99.0 + (1.0 * (efficiency - p99) / (efficiency + 1.0)) // Asymptotic scale near boundary ceiling
+				case efficiency >= p95:
+					effPct = 95.0 + 4.0*(efficiency-p95)/math.Max(0.001, p99-p95)
+				case efficiency >= p90:
+					effPct = 90.0 + 5.0*(efficiency-p90)/math.Max(0.001, p95-p90)
+				case efficiency >= p50:
+					effPct = 50.0 + 40.0*(efficiency-p50)/math.Max(0.001, p90-p50)
+				default:
+					effPct = 50.0 * (efficiency / math.Max(0.001, p50))
+				}
+
+				if effPct > 100.0 {
+					effPct = 100.0
+				}
+				if effPct < 0.0 {
+					effPct = 0.0
+				}
+			}
 		}
 	}
 
-	if rVol == 0 && hasAdv && adv > 0 {
-		if expectedVolPerMin := adv / 375.0; expectedVolPerMin > 0 {
-			rVol = liveVolume / expectedVolPerMin
-		}
-	}
-
-	// Populate structural context outcomes downstream
-	tick.RelativeVolume = rVol
-	tick.VolumeZ = volZ
-	tick.TickCountZ = tcZ
-
-	// Compute Experimental Telemetry Dimensions
-	if buf.RollingHigh > 0 && buf.RollingLow < math.MaxFloat64 {
-		tick.RealizedRange = buf.RollingHigh - buf.RollingLow
-	} else {
-		tick.RealizedRange = 0.0
-	}
-
-	denomVolume := math.Max(1.0, liveVolume)
-	tick.Efficiency = tick.RealizedRange / denomVolume
+	// Hydrate output maps
+	tick.Participation.VolumeZ = volZ
+	tick.Participation.TickCountZ = tcZ
+	tick.Participation.RelativeVolumeZ = rVolZ
+	tick.Response.EfficiencyPct = effPct
 
 	return nil
 }
@@ -153,7 +194,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 func (s *EnrichmentStage) calculateTickVolume(token uint32, tick *models.EnrichedTick) int64 {
 	curr := tick.Raw.CumulativeVolume
 	prev := s.lastVolumeMap[token]
-
 	var delta int64
 	switch {
 	case prev == 0:
@@ -163,7 +203,6 @@ func (s *EnrichmentStage) calculateTickVolume(token uint32, tick *models.Enriche
 	default:
 		delta = tick.Raw.LastTradedQuantity
 	}
-
 	s.lastVolumeMap[token] = curr
 	return delta
 }
