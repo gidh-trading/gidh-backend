@@ -15,51 +15,11 @@ type MarketDNA struct {
 }
 
 type TimeBucketDNA struct {
-	// Intraday bucket identifier
-	MinuteIndex int `json:"minute_index"`
+	MinuteIndex     int `json:"minute_index"`
+	SampleCount     int `json:"sample_count"`
+	TickSampleCount int `json:"tick_sample_count"`
 
-	// --------------------------------------------------
-	// PARTICIPATION DNA
-	// --------------------------------------------------
-
-	// Raw committed participation
-	VolumeMean float64 `json:"volume_mean"`
-	VolumeStd  float64 `json:"volume_std"`
-
-	// Execution frequency participation
-	TickCountMean float64 `json:"tick_count_mean"`
-	TickCountStd  float64 `json:"tick_count_std"`
-
-	// Relative participation behavior
-	// (current volume vs expected bucket volume)
-	RelativeVolumeMean float64 `json:"relative_volume_mean"`
-	RelativeVolumeStd  float64 `json:"relative_volume_std"`
-
-	// --------------------------------------------------
-	// RESPONSE DNA
-	// --------------------------------------------------
-
-	// Raw realized response
-	RangeMean float64 `json:"range_mean"`
-	RangeStd  float64 `json:"range_std"`
-
-	// Response-per-participation telemetry
-	EfficiencyMean float64 `json:"efficiency_mean"`
-	EfficiencyStd  float64 `json:"efficiency_std"`
-
-	// --------------------------------------------------
-	// ROBUST RESPONSE DISTRIBUTION
-	// --------------------------------------------------
-
-	// Recommended live normalization source for EfficiencyPct calculations.
-	EfficiencyP05 float64 `json:"efficiency_p05"`
-	EfficiencyP10 float64 `json:"efficiency_p10"`
-	EfficiencyP50 float64 `json:"efficiency_p50"`
-	EfficiencyP90 float64 `json:"efficiency_p90"`
-	EfficiencyP95 float64 `json:"efficiency_p95"`
-	EfficiencyP99 float64 `json:"efficiency_p99"`
-
-	// Useful for response percentile validation
+	// Range metrics
 	RangeP05 float64 `json:"range_p05"`
 	RangeP10 float64 `json:"range_p10"`
 	RangeP50 float64 `json:"range_p50"`
@@ -67,12 +27,43 @@ type TimeBucketDNA struct {
 	RangeP95 float64 `json:"range_p95"`
 	RangeP99 float64 `json:"range_p99"`
 
-	// --------------------------------------------------
-	// SAMPLE STRENGTH
-	// --------------------------------------------------
+	// Volume metrics
+	VolumeP05  float64 `json:"volume_p05"`
+	VolumeP10  float64 `json:"volume_p10"`
+	VolumeP50  float64 `json:"volume_p50"`
+	VolumeP90  float64 `json:"volume_p90"`
+	VolumeP95  float64 `json:"volume_p95"`
+	VolumeP99  float64 `json:"volume_p99"`
+	VolumeStd  float64 `json:"volume_std"`
+	VolumeMean float64 `json:"volume_mean"`
 
-	// Number of historical observations used to construct this bucket DNA.
-	SampleCount int64 `json:"sample_count"`
+	// Efficiency metrics
+	EfficiencyP05 float64 `json:"efficiency_p05"`
+	EfficiencyP10 float64 `json:"efficiency_p10"`
+	EfficiencyP50 float64 `json:"efficiency_p50"`
+	EfficiencyP90 float64 `json:"efficiency_p90"`
+	EfficiencyP95 float64 `json:"efficiency_p95"`
+	EfficiencyP99 float64 `json:"efficiency_p99"`
+
+	// Tick Count metrics
+	TickCountP05  float64 `json:"tick_count_p05"`
+	TickCountP10  float64 `json:"tick_count_p10"`
+	TickCountP50  float64 `json:"tick_count_p50"`
+	TickCountP90  float64 `json:"tick_count_p90"`
+	TickCountP95  float64 `json:"tick_count_p95"`
+	TickCountP99  float64 `json:"tick_count_p99"`
+	TickCountStd  float64 `json:"tick_count_std"`
+	TickCountMean float64 `json:"tick_count_mean"`
+
+	// Relative Volume metrics (Newly Added)
+	RelativeVolumeP05  float64 `json:"relative_volume_p05"`
+	RelativeVolumeP10  float64 `json:"relative_volume_p10"`
+	RelativeVolumeP50  float64 `json:"relative_volume_p50"`
+	RelativeVolumeP90  float64 `json:"relative_volume_p90"`
+	RelativeVolumeP95  float64 `json:"relative_volume_p95"`
+	RelativeVolumeP99  float64 `json:"relative_volume_p99"`
+	RelativeVolumeStd  float64 `json:"relative_volume_std"`
+	RelativeVolumeMean float64 `json:"relative_volume_mean"`
 }
 
 type UIHeatmapCell struct {
