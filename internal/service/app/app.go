@@ -173,12 +173,9 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// 3. Continue initializing the rest of the pipeline
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, advMap, dnaMap)
 
-	// Pass the map into the Analytics stage (from the previous fix)
-	analyticsStage := pipeline.NewAnalyticsStage(bucketSizeMap)
-
 	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub)
 
-	a.Pipeline = NewPipeline(vpStage, enrichmentStage, analyticsStage, barManager, a.DBWriter)
+	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barManager, a.DBWriter)
 	a.activePipe = a.Pipeline
 	return nil
 }

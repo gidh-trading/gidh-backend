@@ -2,7 +2,6 @@ package writer
 
 import (
 	"context"
-	"encoding/json"
 	"sync"
 	"time"
 
@@ -19,10 +18,6 @@ type DBWriter struct {
 	tickBatch  []models.TickData
 	depthBatch []DepthRecord
 	barBatch   []models.Bar
-
-	// New buffers for the incoming streaming analytics anomalies
-	gridBatch  []models.AnomalyGridRecord
-	whaleBatch []models.WhaleBlockRecord
 
 	batchSize     int
 	flushInterval time.Duration
@@ -318,30 +313,16 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 			"timestamp", "instrument_token", "stock_name", "timeframe",
 			"open", "high", "low", "close", "volume", "tick_count",
 			"max_tick_count_z", "vwap", "poc", "vah", "val",
-			"total_buy_qty", "total_sell_qty", "change_pct", "dominant_anomaly", "slopes",
+			"total_buy_qty", "total_sell_qty", "change_pct",
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
-
-			// 👈 Changed serialization from b.Heatmap array to b.DominantAnomaly single winner struct object
-			anomalyBytes, err := json.Marshal(b.DominantAnomaly)
-			if err != nil {
-				logger.Errorf("Failed to marshal dominant anomaly for token %d: %v", b.InstrumentToken, err)
-				anomalyBytes = []byte("{}")
-			}
-
-			slopesBytes, err := json.Marshal(b.Slopes)
-			if err != nil {
-				logger.Errorf("Failed to marshal slopes for token %d: %v", b.InstrumentToken, err)
-				slopesBytes = []byte("{}")
-			}
 
 			return []any{
 				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
 				b.Open, b.High, b.Low, b.Close, b.Volume,
 				b.TickCount, b.MaxTickCountZ,
 				b.VWAP, b.POC, b.VAH, b.VAL, b.TotalBuyQty, b.TotalSellQty, b.ChangePct,
-				string(anomalyBytes), string(slopesBytes), // Maps nicely into jsonb column layout
 			}, nil
 		}),
 	)
