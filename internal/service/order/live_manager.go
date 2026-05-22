@@ -103,35 +103,53 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 	// 1. Calculate qtyDelta BEFORE updating the local order book
 	fillQty := int(o.FilledQuantity)
 	prevFillQty := 0
+	var prevStatus string
 	for _, ob := range lm.orderBook {
 		if ob.OrderID == o.OrderID {
 			prevFillQty = ob.FilledQty
+			prevStatus = ob.Status
 			break
 		}
 	}
 
-	// 🔥 FIX 1: Prevent out-of-order WebSocket updates from reversing the filled quantity
+	// Prevent out-of-order WebSocket updates from reversing the filled quantity
 	if fillQty < prevFillQty {
 		logger.Warnf("[Live] Ignoring out-of-order update for %s (Received: %d, Current: %d)", o.OrderID, fillQty, prevFillQty)
 		return
 	}
 
+	// If this order was already processed as COMPLETE, map historical properties to prevent clearing
+	req, isEntry := lm.orderTracker[o.OrderID]
+
 	qtyDelta := fillQty - prevFillQty
 
 	// 2. Map and broadcast to UI & save to DB
 	entry := lm.mapKiteOrderToLocal(o)
+
+	// FIX: If tracking memory is already gone but we have it in our local orderBook,
+	// preserve original targets so duplicate status messages don't wipe them to 0
+	if !isEntry && prevFillQty > 0 {
+		for _, ob := range lm.orderBook {
+			if ob.OrderID == o.OrderID {
+				entry.TargetPrice = ob.TargetPrice
+				entry.StopLossPrice = ob.StopLossPrice
+				break
+			}
+		}
+	}
+
 	lm.updateLocalOrderBook(entry)
 
-	// 3. ALWAYS update position state if there's a new fill (Fixes Exit Position bug)
+	// 3. ALWAYS update position state if there's a new fill
 	if qtyDelta > 0 {
 		lm.updatePositionStateFromKite(o, qtyDelta)
 	}
 
 	// 4. Is this an ENTRY order?
-	if req, isEntry := lm.orderTracker[o.OrderID]; isEntry {
-		if o.Status == kiteconnect.OrderStatusComplete {
+	if isEntry {
+		// Only fire exit legs once when status transitions to COMPLETE for the first time
+		if o.Status == kiteconnect.OrderStatusComplete && prevStatus != "COMPLETE" {
 			logger.Infof("[Live] Entry Filled! Avg Price: %.2f. Placing Exit Legs.", o.AveragePrice)
-			// Fire OCO Legs
 			lm.placeOCOLegs(o, req)
 			delete(lm.orderTracker, o.OrderID)
 		} else if o.Status == kiteconnect.OrderStatusCancelled || o.Status == kiteconnect.OrderStatusRejected {
@@ -145,7 +163,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		if o.Status == kiteconnect.OrderStatusComplete {
 			logger.Infof("[Live] Exit Leg Filled: %s. Cancelling sibling: %s", o.OrderID, siblingID)
 
-			// Cancel the sibling leg only if one exists
 			if siblingID != "" {
 				_, err := lm.kiteClient.CancelOrder(kiteconnect.VarietyRegular, siblingID, nil)
 				if err != nil {
@@ -254,24 +271,41 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	// 1. Identify the position
+	// 1. Identify the active position
 	key := fmt.Sprintf("%s:%s", strings.ToUpper(symbol), strings.ToUpper(product))
 	pos, exists := lm.activePositions[key]
 	if !exists || pos.NetQuantity == 0 {
 		return fmt.Errorf("no active position found for %s", symbol)
 	}
 
-	// Determine the exit side (opposite of the position)
+	// Determine the exit side (opposite of your active exposure)
 	exitSide := kiteconnect.TransactionTypeSell
 	if pos.Side == "SHORT" {
 		exitSide = kiteconnect.TransactionTypeBuy
 	}
 	absQty := int(math.Abs(float64(pos.NetQuantity)))
 
+	// Helper inline function to verify if an order ID is genuinely active in our order book
+	isOrderLegActive := func(orderID string) bool {
+		if orderID == "" {
+			return false
+		}
+		for _, o := range lm.orderBook {
+			if o.OrderID == orderID {
+				// If it's cancelled, complete, or rejected, it's dead—we need a new one
+				if o.Status == "CANCELLED" || o.Status == "COMPLETE" || o.Status == "REJECTED" {
+					return false
+				}
+				return true
+			}
+		}
+		return true // Default to true if not found locally, to avoid spamming the exchange
+	}
+
 	// 2. Modify or Place Target Order
 	if tp > 0 {
-		if pos.TargetOrderID != "" {
-			// Modify existing
+		if pos.TargetOrderID != "" && isOrderLegActive(pos.TargetOrderID) {
+			// Modify the genuinely active exchange order
 			_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.TargetOrderID, kiteconnect.OrderParams{
 				OrderType: kiteconnect.OrderTypeLimit,
 				Price:     tp,
@@ -281,7 +315,8 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 				return err
 			}
 		} else {
-			// Place NEW Target Leg if one didn't exist
+			// Place a NEW Target Leg because the old one doesn't exist or was cancelled
+			logger.Infof("[Live] Placing fresh replacement Target Leg for %s at %.2f", pos.Symbol, tp)
 			tpParams := kiteconnect.OrderParams{
 				Exchange:        kiteconnect.ExchangeNSE,
 				Tradingsymbol:   pos.Symbol,
@@ -304,28 +339,29 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 
 	// 3. Modify or Place Stop-Loss Order
 	if sl > 0 {
-		if pos.StopLossOrderID != "" {
-			// Modify existing
+		if pos.StopLossOrderID != "" && isOrderLegActive(pos.StopLossOrderID) {
+			// Modify the genuinely active exchange order
 			_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, pos.StopLossOrderID, kiteconnect.OrderParams{
-				OrderType:    kiteconnect.OrderTypeSL, // 🔥 CHANGED TO SL
+				OrderType:    kiteconnect.OrderTypeSL,
 				TriggerPrice: sl,
-				Price:        sl, // 🔥 SL LIMIT REQUIRES PRICE
+				Price:        sl, // SL Limit requires structural limit price validation
 			})
 			if err != nil {
 				logger.Errorf("[Live] Failed to modify SL: %v", err)
 				return err
 			}
 		} else {
-			// Place NEW SL Leg if one didn't exist
+			// Place a NEW SL Leg because the old one doesn't exist or was cancelled
+			logger.Infof("[Live] Placing fresh replacement SL Leg for %s at %.2f", pos.Symbol, sl)
 			slParams := kiteconnect.OrderParams{
 				Exchange:        kiteconnect.ExchangeNSE,
 				Tradingsymbol:   pos.Symbol,
 				TransactionType: exitSide,
 				Quantity:        absQty,
 				Product:         kiteconnect.ProductMIS,
-				OrderType:       kiteconnect.OrderTypeSL, // 🔥 CHANGED TO SL
+				OrderType:       kiteconnect.OrderTypeSL,
 				TriggerPrice:    sl,
-				Price:           sl, // 🔥 SL LIMIT REQUIRES PRICE
+				Price:           sl,
 				Validity:        kiteconnect.ValidityDay,
 			}
 			resp, err := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, slParams)
@@ -338,7 +374,7 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 		pos.StopLossPrice = sl
 	}
 
-	// 4. Update OCO Links if both were just created
+	// 4. Re-link the OCO relationships safely if both live legs are present
 	if pos.TargetOrderID != "" && pos.StopLossOrderID != "" {
 		lm.ocoLinks[pos.TargetOrderID] = pos.StopLossOrderID
 		lm.ocoLinks[pos.StopLossOrderID] = pos.TargetOrderID
@@ -350,7 +386,7 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 	}
 	lm.broadcastPositionUpdate(pos)
 
-	logger.Infof("[Live] Metadata updated for %s: TP=%.2f, SL=%.2f", symbol, tp, sl)
+	logger.Infof("[Live] Metadata updated successfully for %s: TP=%.2f, SL=%.2f", symbol, tp, sl)
 	return nil
 }
 
@@ -389,18 +425,17 @@ func (lm *LiveOrderManager) CancelOrder(orderID string, userEmail string) error 
 		return fmt.Errorf("failed to cancel order on exchange: %v", err)
 	}
 
-	// 2. Update the local order book state immediately so it reflects the requester
+	// 2. Update the local order book state immediately
 	for i, o := range lm.orderBook {
 		if o.OrderID == orderID {
 			lm.orderBook[i].Status = "CANCELLED"
-			lm.orderBook[i].UserEmail = userEmail // 👈 Inject the requester's email here
+			lm.orderBook[i].UserEmail = userEmail
 
-			// Persist to DB
 			if lm.dbWriter != nil {
 				lm.dbWriter.PersistOrder(lm.orderBook[i])
 			}
 			lm.broadcastOrderUpdate(lm.orderBook[i])
-			return nil
+			return nil // 👈 WAKES OUT EARLY! Wipes out your chance to clean up the parent position mapping!
 		}
 	}
 	return fmt.Errorf("order not found locally")
