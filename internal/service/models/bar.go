@@ -3,20 +3,9 @@ package models
 import "time"
 
 type BarMetrics struct {
-	MaxTickCountZ   float64 `json:"max_tick_count_z"`
-	VolumeZ         float64 `json:"volume_z"`
-	TickZ           float64 `json:"tick_z"`
-	RangePercentile string  `json:"range_percentile"` // Legacy/System fallback
-	Efficiency      float64 `json:"efficiency"`
-
-	// ------------------------------------------------------------------------
-	// COMPRESSED INTRABAR SYMMETRIC STATE SPACE (UI HEATMAP TARGETS)
-	// ------------------------------------------------------------------------
-	PeakRelativeVolumeRank int    `json:"peak_relative_volume_rank"` // Bounded horizontal grid coordinate (1-7)
-	PeakRelativeVolumePct  string `json:"peak_relative_volume_pct"`  // Clean string category for participation ribbons
-	PeakRangeRank          int    `json:"peak_range_rank"`           // Bounded vertical grid coordinate (1-7)
-	PeakRangePct           string `json:"peak_range_pct"`            // Clean string category for response ribbons
-	PeakEfficiencyPct      string `json:"peak_efficiency_pct"`       // Sub-Chart bar height category
+	PeakRelativeVolumeRank int `json:"peak_relative_volume_rank"` // Bounded horizontal grid coordinate (1-7)
+	PeakRangeRank          int `json:"peak_range_rank"`           // Bounded vertical grid coordinate (1-7)
+	PeakTickRank           int `json:"peak_tick_rank"`            // Bounded velocity grid coordinate (1-7)
 }
 
 type Bar struct {

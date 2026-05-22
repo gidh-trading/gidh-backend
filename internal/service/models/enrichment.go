@@ -49,7 +49,7 @@ type EnrichedTick struct {
 	Enrichment EnrichmentState `json:"enrichment"`
 
 	MinuteIndex    int    `json:"minute_index"`
-	DNASampleCount int64  `json:"dna_sample_count"`
+	DNASampleCount int    `json:"dna_sample_count"`
 	EnrichmentStr  string `json:"enrichment_str"`
 	EnrichedAt     int64  `json:"enriched_at"`
 }

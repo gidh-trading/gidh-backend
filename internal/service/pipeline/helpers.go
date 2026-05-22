@@ -2,7 +2,6 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
-	"math"
 	"time"
 )
 
@@ -86,33 +85,14 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	}
 
 	// 3. CONTINUOUS LIVE TELEMETRY DEFAULT INITIALIZATION
-	if cs.bar.Metrics.PeakRelativeVolumePct == "" {
-		cs.bar.Metrics.PeakRelativeVolumePct = "NORMAL"
+	if cs.bar.Metrics.PeakRelativeVolumeRank == 0 {
 		cs.bar.Metrics.PeakRelativeVolumeRank = 3
 	}
-	if cs.bar.Metrics.PeakRangePct == "" {
-		cs.bar.Metrics.PeakRangePct = "NORMAL"
+	if cs.bar.Metrics.PeakRangeRank == 0 {
 		cs.bar.Metrics.PeakRangeRank = 3
 	}
-	if cs.bar.Metrics.PeakEfficiencyPct == "" {
-		cs.bar.Metrics.PeakEfficiencyPct = "NORMAL"
-	}
-
-	// 4. METRIC BURST TRACKING
-	if tick.Enrichment.TickZ > cs.bar.Metrics.MaxTickCountZ {
-		cs.bar.Metrics.MaxTickCountZ = tick.Enrichment.TickZ
-	}
-	if math.Abs(tick.Enrichment.VolumeZ) > math.Abs(cs.bar.Metrics.VolumeZ) {
-		cs.bar.Metrics.VolumeZ = tick.Enrichment.VolumeZ
-	}
-	if math.Abs(tick.Enrichment.TickZ) > math.Abs(cs.bar.Metrics.TickZ) {
-		cs.bar.Metrics.TickZ = tick.Enrichment.TickZ
-	}
-	if tick.Telemetry.Efficiency > cs.bar.Metrics.Efficiency {
-		cs.bar.Metrics.Efficiency = tick.Telemetry.Efficiency
-	}
-	if getPercentileRank(tick.Enrichment.RangePercentile) > getPercentileRank(cs.bar.Metrics.RangePercentile) {
-		cs.bar.Metrics.RangePercentile = tick.Enrichment.RangePercentile
+	if cs.bar.Metrics.PeakTickRank == 0 {
+		cs.bar.Metrics.PeakTickRank = 3
 	}
 
 	// ------------------------------------------------------------------------
@@ -123,15 +103,12 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	currentVolRank := getPercentileRank(tick.EnrichmentStr) // String parsed out of rVol calculation
 	if cs.bar.Metrics.PeakRelativeVolumeRank == 3 {
 		cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
-		cs.bar.Metrics.PeakRelativeVolumePct = tick.EnrichmentStr
 	} else {
 		// Prioritize extreme extensions (Expansion or total drought anomalies overrule NORMAL/P50)
 		if currentVolRank > 4 && currentVolRank > cs.bar.Metrics.PeakRelativeVolumeRank {
 			cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
-			cs.bar.Metrics.PeakRelativeVolumePct = tick.EnrichmentStr
 		} else if currentVolRank < 3 && currentVolRank < cs.bar.Metrics.PeakRelativeVolumeRank {
 			cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
-			cs.bar.Metrics.PeakRelativeVolumePct = tick.EnrichmentStr
 		}
 	}
 
@@ -139,24 +116,42 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	currentRangeRank := getPercentileRank(tick.Enrichment.RangePercentile)
 	if cs.bar.Metrics.PeakRangeRank == 3 {
 		cs.bar.Metrics.PeakRangeRank = currentRangeRank
-		cs.bar.Metrics.PeakRangePct = tick.Enrichment.RangePercentile
 	} else {
 		if currentRangeRank > 4 && currentRangeRank > cs.bar.Metrics.PeakRangeRank {
 			cs.bar.Metrics.PeakRangeRank = currentRangeRank
-			cs.bar.Metrics.PeakRangePct = tick.Enrichment.RangePercentile
 		} else if currentRangeRank < 3 && currentRangeRank < cs.bar.Metrics.PeakRangeRank {
 			cs.bar.Metrics.PeakRangeRank = currentRangeRank
-			cs.bar.Metrics.PeakRangePct = tick.Enrichment.RangePercentile
 		}
 	}
 
-	// C. Capture Peak Efficiency Anomaly (Bar Chart Target)
-	currentEffRank := getPercentileRank(tick.Enrichment.EfficiencyPercentile)
-	targetEffRank := getPercentileRank(cs.bar.Metrics.PeakEfficiencyPct)
-	if currentEffRank > 4 && currentEffRank > targetEffRank {
-		cs.bar.Metrics.PeakEfficiencyPct = tick.Enrichment.EfficiencyPercentile
-	} else if currentEffRank < 3 && currentEffRank < targetEffRank {
-		cs.bar.Metrics.PeakEfficiencyPct = tick.Enrichment.EfficiencyPercentile
+	// C. Capture Peak Tick Anomaly Envelope (Velocity Heatmap Grid)
+	var currentTickPct string
+	switch {
+	case tick.Enrichment.TickZ >= 2.33:
+		currentTickPct = "P99"
+	case tick.Enrichment.TickZ >= 1.645:
+		currentTickPct = "P95"
+	case tick.Enrichment.TickZ >= 1.28:
+		currentTickPct = "P90"
+	case tick.Enrichment.TickZ >= 0.0:
+		currentTickPct = "P50"
+	case tick.Enrichment.TickZ >= -1.28:
+		currentTickPct = "NORMAL"
+	case tick.Enrichment.TickZ >= -1.645:
+		currentTickPct = "P10"
+	default:
+		currentTickPct = "P05"
+	}
+
+	currentTickRank := getPercentileRank(currentTickPct)
+	if cs.bar.Metrics.PeakTickRank == 3 {
+		cs.bar.Metrics.PeakTickRank = currentTickRank
+	} else {
+		if currentTickRank > 4 && currentTickRank > cs.bar.Metrics.PeakTickRank {
+			cs.bar.Metrics.PeakTickRank = currentTickRank
+		} else if currentTickRank < 3 && currentTickRank < cs.bar.Metrics.PeakTickRank {
+			cs.bar.Metrics.PeakTickRank = currentTickRank
+		}
 	}
 
 	// 5. Build Market Auction Framework Layout
