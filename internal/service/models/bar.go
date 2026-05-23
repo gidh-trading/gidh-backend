@@ -3,9 +3,10 @@ package models
 import "time"
 
 type BarMetrics struct {
-	PeakRelativeVolumeRank int `json:"peak_relative_volume_rank"` // Bounded horizontal grid coordinate (1-7)
-	PeakRangeRank          int `json:"peak_range_rank"`           // Bounded vertical grid coordinate (1-7)
-	PeakTickRank           int `json:"peak_tick_rank"`            // Bounded velocity grid coordinate (1-7)
+	PeakVolumeZRank        int `json:"peak_volume_z_rank"`
+	PeakRelativeVolumeRank int `json:"peak_relative_volume_rank"`
+	PeakRangeRank          int `json:"peak_range_rank"`
+	PeakTickRank           int `json:"peak_tick_rank"`
 }
 
 type Bar struct {

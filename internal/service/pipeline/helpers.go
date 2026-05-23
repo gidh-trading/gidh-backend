@@ -20,22 +20,22 @@ type candleState struct {
 // getPercentileRank normalizes non-linear distribution spaces into a linear 1-7 coordinate grid
 func getPercentileRank(p string) int {
 	switch p {
-	case "P99":
-		return 7
-	case "P95":
-		return 6
+	case "P97":
+		return 7 // burst/extreme
 	case "P90":
-		return 5
+		return 6 // elevated
+	case "P75":
+		return 5 // active
 	case "P50":
-		return 4
-	case "NORMAL":
-		return 3
+		return 4 // baseline
+	case "P25":
+		return 3 // below normal
 	case "P10":
-		return 2
+		return 2 // weak
 	case "P05":
-		return 1
+		return 1 // drought
 	default:
-		return 3 // Default fallback to mid-tier stationary state
+		return 4 // Balanced baseline fallback if an unexpected string leaks in
 	}
 }
 
@@ -86,54 +86,49 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 
 	// 3. CONTINUOUS LIVE TELEMETRY DEFAULT INITIALIZATION
 	if cs.bar.Metrics.PeakRelativeVolumeRank == 0 {
-		cs.bar.Metrics.PeakRelativeVolumeRank = 3
+		cs.bar.Metrics.PeakRelativeVolumeRank = 4
 	}
 	if cs.bar.Metrics.PeakRangeRank == 0 {
-		cs.bar.Metrics.PeakRangeRank = 3
+		cs.bar.Metrics.PeakRangeRank = 4
 	}
 	if cs.bar.Metrics.PeakTickRank == 0 {
-		cs.bar.Metrics.PeakTickRank = 3
+		cs.bar.Metrics.PeakTickRank = 4
 	}
 
 	// ------------------------------------------------------------------------
 	// VISUALIZATION LAYER SYMMETRIC COMPRESSION ENGINE
 	// ------------------------------------------------------------------------
 
-	// A. Capture Peak Participation Anomaly Envelope (Horizontal Heatmap Grid)
+	// A1. Volume Z-Score (Absolute Historical Statistical Depth)
+	currentVolZRank := getPercentileRank(tick.Enrichment.VolumeZPercentile)
+	if currentVolZRank > 4 && currentVolZRank > cs.bar.Metrics.PeakVolumeZRank {
+		cs.bar.Metrics.PeakVolumeZRank = currentVolZRank
+	} else if currentVolZRank < 4 && currentVolZRank < cs.bar.Metrics.PeakVolumeZRank {
+		cs.bar.Metrics.PeakVolumeZRank = currentVolZRank
+	}
+
+	// A2. Capture Peak Participation Anomaly Envelope (Horizontal Heatmap Grid)
 	currentVolRank := getPercentileRank(tick.Enrichment.RelativeVolumePercentile)
-	if cs.bar.Metrics.PeakRelativeVolumeRank == 3 {
+	if currentVolRank > 4 && currentVolRank > cs.bar.Metrics.PeakRelativeVolumeRank {
 		cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
-	} else {
-		// Prioritize extreme extensions (Expansion or total drought anomalies overrule NORMAL/P50)
-		if currentVolRank > 4 && currentVolRank > cs.bar.Metrics.PeakRelativeVolumeRank {
-			cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
-		} else if currentVolRank < 3 && currentVolRank < cs.bar.Metrics.PeakRelativeVolumeRank {
-			cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
-		}
+	} else if currentVolRank < 4 && currentVolRank < cs.bar.Metrics.PeakRelativeVolumeRank {
+		cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
 	}
 
-	// B. Capture Peak Response Anomaly Envelope (Vertical Heatmap Grid)
+	// B. Range (Realized Response): Prioritize expansions OR range squeeze over baseline
 	currentRangeRank := getPercentileRank(tick.Enrichment.RangePercentile)
-	if cs.bar.Metrics.PeakRangeRank == 3 {
+	if currentRangeRank > 4 && currentRangeRank > cs.bar.Metrics.PeakRangeRank {
 		cs.bar.Metrics.PeakRangeRank = currentRangeRank
-	} else {
-		if currentRangeRank > 4 && currentRangeRank > cs.bar.Metrics.PeakRangeRank {
-			cs.bar.Metrics.PeakRangeRank = currentRangeRank
-		} else if currentRangeRank < 3 && currentRangeRank < cs.bar.Metrics.PeakRangeRank {
-			cs.bar.Metrics.PeakRangeRank = currentRangeRank
-		}
+	} else if currentRangeRank < 4 && currentRangeRank < cs.bar.Metrics.PeakRangeRank {
+		cs.bar.Metrics.PeakRangeRank = currentRangeRank
 	}
 
-	// C. Capture Peak Tick Anomaly Envelope (Velocity Heatmap Grid)
+	// C. Ticks (Execution Tempo): Track highest *sustained velocity* within this bar.
+	// Because low ticks aren't a "negative event", we want to capture the highest energy level
+	// achieved during the candle's lifetime (e.g., if the market accelerates to a Burst, the bar remembers it).
 	currentTickRank := getPercentileRank(tick.Enrichment.TickPercentile)
-	if cs.bar.Metrics.PeakTickRank == 3 {
+	if currentTickRank > cs.bar.Metrics.PeakTickRank {
 		cs.bar.Metrics.PeakTickRank = currentTickRank
-	} else {
-		if currentTickRank > 4 && currentTickRank > cs.bar.Metrics.PeakTickRank {
-			cs.bar.Metrics.PeakTickRank = currentTickRank
-		} else if currentTickRank < 3 && currentTickRank < cs.bar.Metrics.PeakTickRank {
-			cs.bar.Metrics.PeakTickRank = currentTickRank
-		}
 	}
 
 	// 5. Build Market Auction Framework Layout

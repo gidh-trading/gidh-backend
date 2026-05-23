@@ -8,22 +8,24 @@ import (
 	"gidh-backend/internal/service/order"
 )
 
-func classifyPercentile(value, p05, p10, p50, p90, p95, p99 float64) string {
+func classifyPercentile(value, p05, p10, p25, p50, p75, p90, p97 float64) string {
 	switch {
-	case value >= p99:
-		return "P99"
-	case value >= p95:
-		return "P95"
+	case value >= p97:
+		return "P97" // burst/extreme
 	case value >= p90:
-		return "P90"
+		return "P90" // elevated
+	case value >= p75:
+		return "P75" // active
 	case value >= p50:
-		return "P50"
+		return "P50" // baseline
+	case value >= p25:
+		return "P25" // below normal
 	case value >= p10:
-		return "P10"
+		return "P10" // weak
 	case value >= p05:
-		return "P05"
+		return "P05" // drought
 	default:
-		return "NORMAL"
+		return "DROUGHT_EXTREME" // Anything below P05 falls entirely below the grid floor
 	}
 }
 
@@ -108,7 +110,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		RelativeVolume: rVol,
 	}
 
-	rVolPct, rangePct, tickPct := "NORMAL", "NORMAL", "NORMAL"
+	volZPct, rVolPct, rangePct, tickPct := "NORMAL", "NORMAL", "NORMAL", "NORMAL"
 
 	if tokenDna, exists := s.dnaMap[token]; exists {
 		if currBaseline, ok := tokenDna[minuteIndex]; ok {
@@ -125,38 +127,52 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			weightCurr := sec / 60.0
 			weightPrev := (60.0 - sec) / 60.0
 
-			// 1. Relative Volume Spacing Percentile
+			// 1A. Absolute Volume Z-Space Percentile
+			v05 := (currBaseline.VolumeP05 * weightCurr) + (prevBaseline.VolumeP05 * weightPrev)
+			v10 := (currBaseline.VolumeP10 * weightCurr) + (prevBaseline.VolumeP10 * weightPrev)
+			v25 := (currBaseline.VolumeP25 * weightCurr) + (prevBaseline.VolumeP25 * weightPrev)
+			v50 := (currBaseline.VolumeP50 * weightCurr) + (prevBaseline.VolumeP50 * weightPrev)
+			v75 := (currBaseline.VolumeP75 * weightCurr) + (prevBaseline.VolumeP75 * weightPrev)
+			v90 := (currBaseline.VolumeP90 * weightCurr) + (prevBaseline.VolumeP90 * weightPrev)
+			v97 := (currBaseline.VolumeP97 * weightCurr) + (prevBaseline.VolumeP97 * weightPrev)
+			volZPct = classifyPercentile(liveVolume, v05, v10, v25, v50, v75, v90, v97)
+
+			// 1B. Relative Volume Spacing Percentile
 			rv05 := (currBaseline.RelativeVolumeP05 * weightCurr) + (prevBaseline.RelativeVolumeP05 * weightPrev)
 			rv10 := (currBaseline.RelativeVolumeP10 * weightCurr) + (prevBaseline.RelativeVolumeP10 * weightPrev)
+			rv25 := (currBaseline.RelativeVolumeP25 * weightCurr) + (prevBaseline.RelativeVolumeP25 * weightPrev)
 			rv50 := (currBaseline.RelativeVolumeP50 * weightCurr) + (prevBaseline.RelativeVolumeP50 * weightPrev)
+			rv75 := (currBaseline.RelativeVolumeP75 * weightCurr) + (prevBaseline.RelativeVolumeP75 * weightPrev)
 			rv90 := (currBaseline.RelativeVolumeP90 * weightCurr) + (prevBaseline.RelativeVolumeP90 * weightPrev)
-			rv95 := (currBaseline.RelativeVolumeP95 * weightCurr) + (prevBaseline.RelativeVolumeP95 * weightPrev)
-			rv99 := (currBaseline.RelativeVolumeP99 * weightCurr) + (prevBaseline.RelativeVolumeP99 * weightPrev)
-			rVolPct = classifyPercentile(rVol, rv05, rv10, rv50, rv90, rv95, rv99)
+			rv97 := (currBaseline.RelativeVolumeP97 * weightCurr) + (prevBaseline.RelativeVolumeP97 * weightPrev)
+			rVolPct = classifyPercentile(rVol, rv05, rv10, rv25, rv50, rv75, rv90, rv97)
 
 			// 2. Price Range Spacing Percentile
 			r05 := (currBaseline.RangeP05 * weightCurr) + (prevBaseline.RangeP05 * weightPrev)
 			r10 := (currBaseline.RangeP10 * weightCurr) + (prevBaseline.RangeP10 * weightPrev)
+			r25 := (currBaseline.RangeP25 * weightCurr) + (prevBaseline.RangeP25 * weightPrev)
 			r50 := (currBaseline.RangeP50 * weightCurr) + (prevBaseline.RangeP50 * weightPrev)
+			r75 := (currBaseline.RangeP75 * weightCurr) + (prevBaseline.RangeP75 * weightPrev)
 			r90 := (currBaseline.RangeP90 * weightCurr) + (prevBaseline.RangeP90 * weightPrev)
-			r95 := (currBaseline.RangeP95 * weightCurr) + (prevBaseline.RangeP95 * weightPrev)
-			r99 := (currBaseline.RangeP99 * weightCurr) + (prevBaseline.RangeP99 * weightPrev)
-			rangePct = classifyPercentile(realizedRange, r05, r10, r50, r90, r95, r99)
+			r97 := (currBaseline.RangeP97 * weightCurr) + (prevBaseline.RangeP97 * weightPrev)
+			rangePct = classifyPercentile(realizedRange, r05, r10, r25, r50, r75, r90, r97)
 
 			// 3. Tick Count Spacing Percentile
 			tc05 := (currBaseline.TickCountP05 * weightCurr) + (prevBaseline.TickCountP05 * weightPrev)
 			tc10 := (currBaseline.TickCountP10 * weightCurr) + (prevBaseline.TickCountP10 * weightPrev)
+			tc25 := (currBaseline.TickCountP25 * weightCurr) + (prevBaseline.TickCountP25 * weightPrev)
 			tc50 := (currBaseline.TickCountP50 * weightCurr) + (prevBaseline.TickCountP50 * weightPrev)
+			tc75 := (currBaseline.TickCountP75 * weightCurr) + (prevBaseline.TickCountP75 * weightPrev)
 			tc90 := (currBaseline.TickCountP90 * weightCurr) + (prevBaseline.TickCountP90 * weightPrev)
-			tc95 := (currBaseline.TickCountP95 * weightCurr) + (prevBaseline.TickCountP95 * weightPrev)
-			tc99 := (currBaseline.TickCountP99 * weightCurr) + (prevBaseline.TickCountP99 * weightPrev)
-			tickPct = classifyPercentile(float64(liveTickCount), tc05, tc10, tc50, tc90, tc95, tc99)
+			tc97 := (currBaseline.TickCountP97 * weightCurr) + (prevBaseline.TickCountP97 * weightPrev)
+			tickPct = classifyPercentile(float64(liveTickCount), tc05, tc10, tc25, tc50, tc75, tc90, tc97)
 		}
 	}
 
 	tick.EnrichmentStr = rVolPct
 	tick.Enrichment = models.EnrichmentState{
 		MinuteIndex:              minuteIndex,
+		VolumeZPercentile:        volZPct,
 		RelativeVolumePercentile: rVolPct,
 		RangePercentile:          rangePct,
 		TickPercentile:           tickPct,

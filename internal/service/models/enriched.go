@@ -13,6 +13,7 @@ type EnrichmentState struct {
 	MinuteIndex int `json:"minute_index"`
 
 	// Non-Gaussian Percentile Strings straight from DNA
+	VolumeZPercentile        string `json:"volume_z_pct"`
 	RelativeVolumePercentile string `json:"relative_volume_pct"`
 	RangePercentile          string `json:"range_pct"`
 	TickPercentile           string `json:"tick_pct"`
