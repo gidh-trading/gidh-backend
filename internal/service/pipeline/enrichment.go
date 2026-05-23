@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"math"
 	"sync"
 	"time"
 
@@ -9,7 +8,6 @@ import (
 	"gidh-backend/internal/service/order"
 )
 
-// classifyPercentile safely maps a raw value against its historical distribution anchors
 func classifyPercentile(value, p05, p10, p50, p90, p95, p99 float64) string {
 	switch {
 	case value >= p99:
@@ -90,10 +88,8 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	buf.Push(ts, price, volDelta)
 
-	// 1. Pull 60s continuous window parameters
-	liveVolume, liveTickCount, realizedRange, realizedVolatility := buf.GetProductionMetrics()
+	liveVolume, liveTickCount, realizedRange, _ := buf.GetProductionMetrics()
 
-	// Market Opener Alignment Index Math Mapping
 	minOfDay := (ts.Hour() * 60) + ts.Minute()
 	minuteIndex := minOfDay - 555
 	tick.MinuteIndex = minuteIndex
@@ -103,23 +99,16 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	if !hasAdv || adv <= 0 {
 		adv = 1.0
 	}
-
 	rVol := liveVolume / adv
 
-	// 2. Hydrate Live Telemetry State (Pure Measurements)
 	tick.Telemetry = models.LiveTelemetry{
-		MinuteIndex:        minuteIndex,
-		Volume:             liveVolume,
-		TickCount:          liveTickCount,
-		RealizedRange:      realizedRange,
-		RealizedVolatility: realizedVolatility,
-		RelativeVolume:     rVol,
+		MinuteIndex:    minuteIndex,
+		TickCount:      liveTickCount,
+		RealizedRange:  realizedRange,
+		RelativeVolume: rVol,
 	}
 
-	// 3. Defaults if DNA layer is missing or unhydrated for this minuteIndex
-	var volZ, tcZ, rVolZ float64
-	rVolPct, rangePct, effPct := "NORMAL", "NORMAL", "NORMAL"
-	var partScore float64
+	rVolPct, rangePct, tickPct := "NORMAL", "NORMAL", "NORMAL"
 
 	if tokenDna, exists := s.dnaMap[token]; exists {
 		if currBaseline, ok := tokenDna[minuteIndex]; ok {
@@ -136,79 +125,42 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			weightCurr := sec / 60.0
 			weightPrev := (60.0 - sec) / 60.0
 
-			// Morph Participation Baselines dynamically across boundary seconds
-			volMean := (currBaseline.VolumeMean * weightCurr) + (prevBaseline.VolumeMean * weightPrev)
-			volStd := math.Sqrt((weightCurr * currBaseline.VolumeStd * currBaseline.VolumeStd) + (weightPrev * prevBaseline.VolumeStd * prevBaseline.VolumeStd))
+			// 1. Relative Volume Spacing Percentile
+			rv05 := (currBaseline.RelativeVolumeP05 * weightCurr) + (prevBaseline.RelativeVolumeP05 * weightPrev)
+			rv10 := (currBaseline.RelativeVolumeP10 * weightCurr) + (prevBaseline.RelativeVolumeP10 * weightPrev)
+			rv50 := (currBaseline.RelativeVolumeP50 * weightCurr) + (prevBaseline.RelativeVolumeP50 * weightPrev)
+			rv90 := (currBaseline.RelativeVolumeP90 * weightCurr) + (prevBaseline.RelativeVolumeP90 * weightPrev)
+			rv95 := (currBaseline.RelativeVolumeP95 * weightCurr) + (prevBaseline.RelativeVolumeP95 * weightPrev)
+			rv99 := (currBaseline.RelativeVolumeP99 * weightCurr) + (prevBaseline.RelativeVolumeP99 * weightPrev)
+			rVolPct = classifyPercentile(rVol, rv05, rv10, rv50, rv90, rv95, rv99)
 
-			tcMean := (currBaseline.TickCountMean * weightCurr) + (prevBaseline.TickCountMean * weightPrev)
-			tcStd := math.Sqrt((weightCurr * currBaseline.TickCountStd * currBaseline.TickCountStd) + (weightPrev * prevBaseline.TickCountStd * prevBaseline.TickCountStd))
-
-			rVolMean := (currBaseline.RelativeVolumeMean * weightCurr) + (prevBaseline.RelativeVolumeMean * weightPrev)
-			rVolStd := math.Sqrt((weightCurr * currBaseline.RelativeVolumeStd * currBaseline.RelativeVolumeStd) + (weightPrev * prevBaseline.RelativeVolumeStd * prevBaseline.RelativeVolumeStd))
-
-			// Execute Z-Score Participation Formulations (Retained internally for raw alert criteria)
-			volZ = (liveVolume - volMean) / math.Max(volStd, 1e-5)
-			tcZ = (float64(liveTickCount) - tcMean) / math.Max(tcStd, 1e-5)
-			rVolZ = (rVol - rVolMean) / math.Max(rVolStd, 1e-5)
-
-			// ------------------------------------------------------------------------
-			// SYMMETRIC ORDINAL SPACING INTERPOLATION
-			// ------------------------------------------------------------------------
-
-			// A. Categorize Relative Volume (Horizontal UI Dimension) against DNA distribution anchors
-			// Since rVol uses the raw distribution anchors, we map it relative to expected capacity.
-			// (Note: If your DNA database schema maps rVol quantiles to explicit fields, substitute here;
-			// otherwise utilizing Range distribution anchors provides an aligned stationary mapping proxy)
+			// 2. Price Range Spacing Percentile
 			r05 := (currBaseline.RangeP05 * weightCurr) + (prevBaseline.RangeP05 * weightPrev)
 			r10 := (currBaseline.RangeP10 * weightCurr) + (prevBaseline.RangeP10 * weightPrev)
 			r50 := (currBaseline.RangeP50 * weightCurr) + (prevBaseline.RangeP50 * weightPrev)
 			r90 := (currBaseline.RangeP90 * weightCurr) + (prevBaseline.RangeP90 * weightPrev)
 			r95 := (currBaseline.RangeP95 * weightCurr) + (prevBaseline.RangeP95 * weightPrev)
 			r99 := (currBaseline.RangeP99 * weightCurr) + (prevBaseline.RangeP99 * weightPrev)
-
-			// Use the same scale boundaries to extract a stationary participation placement category
-			rVolPct = classifyPercentile(rVol, r05, r10, r50, r90, r95, r99)
-
-			// B. Categorize Response Range (Vertical UI Dimension)
 			rangePct = classifyPercentile(realizedRange, r05, r10, r50, r90, r95, r99)
 
-			// C. Categorize Efficiency Performance (UI Sub-Chart Dimension)
-			const MinimumVolumeThreshold = 10.0
-			var efficiency float64
-
-			if liveVolume >= MinimumVolumeThreshold {
-				denom := math.Max(rVol, 1e-9)
-				efficiency = realizedVolatility / denom
-				tick.Telemetry.Efficiency = efficiency
-
-				e05 := (currBaseline.EfficiencyP05 * weightCurr) + (prevBaseline.EfficiencyP05 * weightPrev)
-				e10 := (currBaseline.EfficiencyP10 * weightCurr) + (prevBaseline.EfficiencyP10 * weightPrev)
-				e50 := (currBaseline.EfficiencyP50 * weightCurr) + (prevBaseline.EfficiencyP50 * weightPrev)
-				e90 := (currBaseline.EfficiencyP90 * weightCurr) + (prevBaseline.EfficiencyP90 * weightPrev)
-				e95 := (currBaseline.EfficiencyP95 * weightCurr) + (prevBaseline.EfficiencyP95 * weightPrev)
-				e99 := (currBaseline.EfficiencyP99 * weightCurr) + (prevBaseline.EfficiencyP99 * weightPrev)
-
-				effPct = classifyPercentile(efficiency, e05, e10, e50, e90, e95, e99)
-			}
-
-			partScore = (math.Abs(volZ) * 0.5) + (math.Abs(tcZ) * 0.3) + (math.Abs(rVolZ) * 0.2)
+			// 3. Tick Count Spacing Percentile
+			tc05 := (currBaseline.TickCountP05 * weightCurr) + (prevBaseline.TickCountP05 * weightPrev)
+			tc10 := (currBaseline.TickCountP10 * weightCurr) + (prevBaseline.TickCountP10 * weightPrev)
+			tc50 := (currBaseline.TickCountP50 * weightCurr) + (prevBaseline.TickCountP50 * weightPrev)
+			tc90 := (currBaseline.TickCountP90 * weightCurr) + (prevBaseline.TickCountP90 * weightPrev)
+			tc95 := (currBaseline.TickCountP95 * weightCurr) + (prevBaseline.TickCountP95 * weightPrev)
+			tc99 := (currBaseline.TickCountP99 * weightCurr) + (prevBaseline.TickCountP99 * weightPrev)
+			tickPct = classifyPercentile(float64(liveTickCount), tc05, tc10, tc50, tc90, tc95, tc99)
 		}
 	}
 
-	// 5. Finalize the Enriched Tick State Projection
-	tick.EnrichmentStr = rVolPct // Cache the current tick's relative volume string category
+	tick.EnrichmentStr = rVolPct
 	tick.Enrichment = models.EnrichmentState{
-		MinuteIndex:          minuteIndex,
-		VolumeZ:              volZ,
-		TickZ:                tcZ,
-		RelativeVolumeZ:      rVolZ,
-		RangePercentile:      rangePct, // Fed to BarManager for vertical position priority
-		EfficiencyPercentile: effPct,   // Fed to BarManager for bar heights
-		ParticipationScore:   partScore,
-		IsVolumeExtreme:      math.Abs(volZ) >= 2.0,
-		IsTickExtreme:        math.Abs(tcZ) >= 2.0,
-		IsRangeExtreme:       rangePct == "P95" || rangePct == "P99",
-		Timestamp:            ts,
+		MinuteIndex:              minuteIndex,
+		RelativeVolumePercentile: rVolPct,
+		RangePercentile:          rangePct,
+		TickPercentile:           tickPct,
+		Timestamp:                ts,
 	}
 
 	return nil

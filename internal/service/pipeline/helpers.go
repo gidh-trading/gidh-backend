@@ -100,7 +100,7 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	// ------------------------------------------------------------------------
 
 	// A. Capture Peak Participation Anomaly Envelope (Horizontal Heatmap Grid)
-	currentVolRank := getPercentileRank(tick.EnrichmentStr) // String parsed out of rVol calculation
+	currentVolRank := getPercentileRank(tick.Enrichment.RelativeVolumePercentile)
 	if cs.bar.Metrics.PeakRelativeVolumeRank == 3 {
 		cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
 	} else {
@@ -125,25 +125,7 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	}
 
 	// C. Capture Peak Tick Anomaly Envelope (Velocity Heatmap Grid)
-	var currentTickPct string
-	switch {
-	case tick.Enrichment.TickZ >= 2.33:
-		currentTickPct = "P99"
-	case tick.Enrichment.TickZ >= 1.645:
-		currentTickPct = "P95"
-	case tick.Enrichment.TickZ >= 1.28:
-		currentTickPct = "P90"
-	case tick.Enrichment.TickZ >= 0.0:
-		currentTickPct = "P50"
-	case tick.Enrichment.TickZ >= -1.28:
-		currentTickPct = "NORMAL"
-	case tick.Enrichment.TickZ >= -1.645:
-		currentTickPct = "P10"
-	default:
-		currentTickPct = "P05"
-	}
-
-	currentTickRank := getPercentileRank(currentTickPct)
+	currentTickRank := getPercentileRank(tick.Enrichment.TickPercentile)
 	if cs.bar.Metrics.PeakTickRank == 3 {
 		cs.bar.Metrics.PeakTickRank = currentTickRank
 	} else {
