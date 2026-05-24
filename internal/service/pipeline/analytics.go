@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
+	"math"
 )
 
 type AnalyticsEngine struct{}
@@ -10,41 +11,54 @@ func NewAnalyticsEngine() *AnalyticsEngine {
 	return &AnalyticsEngine{}
 }
 
-// Analyze processes the telemetry and returns a type-safe AnomalySnapshot
-// based entirely on continuous, bar-independent microstructural metrics.
-func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick) models.AnomalySnapshot {
+func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick, rOpen, rHigh, rLow, rClose float64) models.AnomalySnapshot {
 	volRank := getPercentileRank(tick.Enrichment.VolumePercentile)
 	priceRank := getPercentileRank(tick.Enrichment.PricePercentile)
-	displacement := tick.Telemetry.LiveDisplacement
+	netDisplacement := tick.Telemetry.LiveDisplacement
 
-	// Initialize a lean, default snapshot footprint targeting our type-safe enums
 	snapshot := models.AnomalySnapshot{
 		Timestamp:  tick.Enrichment.Timestamp,
-		Type:       models.AnomalyNone, // Default to safe fallback state
+		Type:       models.AnomalyNone,
 		Direction:  0,
 		VolumeRank: volRank,
 		PriceRank:  priceRank,
+		Price:      tick.Raw.LastPrice,
 	}
 
-	// Gatekeeper check: Identify severe institutional activity (P90 = Rank 6, P97 = Rank 7)
 	if volRank >= 6 {
-		// Assign basic directional breakout attributes to the volume anomaly
+		// 1. Set default breakout behavior based on net 60s direction
 		snapshot.Type = models.AnomalyVolumeBurst
-		if displacement > 0 {
+		if netDisplacement > 0 {
 			snapshot.Direction = 1
-		} else if displacement < 0 {
+		} else if netDisplacement < 0 {
 			snapshot.Direction = -1
 		}
 
-		// Microstructural Absorption Check: Elevated volume matched with capped/stalled price metrics
-		if priceRank <= 3 { // P25 or weaker localized price impact
-			snapshot.Type = models.AnomalyAbsorption // Upgrade category classification to compile-safe enum
+		// 2. Compute the Rolling Structural Proportions
+		totalRange := rHigh - rLow
+		if totalRange > 0 {
+			// Calculate how close the current price is to the absolute top/bottom of the 60s window
+			upperWickPct := (rHigh - math.Max(rOpen, rClose)) / totalRange
+			lowerWickPct := (math.Min(rOpen, rClose) - rLow) / totalRange
 
-			// Determine context bias: if price is flat/down on heavy buying pressure vs flat/up on selling
-			if displacement >= 0 {
-				snapshot.Direction = 1 // Passive supply accumulation (Buy Absorption)
-			} else {
-				snapshot.Direction = -1 // Passive demand distribution (Sell Absorption)
+			// Look for low price progress relative to the volume being expended:
+			// Condition A: Classic Low Displacement (Price Rank 1-3)
+			isStalled := priceRank <= 3
+
+			// Condition B: Structural Exhaustion (High Volume, High Range, but significant pull-back)
+			// Sellers tried to smash the price down (creating a lower wick), but buyers caught it all.
+			isLowerRejection := lowerWickPct >= 0.40 && netDisplacement <= 0
+			// Buyers tried to push the price up (creating an upper wick), but sellers blocked it.
+			isUpperRejection := upperWickPct >= 0.40 && netDisplacement >= 0
+
+			if isStalled || isLowerRejection || isUpperRejection {
+				snapshot.Type = models.AnomalyAbsorption
+
+				if isLowerRejection || (isStalled && netDisplacement >= 0) {
+					snapshot.Direction = 1 // Buy Absorption (Passive buyers catching liquid supply)
+				} else if isUpperRejection || (isStalled && netDisplacement < 0) {
+					snapshot.Direction = -1 // Sell Absorption (Passive sellers capping liquid demand)
+				}
 			}
 		}
 	}

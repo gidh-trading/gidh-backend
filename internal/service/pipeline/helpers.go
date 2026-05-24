@@ -106,12 +106,14 @@ func (bm *BarManager) processTickForCandle(
 
 	if math.Abs(float64(analysis.Direction)) > math.Abs(float64(cs.bar.Peaks.MaxAnomalyDirection)) {
 		cs.bar.Peaks.MaxAnomalyDirection = analysis.Direction
+		cs.bar.Peaks.PeakAnomalyPrice = analysis.Price
 	}
 
 	// Type-Safe Strategy Map Assignment using clean Enums
 	if analysis.Type == models.AnomalyAbsorption { // ◄ Compile-safe comparison
 		if math.Abs(float64(analysis.Direction)) > math.Abs(float64(cs.bar.Peaks.MaxAbsorptionSignal)) {
 			cs.bar.Peaks.MaxAbsorptionSignal = analysis.Direction
+			cs.bar.Peaks.PeakAbsorptionPrice = analysis.Price
 		}
 	}
 
@@ -126,7 +128,8 @@ func (bm *BarManager) processTickForCandle(
 			// If type and direction match exactly, we perform basic deduplication
 			if lastEvent.Type == analysis.Type && lastEvent.Direction == analysis.Direction {
 				if analysis.VolumeRank > lastEvent.VolumeRank {
-					cs.bar.SignificantEvents[eventCount-1] = analysis // Inline update escalation
+					cs.bar.SignificantEvents[eventCount-1] = analysis
+					cs.bar.SignificantEvents[eventCount-1].Price = analysis.Price
 				}
 				shouldAppend = false
 			}
@@ -143,6 +146,55 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.VAH = tick.VolProfile.VAH
 		cs.bar.VAL = tick.VolProfile.VAL
 	}
+
+	// 6A. Initialize the levels slice array if it doesn't exist inside the map yet
+	if cs.bar.Peaks.ActiveLevels == nil {
+		cs.bar.Peaks.ActiveLevels = make([]models.AbsorptionLevel, 0)
+	}
+
+	// 6B. BREAK TEST: Evaluate existing active lines against the new price tick
+	for i := range cs.bar.Peaks.ActiveLevels {
+		level := &cs.bar.Peaks.ActiveLevels[i]
+		if !level.IsActive {
+			continue
+		}
+
+		// If a support floor is penetrated by a price breaking down, deactivate it
+		if level.Direction == 1 && price < level.Price {
+			level.IsActive = false
+		}
+		// If a resistance ceiling is penetrated by a price breaking up, deactivate it
+		if level.Direction == -1 && price > level.Price {
+			level.IsActive = false
+		}
+	}
+
+	// 6C. CREATE NEW LEVEL: If the current tick is a fresh absorption signal, register a new line
+	if analysis.Type == models.AnomalyAbsorption && analysis.Direction != 0 {
+		levelPrice := cs.bar.Low
+		if analysis.Direction == -1 {
+			levelPrice = cs.bar.High // Resistance forms at the absolute top wick edge
+		}
+
+		// Verify if we already registered an identical price point line inside this candle bar to avoid clutter
+		isDuplicate := false
+		for _, lvl := range cs.bar.Peaks.ActiveLevels {
+			if lvl.Price == levelPrice && lvl.Direction == analysis.Direction && lvl.IsActive {
+				isDuplicate = true
+				break
+			}
+		}
+
+		if !isDuplicate {
+			cs.bar.Peaks.ActiveLevels = append(cs.bar.Peaks.ActiveLevels, models.AbsorptionLevel{
+				Price:     levelPrice,
+				Direction: analysis.Direction,
+				Strength:  analysis.VolumeRank,
+				IsActive:  true,
+			})
+		}
+	}
+
 	if timeframe == "1m" {
 		cs.bar.Ticks = append(cs.bar.Ticks, tick.Raw)
 	}

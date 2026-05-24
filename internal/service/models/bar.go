@@ -8,16 +8,27 @@ type AnomalySnapshot struct {
 	Direction  int         `json:"dir"`  // -1 = Sell, 1 = Buy
 	VolumeRank int         `json:"vol_rank"`
 	PriceRank  int         `json:"price_rank"`
+	Price      float64     `json:"price"`
+}
+
+type AbsorptionLevel struct {
+	Price     float64 `json:"price"`
+	Direction int     `json:"dir"`      // 1 = Support (Buy Absorption), -1 = Resistance (Sell Absorption)
+	Strength  int     `json:"strength"` // Volume rank intensity (6 or 7)
+	IsActive  bool    `json:"is_active"`
 }
 
 // PeakAnomalyMetrics remains a strict Go struct for compiler safety,
 // but serializes out as a flat JSON dictionary object for database/sockets.
 type PeakAnomalyMetrics struct {
-	PeakVolumeRank      int `json:"peak_volume_rank"`
-	PeakPriceRank       int `json:"peak_price_rank"`
-	PeakTickRank        int `json:"peak_tick_rank"`
-	MaxAnomalyDirection int `json:"max_anomaly_direction"`
-	MaxAbsorptionSignal int `json:"max_absorption_signal"`
+	PeakVolumeRank      int               `json:"peak_volume_rank"`
+	PeakPriceRank       int               `json:"peak_price_rank"`
+	PeakTickRank        int               `json:"peak_tick_rank"`
+	MaxAnomalyDirection int               `json:"max_anomaly_direction"`
+	MaxAbsorptionSignal int               `json:"max_absorption_signal"`
+	ActiveLevels        []AbsorptionLevel `json:"active_levels,omitempty"`
+	PeakAnomalyPrice    float64           `json:"peak_anomaly_price"`
+	PeakAbsorptionPrice float64           `json:"peak_absorption_price"`
 }
 
 type Bar struct {

@@ -21,12 +21,10 @@ type TokenRollingBuffer struct {
 
 func NewTokenRollingBuffer() *TokenRollingBuffer {
 	return &TokenRollingBuffer{
-		// Pre-allocate capacity for roughly 20 ticks/sec over 60 seconds
 		Ticks: make([]WindowTick, 0, 1200),
 	}
 }
 
-// Push adds a new tick and evicts data outside the 60-second rolling context
 func (b *TokenRollingBuffer) Push(ts time.Time, price, vol float64) {
 	b.lastPrice = price
 
@@ -36,14 +34,12 @@ func (b *TokenRollingBuffer) Push(ts time.Time, price, vol float64) {
 		Price:     price,
 	})
 
-	// Evict metrics outside our sliding 60s window context
 	cutoff := ts.Add(-ContinuousWindowDuration)
 	evictIdx := 0
 	for evictIdx < len(b.Ticks) && b.Ticks[evictIdx].Timestamp.Before(cutoff) {
 		evictIdx++
 	}
 
-	// Shift the slice to drop evicted ticks and free memory
 	if evictIdx > 0 {
 		b.Ticks = b.Ticks[evictIdx:]
 	}
@@ -55,11 +51,9 @@ func (b *TokenRollingBuffer) GetProductionMetrics() (vol float64, count int64, d
 		return 0, 0, 0
 	}
 
-	var totalVol float64
-
 	// Accurately sum volume over the surviving 60-second window
 	for _, t := range b.Ticks {
-		totalVol += t.Volume
+		vol += t.Volume
 	}
 
 	// Displacement is simply the Last Price (Close) minus the First Price in the window (Open)
@@ -67,5 +61,43 @@ func (b *TokenRollingBuffer) GetProductionMetrics() (vol float64, count int64, d
 	windowClose := b.lastPrice
 	displacement = windowClose - windowOpen
 
-	return totalVol, int64(len(b.Ticks)), displacement
+	return vol, int64(len(b.Ticks)), displacement
+}
+
+// GetProductionStructure extracts pure, ungameable committed capital structural metrics
+func (b *TokenRollingBuffer) GetProductionStructure() (vol float64, rOpen, rHigh, rLow, rClose float64) {
+	if len(b.Ticks) == 0 {
+		return 0, 0, 0, 0, 0
+	}
+
+	firstTick := b.Ticks[0]
+	rOpen = firstTick.Price
+	rHigh = firstTick.Price
+	rLow = firstTick.Price
+	rClose = b.lastPrice
+
+	for _, t := range b.Ticks {
+		vol += t.Volume
+		if t.Price > rHigh {
+			rHigh = t.Price
+		}
+		if t.Price < rLow {
+			rLow = t.Price
+		}
+	}
+
+	return vol, rOpen, rHigh, rLow, rClose
+}
+
+// GetRollingStructure fetches the current 60s window structural prices for an instrument token
+func (s *EnrichmentStage) GetRollingStructure(token uint32) (vol, rOpen, rHigh, rLow, rClose float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, exists := s.instruments[token]
+	if !exists || ctx.Buffer == nil {
+		return 0, 0, 0, 0, 0
+	}
+
+	return ctx.Buffer.GetProductionStructure()
 }

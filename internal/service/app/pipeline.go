@@ -59,8 +59,12 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 
 	// 4. ANALYTICS STAGE (Run Analytics to create the Snapshot using enriched metrics)
 	var snapshot models.AnomalySnapshot
-	if p.analytics != nil {
-		snapshot = p.analytics.Analyze(enrichedTick)
+	if p.analytics != nil && p.enrichment != nil {
+		// Extract the true ungameable continuous structural variables from the rolling buffer
+		_, rOpen, rHigh, rLow, rClose := p.enrichment.GetRollingStructure(rawTick.InstrumentToken)
+
+		// Supply the analytics engine with its required structural boundary variables
+		snapshot = p.analytics.Analyze(enrichedTick, rOpen, rHigh, rLow, rClose)
 	}
 
 	// 5. BAR MANAGER AGGREGATION LAYER (Handles timeframes and aggregates anomalies)
