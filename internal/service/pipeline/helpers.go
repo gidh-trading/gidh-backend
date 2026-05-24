@@ -2,6 +2,7 @@ package pipeline
 
 import (
 	"gidh-backend/internal/service/models"
+	"math"
 	"time"
 )
 
@@ -85,14 +86,89 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	}
 
 	// 3. CONTINUOUS LIVE TELEMETRY DEFAULT INITIALIZATION
-	if cs.bar.Metrics.PeakRelativeVolumeRank == 0 {
-		cs.bar.Metrics.PeakRelativeVolumeRank = 4
+	if cs.bar.Metrics.PeakVolumeZRank == 0 {
+		cs.bar.Metrics.PeakVolumeZRank = 4
 	}
-	if cs.bar.Metrics.PeakRangeRank == 0 {
-		cs.bar.Metrics.PeakRangeRank = 4
+	if cs.bar.Metrics.PeakPriceRank == 0 {
+		cs.bar.Metrics.PeakPriceRank = 4
 	}
 	if cs.bar.Metrics.PeakTickRank == 0 {
 		cs.bar.Metrics.PeakTickRank = 4
+	}
+
+	// ------------------------------------------------------------------------
+	// TRINARY DIRECTIONAL ANOMALY ENGINE
+	// ------------------------------------------------------------------------
+
+	// A. Continuously calculate the underlying visual metrics for the current tick state
+	windowRange := tick.Telemetry.RealizedRange
+	if windowRange > 0 {
+		displacement := (cs.bar.Close - cs.bar.Open) / windowRange
+		// Clamp displacement between -1.0 and 1.0
+		if displacement > 1.0 {
+			displacement = 1.0
+		} else if displacement < -1.0 {
+			displacement = -1.0
+		}
+		cs.bar.Metrics.NormalizedDisplacement = displacement
+	}
+
+	// B. Calculate Wick Asymmetry: Positive = Buying Tail, Negative = Selling Wick
+	highLowRange := cs.bar.High - cs.bar.Low
+	if highLowRange > 0 {
+		maxOpenClose := cs.bar.Open
+		if cs.bar.Close > maxOpenClose {
+			maxOpenClose = cs.bar.Close
+		}
+		minOpenClose := cs.bar.Open
+		if cs.bar.Close < minOpenClose {
+			minOpenClose = cs.bar.Close
+		}
+
+		upperWick := cs.bar.High - maxOpenClose
+		lowerWick := minOpenClose - cs.bar.Low
+
+		// Normalized asymmetry metric scaled against the total candle range
+		cs.bar.Metrics.WickAsymmetry = (lowerWick - upperWick) / highLowRange
+	}
+
+	// C. Evaluation Gate: Check if current tick's Absolute Volume hits your P90 or P97 baseline
+	currentVolZRank := getPercentileRank(tick.Enrichment.VolumeZPercentile)
+
+	if currentVolZRank >= 6 { // 6 = P90, 7 = P97
+		if cs.bar.Metrics.NormalizedDisplacement > 0 {
+			cs.bar.Metrics.AnomalyDirection = 1
+		} else if cs.bar.Metrics.NormalizedDisplacement < 0 {
+			cs.bar.Metrics.AnomalyDirection = -1
+		} else {
+			// Tie-breaker using WickAsymmetry when Open == Close
+			if cs.bar.Metrics.WickAsymmetry > 0 {
+				cs.bar.Metrics.AnomalyDirection = 1
+			} else {
+				cs.bar.Metrics.AnomalyDirection = -1
+			}
+		}
+
+		// If absolute displacement is ultra-low, price is trapped despite massive volume chunks
+		// 0.15 means the price moved less than 15% of the total rolling window range
+		if math.Abs(cs.bar.Metrics.NormalizedDisplacement) <= 0.15 {
+
+			if cs.bar.Metrics.WickAsymmetry > 0.10 {
+				// Massive volume + No price progress + Heavy lower shadow = BUY ABSORPTION
+				cs.bar.Metrics.AbsorptionSignal = 1
+			} else if cs.bar.Metrics.WickAsymmetry <= -0.10 {
+				// Massive volume + No price progress + Heavy upper wick = SELL ABSORPTION
+				cs.bar.Metrics.AbsorptionSignal = -1
+			}
+		} else {
+			// If displacement breaks out wide, it's a standard high-volume directional anomaly, not absorption
+			if cs.bar.Metrics.NormalizedDisplacement > 0 {
+				cs.bar.Metrics.AnomalyDirection = 1
+			} else {
+				cs.bar.Metrics.AnomalyDirection = -1
+			}
+		}
+
 	}
 
 	// ------------------------------------------------------------------------
@@ -100,32 +176,21 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	// ------------------------------------------------------------------------
 
 	// A1. Volume Z-Score (Absolute Historical Statistical Depth)
-	currentVolZRank := getPercentileRank(tick.Enrichment.VolumeZPercentile)
 	if currentVolZRank > 4 && currentVolZRank > cs.bar.Metrics.PeakVolumeZRank {
 		cs.bar.Metrics.PeakVolumeZRank = currentVolZRank
 	} else if currentVolZRank < 4 && currentVolZRank < cs.bar.Metrics.PeakVolumeZRank {
 		cs.bar.Metrics.PeakVolumeZRank = currentVolZRank
 	}
 
-	// A2. Capture Peak Participation Anomaly Envelope (Horizontal Heatmap Grid)
-	currentVolRank := getPercentileRank(tick.Enrichment.RelativeVolumePercentile)
-	if currentVolRank > 4 && currentVolRank > cs.bar.Metrics.PeakRelativeVolumeRank {
-		cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
-	} else if currentVolRank < 4 && currentVolRank < cs.bar.Metrics.PeakRelativeVolumeRank {
-		cs.bar.Metrics.PeakRelativeVolumeRank = currentVolRank
+	// B. Price
+	currentRangeRank := getPercentileRank(tick.Enrichment.PricePercentile)
+	if currentRangeRank > 4 && currentRangeRank > cs.bar.Metrics.PeakPriceRank {
+		cs.bar.Metrics.PeakPriceRank = currentRangeRank
+	} else if currentRangeRank < 4 && currentRangeRank < cs.bar.Metrics.PeakPriceRank {
+		cs.bar.Metrics.PeakPriceRank = currentRangeRank
 	}
 
-	// B. Range (Realized Response): Prioritize expansions OR range squeeze over baseline
-	currentRangeRank := getPercentileRank(tick.Enrichment.RangePercentile)
-	if currentRangeRank > 4 && currentRangeRank > cs.bar.Metrics.PeakRangeRank {
-		cs.bar.Metrics.PeakRangeRank = currentRangeRank
-	} else if currentRangeRank < 4 && currentRangeRank < cs.bar.Metrics.PeakRangeRank {
-		cs.bar.Metrics.PeakRangeRank = currentRangeRank
-	}
-
-	// C. Ticks (Execution Tempo): Track highest *sustained velocity* within this bar.
-	// Because low ticks aren't a "negative event", we want to capture the highest energy level
-	// achieved during the candle's lifetime (e.g., if the market accelerates to a Burst, the bar remembers it).
+	// C. Ticks
 	currentTickRank := getPercentileRank(tick.Enrichment.TickPercentile)
 	if currentTickRank > cs.bar.Metrics.PeakTickRank {
 		cs.bar.Metrics.PeakTickRank = currentTickRank

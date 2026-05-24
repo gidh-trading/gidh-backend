@@ -110,7 +110,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		RelativeVolume: rVol,
 	}
 
-	volZPct, rVolPct, rangePct, tickPct := "NORMAL", "NORMAL", "NORMAL", "NORMAL"
+	volZPct, rVolPct, pricePct, tickPct := "NORMAL", "NORMAL", "NORMAL", "NORMAL"
 
 	if tokenDna, exists := s.dnaMap[token]; exists {
 		if currBaseline, ok := tokenDna[minuteIndex]; ok {
@@ -137,25 +137,15 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			v97 := (currBaseline.VolumeP97 * weightCurr) + (prevBaseline.VolumeP97 * weightPrev)
 			volZPct = classifyPercentile(liveVolume, v05, v10, v25, v50, v75, v90, v97)
 
-			// 1B. Relative Volume Spacing Percentile
-			rv05 := (currBaseline.RelativeVolumeP05 * weightCurr) + (prevBaseline.RelativeVolumeP05 * weightPrev)
-			rv10 := (currBaseline.RelativeVolumeP10 * weightCurr) + (prevBaseline.RelativeVolumeP10 * weightPrev)
-			rv25 := (currBaseline.RelativeVolumeP25 * weightCurr) + (prevBaseline.RelativeVolumeP25 * weightPrev)
-			rv50 := (currBaseline.RelativeVolumeP50 * weightCurr) + (prevBaseline.RelativeVolumeP50 * weightPrev)
-			rv75 := (currBaseline.RelativeVolumeP75 * weightCurr) + (prevBaseline.RelativeVolumeP75 * weightPrev)
-			rv90 := (currBaseline.RelativeVolumeP90 * weightCurr) + (prevBaseline.RelativeVolumeP90 * weightPrev)
-			rv97 := (currBaseline.RelativeVolumeP97 * weightCurr) + (prevBaseline.RelativeVolumeP97 * weightPrev)
-			rVolPct = classifyPercentile(rVol, rv05, rv10, rv25, rv50, rv75, rv90, rv97)
-
 			// 2. Price Range Spacing Percentile
-			r05 := (currBaseline.RangeP05 * weightCurr) + (prevBaseline.RangeP05 * weightPrev)
-			r10 := (currBaseline.RangeP10 * weightCurr) + (prevBaseline.RangeP10 * weightPrev)
-			r25 := (currBaseline.RangeP25 * weightCurr) + (prevBaseline.RangeP25 * weightPrev)
-			r50 := (currBaseline.RangeP50 * weightCurr) + (prevBaseline.RangeP50 * weightPrev)
-			r75 := (currBaseline.RangeP75 * weightCurr) + (prevBaseline.RangeP75 * weightPrev)
-			r90 := (currBaseline.RangeP90 * weightCurr) + (prevBaseline.RangeP90 * weightPrev)
-			r97 := (currBaseline.RangeP97 * weightCurr) + (prevBaseline.RangeP97 * weightPrev)
-			rangePct = classifyPercentile(realizedRange, r05, r10, r25, r50, r75, r90, r97)
+			p05 := (currBaseline.PriceP05 * weightCurr) + (prevBaseline.PriceP05 * weightPrev)
+			p10 := (currBaseline.PriceP10 * weightCurr) + (prevBaseline.PriceP10 * weightPrev)
+			p25 := (currBaseline.PriceP25 * weightCurr) + (prevBaseline.PriceP25 * weightPrev)
+			p50 := (currBaseline.PriceP50 * weightCurr) + (prevBaseline.PriceP50 * weightPrev)
+			p75 := (currBaseline.PriceP75 * weightCurr) + (prevBaseline.PriceP75 * weightPrev)
+			p90 := (currBaseline.PriceP90 * weightCurr) + (prevBaseline.PriceP90 * weightPrev)
+			p97 := (currBaseline.PriceP97 * weightCurr) + (prevBaseline.PriceP97 * weightPrev)
+			pricePct = classifyPercentile(realizedRange, p05, p10, p25, p50, p75, p90, p97)
 
 			// 3. Tick Count Spacing Percentile
 			tc05 := (currBaseline.TickCountP05 * weightCurr) + (prevBaseline.TickCountP05 * weightPrev)
@@ -171,12 +161,11 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	tick.EnrichmentStr = rVolPct
 	tick.Enrichment = models.EnrichmentState{
-		MinuteIndex:              minuteIndex,
-		VolumeZPercentile:        volZPct,
-		RelativeVolumePercentile: rVolPct,
-		RangePercentile:          rangePct,
-		TickPercentile:           tickPct,
-		Timestamp:                ts,
+		MinuteIndex:       minuteIndex,
+		VolumeZPercentile: volZPct,
+		PricePercentile:   pricePct,
+		TickPercentile:    tickPct,
+		Timestamp:         ts,
 	}
 
 	return nil

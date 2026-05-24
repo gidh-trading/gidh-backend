@@ -19,15 +19,6 @@ type TimeBucketDNA struct {
 	SampleCount     int `json:"sample_count"`
 	TickSampleCount int `json:"tick_sample_count"`
 
-	// Range metrics
-	RangeP05 float64 `json:"range_p05"`
-	RangeP10 float64 `json:"range_p10"`
-	RangeP25 float64 `json:"range_p25"`
-	RangeP50 float64 `json:"range_p50"`
-	RangeP75 float64 `json:"range_p75"`
-	RangeP90 float64 `json:"range_p90"`
-	RangeP97 float64 `json:"range_p97"`
-
 	// Volume metrics
 	VolumeP05  float64 `json:"volume_p05"`
 	VolumeP10  float64 `json:"volume_p10"`
@@ -39,14 +30,14 @@ type TimeBucketDNA struct {
 	VolumeStd  float64 `json:"volume_std"`
 	VolumeMean float64 `json:"volume_mean"`
 
-	// Efficiency metrics
-	EfficiencyP05 float64 `json:"efficiency_p05"`
-	EfficiencyP10 float64 `json:"efficiency_p10"`
-	EfficiencyP25 float64 `json:"efficiency_p25"`
-	EfficiencyP50 float64 `json:"efficiency_p50"`
-	EfficiencyP75 float64 `json:"efficiency_p75"`
-	EfficiencyP90 float64 `json:"efficiency_p90"`
-	EfficiencyP97 float64 `json:"efficiency_p97"`
+	// Price metrics
+	PriceP05 float64 `json:"price_p05"`
+	PriceP10 float64 `json:"price_p10"`
+	PriceP25 float64 `json:"price_p25"`
+	PriceP50 float64 `json:"price_p50"`
+	PriceP75 float64 `json:"price_p75"`
+	PriceP90 float64 `json:"price_p90"`
+	PriceP97 float64 `json:"price_p97"`
 
 	// Tick Count metrics
 	TickCountP05  float64 `json:"tick_count_p05"`
@@ -58,15 +49,4 @@ type TimeBucketDNA struct {
 	TickCountP97  float64 `json:"tick_count_p97"`
 	TickCountStd  float64 `json:"tick_count_std"`
 	TickCountMean float64 `json:"tick_count_mean"`
-
-	// Relative Volume metrics
-	RelativeVolumeP05  float64 `json:"relative_volume_p05"`
-	RelativeVolumeP10  float64 `json:"relative_volume_p10"`
-	RelativeVolumeP25  float64 `json:"relative_volume_p25"`
-	RelativeVolumeP50  float64 `json:"relative_volume_p50"`
-	RelativeVolumeP75  float64 `json:"relative_volume_p75"`
-	RelativeVolumeP90  float64 `json:"relative_volume_p90"`
-	RelativeVolumeP97  float64 `json:"relative_volume_p97"`
-	RelativeVolumeStd  float64 `json:"relative_volume_std"`
-	RelativeVolumeMean float64 `json:"relative_volume_mean"`
 }

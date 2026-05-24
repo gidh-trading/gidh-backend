@@ -3,10 +3,15 @@ package models
 import "time"
 
 type BarMetrics struct {
-	PeakVolumeZRank        int `json:"peak_volume_z_rank"`
-	PeakRelativeVolumeRank int `json:"peak_relative_volume_rank"`
-	PeakRangeRank          int `json:"peak_range_rank"`
-	PeakTickRank           int `json:"peak_tick_rank"`
+	PeakVolumeZRank int `json:"peak_volume_z_rank"`
+	PeakPriceRank   int `json:"peak_price_rank"`
+	PeakTickRank    int `json:"peak_tick_rank"`
+
+	// --- New Production Strategy Metrics ---
+	NormalizedDisplacement float64 `json:"normalized_displacement"`
+	WickAsymmetry          float64 `json:"wick_asymmetry"`
+	AnomalyDirection       int     `json:"anomaly_direction"` // -1 = Sell, 0 = No Anomaly, 1 = Buy
+	AbsorptionSignal       int     `json:"absorption_signal"`
 }
 
 type Bar struct {
