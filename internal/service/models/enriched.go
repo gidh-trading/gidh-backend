@@ -3,19 +3,19 @@ package models
 import "time"
 
 type LiveTelemetry struct {
-	MinuteIndex    int     `json:"minute_index"`
-	RelativeVolume float64 `json:"relative_volume"`
-	RealizedRange  float64 `json:"realized_range"`
-	TickCount      int64   `json:"tick_count"`
+	MinuteIndex      int     `json:"minute_index"`
+	LiveVolume       float64 `json:"live_volume"`
+	LiveDisplacement float64 `json:"live_displacement"` // Replaces RealizedRange (Close - Open)
+	TickCount        int64   `json:"tick_count"`
 }
 
 type EnrichmentState struct {
 	MinuteIndex int `json:"minute_index"`
 
-	// Non-Gaussian Percentile Strings straight from DNA
-	VolumeZPercentile string `json:"volume_z_pct"`
-	PricePercentile   string `json:"price_pct"`
-	TickPercentile    string `json:"tick_pct"`
+	// Non-Gaussian Percentile Strings straight from DNA matching
+	VolumePercentile string `json:"volume_pct"`
+	PricePercentile  string `json:"price_pct"` // Maps to live_displacement
+	TickPercentile   string `json:"tick_pct"`
 
 	Timestamp time.Time `json:"timestamp"`
 }
@@ -29,8 +29,7 @@ type EnrichedTick struct {
 	Telemetry  LiveTelemetry   `json:"telemetry"`
 	Enrichment EnrichmentState `json:"enrichment"`
 
-	MinuteIndex    int    `json:"minute_index"`
-	DNASampleCount int    `json:"dna_sample_count"`
-	EnrichmentStr  string `json:"enrichment_str"` // Still maps to relative volume string for BarManager
-	EnrichedAt     int64  `json:"enriched_at"`
+	MinuteIndex    int   `json:"minute_index"`
+	DNASampleCount int   `json:"dna_sample_count"`
+	EnrichedAt     int64 `json:"enriched_at"`
 }

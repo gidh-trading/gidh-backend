@@ -13,17 +13,17 @@ import (
 )
 
 func main() {
-	// Load environment variables[cite: 3]
+	// Load environment variables
 	if err := env.Load(".env"); err != nil {
 		logger.Warnf("No .env file found: %v", err)
 	}
 
-	// Initialize global configuration and logger[cite: 3]
+	// Initialize global configuration and logger
 	config.Load()
 	logger.Init(config.AppConfig.LogLevel)
 
 	// 1. Create a context that listens for the interrupt signals (Ctrl+C, SIGTERM)
-	// This replaces the manual channel management in your previous version[cite: 3]
+	// This replaces the manual channel management in your previous version
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

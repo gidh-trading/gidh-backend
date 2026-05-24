@@ -10,6 +10,7 @@ import (
 type Pipeline struct {
 	vpStage    *pipeline.VolumeProfileStage
 	enrichment *pipeline.EnrichmentStage
+	analytics  *pipeline.AnalyticsEngine
 	barManager *pipeline.BarManager
 	dbWriter   *writer.DBWriter
 }
@@ -17,12 +18,14 @@ type Pipeline struct {
 func NewPipeline(
 	vpStage *pipeline.VolumeProfileStage,
 	enrichment *pipeline.EnrichmentStage,
+	analytics *pipeline.AnalyticsEngine,
 	barManager *pipeline.BarManager,
 	dbWriter *writer.DBWriter,
 ) *Pipeline {
 	return &Pipeline{
 		vpStage:    vpStage,
 		enrichment: enrichment,
+		analytics:  analytics,
 		barManager: barManager,
 		dbWriter:   dbWriter,
 	}
@@ -54,9 +57,15 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 4. BAR MANAGER AGGREGATION LAYER (Handles timeframes and aggregates anomalies)
+	// 4. ANALYTICS STAGE (Run Analytics to create the Snapshot using enriched metrics)
+	var snapshot models.AnomalySnapshot
+	if p.analytics != nil {
+		snapshot = p.analytics.Analyze(enrichedTick)
+	}
+
+	// 5. BAR MANAGER AGGREGATION LAYER (Handles timeframes and aggregates anomalies)
 	if p.barManager != nil {
-		if err := p.barManager.Process(enrichedTick); err != nil {
+		if err := p.barManager.Process(enrichedTick, snapshot); err != nil { // ◄ Fixed
 			logger.Errorf("Pipeline Error: Failed to process bar accumulation: %v", err)
 		}
 	}

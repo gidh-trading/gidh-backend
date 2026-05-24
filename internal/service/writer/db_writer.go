@@ -312,31 +312,42 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 		pgx.Identifier{"gidh_bars"},
 		[]string{
 			"timestamp", "instrument_token", "stock_name", "timeframe",
-			"open", "high", "low", "close", "volume", "tick_count", "metrics",
+			"open", "high", "low", "close", "volume", "tick_count",
 			"vwap", "poc", "vah", "val", "total_buy_qty", "total_sell_qty", "change_pct",
+			"peaks", "significant_events",
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
 
-			// Marshal nested microstructural values block cleanly
-			metricsJSON, err := json.Marshal(b.Metrics)
+			// 1. Marshal the type-safe Peaks struct into a JSON byte stream string
+			peaksJSON, err := json.Marshal(b.Peaks)
 			if err != nil {
-				logger.Errorf("Failed to marshal metrics properties sub-block for %s: %v", b.StockName, err)
-				metricsJSON = []byte(`{"range_percentile":"NORMAL","efficiency":0.0}`)
+				logger.Errorf("Failed to marshal peaks metrics block for %s: %v", b.StockName, err)
+				peaksJSON = []byte("{}") // Fallback safe empty object boundary
 			}
 
+			// 2. Marshal the SignificantEvents slice into a JSON byte stream string
+			eventsJSON, err := json.Marshal(b.SignificantEvents)
+			if err != nil {
+				logger.Errorf("Failed to marshal significant events log array for %s: %v", b.StockName, err)
+				eventsJSON = []byte("[]") // Fallback safe empty array boundary
+			}
+
+			// Return values in the precise column indexing sequence declared above
 			return []any{
 				b.Timestamp, b.InstrumentToken, b.StockName, b.Timeframe,
-				b.Open, b.High, b.Low, b.Close, b.Volume, b.TickCount, metricsJSON, // Ordered matching column mapping
+				b.Open, b.High, b.Low, b.Close, b.Volume, b.TickCount,
 				b.VWAP, b.POC, b.VAH, b.VAL, b.TotalBuyQty, b.TotalSellQty, b.ChangePct,
+				string(peaksJSON),  // Mapping to "peaks" JSONB
+				string(eventsJSON), // Mapping to "significant_events" JSONB
 			}, nil
 		}),
 	)
 
 	if err != nil {
-		logger.Errorf("Failed to insert bars: %v", err)
+		logger.Errorf("Failed to bulk insert bars batch: %v", err)
 	} else {
-		logger.Debugf("Inserted %d closed bars with split structural variables (background)", copyCount)
+		logger.Debugf("Successfully inserted %d closed bars via CopyFrom (background)", copyCount)
 	}
 }
 

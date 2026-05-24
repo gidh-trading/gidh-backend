@@ -2,16 +2,22 @@ package models
 
 import "time"
 
-type BarMetrics struct {
-	PeakVolumeZRank int `json:"peak_volume_z_rank"`
-	PeakPriceRank   int `json:"peak_price_rank"`
-	PeakTickRank    int `json:"peak_tick_rank"`
+type AnomalySnapshot struct {
+	Timestamp  time.Time   `json:"ts"`
+	Type       AnomalyType `json:"type"` //
+	Direction  int         `json:"dir"`  // -1 = Sell, 1 = Buy
+	VolumeRank int         `json:"vol_rank"`
+	PriceRank  int         `json:"price_rank"`
+}
 
-	// --- New Production Strategy Metrics ---
-	NormalizedDisplacement float64 `json:"normalized_displacement"`
-	WickAsymmetry          float64 `json:"wick_asymmetry"`
-	AnomalyDirection       int     `json:"anomaly_direction"` // -1 = Sell, 0 = No Anomaly, 1 = Buy
-	AbsorptionSignal       int     `json:"absorption_signal"`
+// PeakAnomalyMetrics remains a strict Go struct for compiler safety,
+// but serializes out as a flat JSON dictionary object for database/sockets.
+type PeakAnomalyMetrics struct {
+	PeakVolumeRank      int `json:"peak_volume_rank"`
+	PeakPriceRank       int `json:"peak_price_rank"`
+	PeakTickRank        int `json:"peak_tick_rank"`
+	MaxAnomalyDirection int `json:"max_anomaly_direction"`
+	MaxAbsorptionSignal int `json:"max_absorption_signal"`
 }
 
 type Bar struct {
@@ -20,7 +26,7 @@ type Bar struct {
 	StockName       string    `json:"stock_name"`
 	Timeframe       string    `json:"timeframe"`
 
-	// ---- OHLC ----
+	// ---- Pure OHLC ----
 	Open  float64 `json:"open"`
 	High  float64 `json:"high"`
 	Low   float64 `json:"low"`
@@ -29,22 +35,19 @@ type Bar struct {
 	// ---- Aggregated Quantities ----
 	Volume    float64 `json:"volume"`
 	TickCount int64   `json:"tick_count"`
-
-	// ---- Dynamic Metrics Block ----
-	Metrics BarMetrics `json:"metrics"`
+	VWAP      float64 `json:"vwap"`
 
 	// ---- Auction Framework Elements ----
-	VWAP float64 `json:"vwap"`
-	POC  float64 `json:"poc"`
-	VAH  float64 `json:"vah"`
-	VAL  float64 `json:"val"`
+	POC float64 `json:"poc"`
+	VAH float64 `json:"vah"`
+	VAL float64 `json:"val"`
 
-	TotalBuyQty  float64 `json:"total_buy_qty"`
-	TotalSellQty float64 `json:"total_sell_qty"`
-	ChangePct    float64 `json:"change_pct"`
+	// ---- Dynamic Structural Strategy Blocks ----
+	Peaks             PeakAnomalyMetrics `json:"peaks"`
+	SignificantEvents []AnomalySnapshot  `json:"significant_events,omitempty"`
 
-	// ---- UI Only Local State ----
-	UnrealizedPnL float64 `json:"unrealized_pnl"`
-
-	Ticks []TickData `json:"-"`
+	TotalBuyQty  float64    `json:"total_buy_qty"`
+	TotalSellQty float64    `json:"total_sell_qty"`
+	ChangePct    float64    `json:"change_pct"`
+	Ticks        []TickData `json:"-"`
 }

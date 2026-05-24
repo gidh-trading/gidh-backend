@@ -35,7 +35,8 @@ func NewBarManager(w *writer.DBWriter, hub *ws.Hub) *BarManager {
 	}
 }
 
-func (bm *BarManager) Process(tick *models.EnrichedTick) error {
+// Process handles incoming ticks along with pre-calculated analytical snapshots
+func (bm *BarManager) Process(tick *models.EnrichedTick, analysis models.AnomalySnapshot) error {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
 
@@ -45,6 +46,7 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	ts := tick.Raw.Timestamp.In(bm.loc)
 	name := tick.Raw.StockName
 
+	// Initialize states if they don't exist for the token
 	if bm.state1m[token] == nil {
 		bm.state1m[token] = newCandleState(ts.Truncate(time.Minute), price, token, name, "1m")
 	}
@@ -61,11 +63,12 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 		bm.state15m[token] = newCandleState(ts.Truncate(15*time.Minute), price, token, name, "15m")
 	}
 
-	bm.updateTimeframe(bm.state1m, token, ts, price, vol, time.Minute, "1m", tick)
-	bm.updateTimeframe(bm.state3m, token, ts, price, vol, 3*time.Minute, "3m", tick)
-	bm.updateTimeframe(bm.state5m, token, ts, price, vol, 5*time.Minute, "5m", tick)
-	bm.updateTimeframe(bm.state10m, token, ts, price, vol, 10*time.Minute, "10m", tick)
-	bm.updateTimeframe(bm.state15m, token, ts, price, vol, 15*time.Minute, "15m", tick)
+	// Route tracking to individual timeframes
+	bm.updateTimeframe(bm.state1m, token, ts, price, vol, time.Minute, "1m", tick, analysis)
+	bm.updateTimeframe(bm.state3m, token, ts, price, vol, 3*time.Minute, "3m", tick, analysis)
+	bm.updateTimeframe(bm.state5m, token, ts, price, vol, 5*time.Minute, "5m", tick, analysis)
+	bm.updateTimeframe(bm.state10m, token, ts, price, vol, 10*time.Minute, "10m", tick, analysis)
+	bm.updateTimeframe(bm.state15m, token, ts, price, vol, 15*time.Minute, "15m", tick, analysis)
 
 	// Tick-by-Tick Continuous Broadcasting to WebSockets
 	if bm.wsHub != nil {
@@ -93,6 +96,7 @@ func (bm *BarManager) updateTimeframe(
 	duration time.Duration,
 	timeframe string,
 	tick *models.EnrichedTick,
+	analysis models.AnomalySnapshot,
 ) {
 	cs := stateMap[token]
 	candleStart := ts.Truncate(duration)
@@ -114,5 +118,15 @@ func (bm *BarManager) updateTimeframe(
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
 	}
 
-	bm.processTickForCandle(cs, tick, vol, timeframe)
+	bm.processTickForCandle(cs, tick, vol, timeframe, analysis)
+}
+
+func (bm *BarManager) ClearState() {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+	bm.state1m = make(map[uint32]*candleState)
+	bm.state3m = make(map[uint32]*candleState)
+	bm.state5m = make(map[uint32]*candleState)
+	bm.state10m = make(map[uint32]*candleState)
+	bm.state15m = make(map[uint32]*candleState)
 }
