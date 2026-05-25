@@ -173,6 +173,23 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 
 			delete(lm.ocoLinks, o.OrderID)
 		} else if o.Status == kiteconnect.OrderStatusCancelled || o.Status == kiteconnect.OrderStatusRejected {
+
+			// 🔴 ADD THIS POSITION MEMORY CLEANUP HERE FOR EXTERNAL APP CANCELLATIONS:
+			key := fmt.Sprintf("%s:%s", o.TradingSymbol, o.Product)
+			if pos, exists := lm.activePositions[key]; exists {
+				if pos.TargetOrderID == o.OrderID {
+					pos.TargetOrderID = ""
+					pos.TargetPrice = 0
+				} else if pos.StopLossOrderID == o.OrderID {
+					pos.StopLossOrderID = ""
+					pos.StopLossPrice = 0
+				}
+				if lm.dbWriter != nil {
+					lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+				}
+				lm.broadcastPositionUpdate(pos)
+			}
+
 			delete(lm.ocoLinks, o.OrderID)
 		}
 		return
@@ -404,12 +421,29 @@ func (lm *LiveOrderManager) ModifyOrder(orderID string, newPrice, newTP, newSL f
 		return fmt.Errorf("failed to modify order on exchange: %v", err)
 	}
 
-	// Update intent tracker if it exists
+	// 1. Update intent tracker if it exists
 	if req, ok := lm.orderTracker[orderID]; ok {
 		req.Price = newPrice
 		req.TargetPrice = newTP
 		req.StopLossPrice = newSL
 		req.UserEmail = userEmail
+	}
+
+	// 2. CRITICAL FIX: Reconcile active position fields immediately so the Active Position Card updates
+	for _, pos := range lm.activePositions {
+		if pos.TargetOrderID == orderID {
+			pos.TargetPrice = newPrice // In a target limit leg, the order price is your TP target
+			if lm.dbWriter != nil {
+				lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+			}
+			lm.broadcastPositionUpdate(pos)
+		} else if pos.StopLossOrderID == orderID {
+			pos.StopLossPrice = newPrice // In an SL leg, the order price/trigger price is your SL target
+			if lm.dbWriter != nil {
+				lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+			}
+			lm.broadcastPositionUpdate(pos)
+		}
 	}
 
 	return nil
@@ -425,7 +459,28 @@ func (lm *LiveOrderManager) CancelOrder(orderID string, userEmail string) error 
 		return fmt.Errorf("failed to cancel order on exchange: %v", err)
 	}
 
-	// 2. Update the local order book state immediately
+	// 2. CRITICAL FIX: Clean up parent position parameters if an exit leg was manually cancelled
+	for _, pos := range lm.activePositions {
+		if pos.TargetOrderID == orderID {
+			pos.TargetOrderID = ""
+			pos.TargetPrice = 0 // Wipe target pricing so UI shows "—"
+			if lm.dbWriter != nil {
+				lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+			}
+			lm.broadcastPositionUpdate(pos)
+			delete(lm.ocoLinks, orderID)
+		} else if pos.StopLossOrderID == orderID {
+			pos.StopLossOrderID = ""
+			pos.StopLossPrice = 0 // Wipe stop loss pricing so UI shows "—"
+			if lm.dbWriter != nil {
+				lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+			}
+			lm.broadcastPositionUpdate(pos)
+			delete(lm.ocoLinks, orderID)
+		}
+	}
+
+	// 3. Update the local order book state immediately
 	for i, o := range lm.orderBook {
 		if o.OrderID == orderID {
 			lm.orderBook[i].Status = "CANCELLED"
@@ -435,7 +490,7 @@ func (lm *LiveOrderManager) CancelOrder(orderID string, userEmail string) error 
 				lm.dbWriter.PersistOrder(lm.orderBook[i])
 			}
 			lm.broadcastOrderUpdate(lm.orderBook[i])
-			return nil // 👈 WAKES OUT EARLY! Wipes out your chance to clean up the parent position mapping!
+			return nil
 		}
 	}
 	return fmt.Errorf("order not found locally")
@@ -614,7 +669,7 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 	status := o.Status
 
 	// Map Kite string statuses directly to internal UI statuses
-	if status == "OPEN" || status == "TRIGGER PENDING" {
+	if status == "OPEN" || status == "TRIGGER PENDING" || status == "UPDATE" || status == "PUT ORDER REQ RECEIVED" || status == "VALIDATION PENDING" {
 		status = "PENDING"
 	}
 
