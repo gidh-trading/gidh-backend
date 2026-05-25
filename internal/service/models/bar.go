@@ -12,14 +12,14 @@ type AnomalySnapshot struct {
 }
 
 type AbsorptionLevel struct {
-	Price     float64 `json:"price"`
-	Direction int     `json:"dir"`      // 1 = Support (Buy Absorption), -1 = Resistance (Sell Absorption)
-	Strength  int     `json:"strength"` // Volume rank intensity (6 or 7)
-	IsActive  bool    `json:"is_active"`
+	Price             float64 `json:"price"` // The original point of passive validation (Equilibrium)
+	Direction         int     `json:"dir"`   // 1 = Support (Passive Buy), -1 = Resistance (Passive Sell)
+	Strength          int     `json:"strength"`
+	IsActive          bool    `json:"is_active"`
+	TearBoundary      float64 `json:"tear_boundary"`       // Absolute physical price boundary where membrane fails
+	MaxStretchedPrice float64 `json:"max_stretched_price"` // Records deep testing extensions for chart analysis
 }
 
-// PeakAnomalyMetrics remains a strict Go struct for compiler safety,
-// but serializes out as a flat JSON dictionary object for database/sockets.
 type PeakAnomalyMetrics struct {
 	PeakVolumeRank      int               `json:"peak_volume_rank"`
 	PeakPriceRank       int               `json:"peak_price_rank"`

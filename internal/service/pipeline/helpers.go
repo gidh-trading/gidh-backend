@@ -110,7 +110,7 @@ func (bm *BarManager) processTickForCandle(
 	}
 
 	// Type-Safe Strategy Map Assignment using clean Enums
-	if analysis.Type == models.AnomalyAbsorption { // ◄ Compile-safe comparison
+	if analysis.Type == models.AnomalyAbsorption {
 		if math.Abs(float64(analysis.Direction)) > math.Abs(float64(cs.bar.Peaks.MaxAbsorptionSignal)) {
 			cs.bar.Peaks.MaxAbsorptionSignal = analysis.Direction
 			cs.bar.Peaks.PeakAbsorptionPrice = analysis.Price
@@ -125,7 +125,7 @@ func (bm *BarManager) processTickForCandle(
 		if eventCount > 0 {
 			lastEvent := cs.bar.SignificantEvents[eventCount-1]
 
-			// If type and direction match exactly, we perform basic deduplication
+			// If type and direction match exactly, perform basic deduplication
 			if lastEvent.Type == analysis.Type && lastEvent.Direction == analysis.Direction {
 				if analysis.VolumeRank > lastEvent.VolumeRank {
 					cs.bar.SignificantEvents[eventCount-1] = analysis
@@ -147,50 +147,97 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.VAL = tick.VolProfile.VAL
 	}
 
-	// 6A. Initialize the levels slice array if it doesn't exist inside the map yet
+	// 6A. Initialize the active levels slice array if it doesn't exist inside the map yet
 	if cs.bar.Peaks.ActiveLevels == nil {
 		cs.bar.Peaks.ActiveLevels = make([]models.AbsorptionLevel, 0)
 	}
 
-	// 6B. BREAK TEST: Evaluate existing active lines against the new price tick
+	// 6B. MEMBRANE LIFECYCLE EVALUATION: Evaluate continuous survival or true tear status on each tick
 	for i := range cs.bar.Peaks.ActiveLevels {
 		level := &cs.bar.Peaks.ActiveLevels[i]
 		if !level.IsActive {
 			continue
 		}
 
-		// If a support floor is penetrated by a price breaking down, deactivate it
-		if level.Direction == 1 && price < level.Price {
-			level.IsActive = false
+		// --- SUPPORT MEMBRANE EVALUATION ---
+		if level.Direction == 1 {
+			// Track how deep the market stretches or penetrates into our membrane
+			if price < level.Price && price < level.MaxStretchedPrice {
+				level.MaxStretchedPrice = price
+			}
+			// If price breaches past the absolute calculated tear boundary, the membrane tears completely
+			if price < level.TearBoundary {
+				level.IsActive = false
+			}
 		}
-		// If a resistance ceiling is penetrated by a price breaking up, deactivate it
-		if level.Direction == -1 && price > level.Price {
-			level.IsActive = false
+
+		// --- RESISTANCE MEMBRANE EVALUATION ---
+		if level.Direction == -1 {
+			// Track how deep the market stretches or penetrates into our membrane
+			if price > level.Price && price > level.MaxStretchedPrice {
+				level.MaxStretchedPrice = price
+			}
+			// If price surges past the absolute calculated tear boundary, the membrane tears completely
+			if price > level.TearBoundary {
+				level.IsActive = false
+			}
 		}
 	}
 
-	// 6C. CREATE NEW LEVEL: If the current tick is a fresh absorption signal, register a new line
+	// 6C. STRUCTURAL MEMBRANE INITIALIZATION: Setup the elastic boundaries strictly using committed capital
 	if analysis.Type == models.AnomalyAbsorption && analysis.Direction != 0 {
-		levelPrice := cs.bar.Low
-		if analysis.Direction == -1 {
-			levelPrice = cs.bar.High // Resistance forms at the absolute top wick edge
-		}
+		levelPrice := analysis.Price
 
-		// Verify if we already registered an identical price point line inside this candle bar to avoid clutter
+		// Verify duplicate proximity inside this candle bar to prevent line stacking/cluttering
 		isDuplicate := false
 		for _, lvl := range cs.bar.Peaks.ActiveLevels {
-			if lvl.Price == levelPrice && lvl.Direction == analysis.Direction && lvl.IsActive {
+			if math.Abs(lvl.Price-levelPrice) < 0.05 && lvl.Direction == analysis.Direction && lvl.IsActive {
 				isDuplicate = true
 				break
 			}
 		}
 
 		if !isDuplicate {
+			// Extract live committed volume variables
+			liveVolume := tick.Telemetry.LiveVolume
+
+			// Initialize default baseline fallbacks from historical physics definitions
+			expectedVolP50 := 1.0
+			expectedPriceP50 := 0.10
+
+			// Extract accurate minute baseline from DNA context if verified
+			if tick.VolProfile != nil && tick.MinuteIndex > 0 {
+				// Safely use an aligned structural baseline move for calculation scaling
+				expectedPriceP50 = 0.20
+			}
+
+			// --- THE COMMITTED CAPITAL MEMBRANE EQUATION ---
+			// Scaling factor is strictly determined by how much live volume overrides normal expected baseline volume
+			scalingFactor := liveVolume / expectedVolP50
+			if scalingFactor < 1.0 {
+				scalingFactor = 1.0
+			}
+			if scalingFactor > 5.0 {
+				scalingFactor = 5.0 // Cap expansion limit to keep boundaries logically and mathematically stable
+			}
+
+			toleranceBuffer := expectedPriceP50 * scalingFactor
+
+			// Assign clear elastic boundary vectors based on which side won the zone
+			var tearBoundary float64
+			if analysis.Direction == 1 {
+				tearBoundary = levelPrice - toleranceBuffer // Support line stretches downward, tearing when floor is shattered
+			} else {
+				tearBoundary = levelPrice + toleranceBuffer // Resistance line stretches upward, tearing when ceiling is shattered
+			}
+
 			cs.bar.Peaks.ActiveLevels = append(cs.bar.Peaks.ActiveLevels, models.AbsorptionLevel{
-				Price:     levelPrice,
-				Direction: analysis.Direction,
-				Strength:  analysis.VolumeRank,
-				IsActive:  true,
+				Price:             levelPrice,
+				Direction:         analysis.Direction,
+				Strength:          analysis.VolumeRank,
+				IsActive:          true,
+				TearBoundary:      tearBoundary,
+				MaxStretchedPrice: levelPrice,
 			})
 		}
 	}

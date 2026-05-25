@@ -3,18 +3,50 @@ package pipeline
 import (
 	"gidh-backend/internal/service/models"
 	"math"
+	"sync"
 )
 
-type AnalyticsEngine struct{}
+type LevelState int
+
+const (
+	StateIdle LevelState = iota
+	StateTesting
+)
+
+type PendingBattlefield struct {
+	State        LevelState
+	PriceFloor   float64 // Original window bottom
+	PriceCeiling float64 // Original window top
+	VolumeRank   int
+	Direction    int // Initial aggressive push direction (-1 = Aggressive Sellers, 1 = Aggressive Buyers)
+}
+
+type AnalyticsEngine struct {
+	mu             sync.Mutex
+	pendingBattles map[uint32]*PendingBattlefield
+}
 
 func NewAnalyticsEngine() *AnalyticsEngine {
-	return &AnalyticsEngine{}
+	return &AnalyticsEngine{
+		pendingBattles: make(map[uint32]*PendingBattlefield),
+	}
 }
 
 func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick, rOpen, rHigh, rLow, rClose float64) models.AnomalySnapshot {
+	ae.mu.Lock()
+	defer ae.mu.Unlock()
+
+	token := tick.Raw.InstrumentToken
 	volRank := getPercentileRank(tick.Enrichment.VolumePercentile)
 	priceRank := getPercentileRank(tick.Enrichment.PricePercentile)
 	netDisplacement := tick.Telemetry.LiveDisplacement
+	currentPrice := tick.Raw.LastPrice
+
+	battle, exists := ae.pendingBattles[token]
+	if !exists {
+		battle = &PendingBattlefield{State: StateIdle}
+		ae.pendingBattles[token] = battle
+	}
 
 	snapshot := models.AnomalySnapshot{
 		Timestamp:  tick.Enrichment.Timestamp,
@@ -22,43 +54,75 @@ func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick, rOpen, rHigh, rLow
 		Direction:  0,
 		VolumeRank: volRank,
 		PriceRank:  priceRank,
-		Price:      tick.Raw.LastPrice,
+		Price:      currentPrice,
 	}
 
-	if volRank >= 6 {
-		// 1. Set default breakout behavior based on net 60s direction
-		snapshot.Type = models.AnomalyVolumeBurst
-		if netDisplacement > 0 {
-			snapshot.Direction = 1
-		} else if netDisplacement < 0 {
-			snapshot.Direction = -1
+	// --- PHASE 1: IDLE STATE ---
+	if battle.State == StateIdle {
+		if volRank >= 6 { // Extreme Volume Spike (>= P90)
+			battle.State = StateTesting
+			battle.PriceFloor = rLow
+			battle.PriceCeiling = rHigh
+			battle.VolumeRank = volRank
+
+			if netDisplacement > 0 {
+				battle.Direction = 1 // Aggressive Buyers trying to expand price
+			} else {
+				battle.Direction = -1 // Aggressive Sellers trying to compress price
+			}
+
+			snapshot.Type = models.AnomalyVolumeBurst
+			snapshot.Direction = battle.Direction
+			return snapshot
+		}
+		return snapshot
+	}
+
+	// --- PHASE 2: TESTING STATE (Continuous structural wick verification) ---
+	if battle.State == StateTesting {
+		totalRange := rHigh - rLow
+		if totalRange <= 0 {
+			return snapshot
 		}
 
-		// 2. Compute the Rolling Structural Proportions
-		totalRange := rHigh - rLow
-		if totalRange > 0 {
-			// Calculate how close the current price is to the absolute top/bottom of the 60s window
-			upperWickPct := (rHigh - math.Max(rOpen, rClose)) / totalRange
-			lowerWickPct := (math.Min(rOpen, rClose) - rLow) / totalRange
+		upperWickPct := (rHigh - math.Max(rOpen, rClose)) / totalRange
+		lowerWickPct := (math.Min(rOpen, rClose) - rLow) / totalRange
 
-			// Look for low price progress relative to the volume being expended:
-			// Condition A: Classic Low Displacement (Price Rank 1-3)
-			isStalled := priceRank <= 3
-
-			// Condition B: Structural Exhaustion (High Volume, High Range, but significant pull-back)
-			// Sellers tried to smash the price down (creating a lower wick), but buyers caught it all.
-			isLowerRejection := lowerWickPct >= 0.40 && netDisplacement <= 0
-			// Buyers tried to push the price up (creating an upper wick), but sellers blocked it.
-			isUpperRejection := upperWickPct >= 0.40 && netDisplacement >= 0
-
-			if isStalled || isLowerRejection || isUpperRejection {
+		// Case A: Initial push was an aggressive buy. We watch for Passive Sellers to win.
+		if battle.Direction == 1 {
+			// If a significant upper wick rejection forms, or price stalls completely out
+			if upperWickPct >= 0.45 || (priceRank <= 3 && currentPrice < battle.PriceCeiling) {
 				snapshot.Type = models.AnomalyAbsorption
+				snapshot.Direction = -1 // Passive Sellers Won (Resistance Level Established)
+				snapshot.VolumeRank = battle.VolumeRank
+				snapshot.Price = battle.PriceCeiling // The level is mapped exactly to the ceiling edge
 
-				if isLowerRejection || (isStalled && netDisplacement >= 0) {
-					snapshot.Direction = 1 // Buy Absorption (Passive buyers catching liquid supply)
-				} else if isUpperRejection || (isStalled && netDisplacement < 0) {
-					snapshot.Direction = -1 // Sell Absorption (Passive sellers capping liquid demand)
-				}
+				battle.State = StateIdle // Reset tracking loop
+				return snapshot
+			}
+
+			// If buyers smoothly continue past the ceiling with low friction, drop tracking seamlessly
+			if currentPrice > battle.PriceCeiling && upperWickPct < 0.15 {
+				battle.State = StateIdle
+			}
+		}
+
+		// Case B: Initial push was an aggressive sell. We watch for Passive Buyers to win.
+		if battle.Direction == -1 {
+			// If a significant lower wick rejection forms, or price stalls completely out
+			if lowerWickPct >= 0.45 || (priceRank <= 3 && currentPrice > battle.PriceFloor) {
+				snapshot.Type = models.AnomalyAbsorption
+				snapshot.Direction = 1 // Passive Buyers Won (Support Level Established)
+				snapshot.VolumeRank = battle.VolumeRank
+				snapshot.Price = battle.PriceFloor // The level is mapped exactly to the floor edge
+
+				battle.State = StateIdle // Reset tracking loop
+				return snapshot
+			}
+
+			// If sellers smoothly breakdown past the floor with low friction, drop tracking seamlessly
+			if currentPrice < battle.PriceFloor && lowerWickPct < 0.15 {
+				battle.State = StateIdle
 			}
 		}
 	}
