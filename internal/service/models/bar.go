@@ -2,30 +2,6 @@ package models
 
 import "time"
 
-type AnomalySnapshot struct {
-	Timestamp  time.Time   `json:"ts"`
-	Type       AnomalyType `json:"type"` //
-	Direction  int         `json:"dir"`  // -1 = Sell, 1 = Buy
-	VolumeRank int         `json:"vol_rank"`
-	PriceRank  int         `json:"price_rank"`
-	Price      float64     `json:"price"`
-}
-
-type AbsorptionLevel struct {
-	Price             float64 `json:"price"` // The original point of passive validation (Equilibrium)
-	Direction         int     `json:"dir"`   // 1 = Support (Passive Buy), -1 = Resistance (Passive Sell)
-	Strength          int     `json:"strength"`
-	IsActive          bool    `json:"is_active"`
-	TearBoundary      float64 `json:"tear_boundary"`       // Absolute physical price boundary where membrane fails
-	MaxStretchedPrice float64 `json:"max_stretched_price"` // Records deep testing extensions for chart analysis
-}
-
-type PeakAnomalyMetrics struct {
-	PeakVolumeRank int `json:"peak_volume_rank"`
-	PeakPriceRank  int `json:"peak_price_rank"`
-	PeakTickRank   int `json:"peak_tick_rank"`
-}
-
 type Bar struct {
 	Timestamp       time.Time `json:"timestamp"`
 	InstrumentToken int32     `json:"instrument_token"`

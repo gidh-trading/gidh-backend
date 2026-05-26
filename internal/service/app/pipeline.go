@@ -58,15 +58,13 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 	}
 
 	// 4. ANALYTICS STAGE (Evaluates the instantaneous pure Volume Burst Threshold)
-	var snapshot models.AnomalySnapshot
 	if p.analytics != nil {
-		// Cleaned: AnalyticsEngine queries lookback context vectors internally from Enrichment Stage
-		snapshot = p.analytics.Analyze(enrichedTick)
+		p.analytics.Analyze(enrichedTick)
 	}
 
 	// 5. BAR MANAGER AGGREGATION LAYER (Handles timeframes and records peak ranks)
 	if p.barManager != nil {
-		if err := p.barManager.Process(enrichedTick, snapshot); err != nil {
+		if err := p.barManager.Process(enrichedTick); err != nil {
 			logger.Errorf("Pipeline Error: Failed to process bar accumulation: %v", err)
 		}
 	}

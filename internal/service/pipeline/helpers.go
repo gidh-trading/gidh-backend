@@ -34,7 +34,6 @@ func (bm *BarManager) processTickForCandle(
 	tick *models.EnrichedTick,
 	vol float64,
 	timeframe string,
-	analysis models.AnomalySnapshot,
 ) {
 	price := tick.Raw.LastPrice
 

@@ -152,7 +152,7 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 
 func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, profilesMap map[uint32]*models.InstrumentProfile) error {
 
-	// 1. Build the maps FIRST
+	// 1. Build the fast structural maps for historical parameters
 	advMap := make(map[uint32]float64)
 	bucketSizeMap := make(map[uint32]float64)
 
@@ -161,7 +161,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		bucketSizeMap[token] = prof.BucketSize
 	}
 
-	// 2. Pass the map into the Volume Profile Stage
+	// 2. Initialize the Volume Profile Stage (it maps wsHub internally for its independent broadcasts)
 	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, bucketSizeMap, a.pool, a.wsHub)
 
 	if a.Config.Mode == "live" {
@@ -170,13 +170,20 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
-	// 3. Continue initializing the rest of the pipeline
+	// 3. Initialize the Enrichment Stage mapping positional metrics
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, dnaMap)
-	analyticsEngine := pipeline.NewAnalyticsEngine()
+
+	// 4. THE SELF-CONTAINED INJECTION: Pass both DBWriter and wsHub right into the AnalyticsEngine
+	// This enables the engine to handle its own asset-scoped streaming and async TimescaleDB hypertable persistence.
+	analyticsEngine := pipeline.NewAnalyticsEngine(dnaMap, a.DBWriter, a.wsHub)
+
+	// 5. Initialize the decoupled Bar Manager
 	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub)
 
+	// 6. Assemble the streamlined Execution Pipeline Stage
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, analyticsEngine, barManager, a.DBWriter)
 	a.activePipe = a.Pipeline
+
 	return nil
 }
 
