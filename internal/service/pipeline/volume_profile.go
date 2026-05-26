@@ -126,8 +126,6 @@ func (h *VolumeProfileStage) Process(tick *models.EnrichedTick) error {
 		VAL: p.VAL,
 	}
 
-	tick.FullVolProfile = p.Copy()
-
 	// 6. Persistence: Archive to DB strictly every 20 ticks
 	if p.TickCount%20 == 0 {
 		h.syncAllBucketsToNodes(p)

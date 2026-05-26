@@ -48,10 +48,6 @@ type Bar struct {
 	VAH float64 `json:"vah"`
 	VAL float64 `json:"val"`
 
-	// ---- Dynamic Structural Strategy Blocks ----
-	Peaks             PeakAnomalyMetrics `json:"peaks"`
-	SignificantEvents []AnomalySnapshot  `json:"significant_events,omitempty"`
-
 	TotalBuyQty  float64    `json:"total_buy_qty"`
 	TotalSellQty float64    `json:"total_sell_qty"`
 	ChangePct    float64    `json:"change_pct"`

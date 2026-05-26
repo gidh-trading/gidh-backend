@@ -26,13 +26,6 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 		High:            price,
 		Low:             price,
 		Close:           price,
-		// Initialize the structural peak tracking with default balanced baselines (Rank 4)
-		Peaks: models.PeakAnomalyMetrics{
-			PeakVolumeRank: 4,
-			PeakPriceRank:  4,
-			PeakTickRank:   4,
-		},
-		SignificantEvents: make([]models.AnomalySnapshot, 0),
 	}
 }
 
@@ -66,45 +59,7 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.ChangePct = (tick.Raw.Change / prevClose) * 100
 	}
 
-	// 3. PEAK HISTORICAL INTENSITY EVALUATION
-	currentVolRank := getPercentileRank(tick.Enrichment.VolumePercentile)
-	currentPriceRank := getPercentileRank(tick.Enrichment.PricePercentile)
-	currentTickRank := getPercentileRank(tick.Enrichment.TickPercentile)
-
-	if currentVolRank > cs.bar.Peaks.PeakVolumeRank {
-		cs.bar.Peaks.PeakVolumeRank = currentVolRank
-	}
-	if currentPriceRank > cs.bar.Peaks.PeakPriceRank {
-		cs.bar.Peaks.PeakPriceRank = currentPriceRank
-	}
-	if currentTickRank > cs.bar.Peaks.PeakTickRank {
-		cs.bar.Peaks.PeakTickRank = currentTickRank
-	}
-
-	// 4. SIGNIFICANT EVENT LOGGER (With Enum State-Transition Deduplication)
-	if analysis.Type != models.AnomalyNone && analysis.Direction != 0 {
-		shouldAppend := true
-		eventCount := len(cs.bar.SignificantEvents)
-
-		if eventCount > 0 {
-			lastEvent := cs.bar.SignificantEvents[eventCount-1]
-
-			// If type and direction match exactly, perform basic deduplication
-			if lastEvent.Type == analysis.Type && lastEvent.Direction == analysis.Direction {
-				if analysis.VolumeRank > lastEvent.VolumeRank {
-					cs.bar.SignificantEvents[eventCount-1] = analysis
-					cs.bar.SignificantEvents[eventCount-1].Price = analysis.Price
-				}
-				shouldAppend = false
-			}
-		}
-
-		if shouldAppend && eventCount < 10 {
-			cs.bar.SignificantEvents = append(cs.bar.SignificantEvents, analysis)
-		}
-	}
-
-	// 5. Market Auction Framework Profile Allocation
+	// 3. Market Auction Framework Profile Allocation
 	if tick.VolProfile != nil {
 		cs.bar.POC = tick.VolProfile.POC
 		cs.bar.VAH = tick.VolProfile.VAH

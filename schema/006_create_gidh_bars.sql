@@ -15,10 +15,6 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     volume           DOUBLE PRECISION NOT NULL DEFAULT 0,
     tick_count       INTEGER          NOT NULL DEFAULT 0,
 
-    -- Dynamic Strategy Elements (Type-Safe JSONB Documents)
-    peaks              JSONB            NOT NULL DEFAULT '{}'::jsonb,
-    significant_events JSONB            NOT NULL DEFAULT '[]'::jsonb,
-
     -- Core Auction Metrics
     vwap             DOUBLE PRECISION NOT NULL DEFAULT 0,
     poc              DOUBLE PRECISION NOT NULL DEFAULT 0,
