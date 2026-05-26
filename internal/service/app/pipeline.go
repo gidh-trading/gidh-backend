@@ -44,7 +44,7 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 2. ENRICHMENT STAGE (Calculates real-time microstructural Z-Scores)
+	// 2. ENRICHMENT STAGE (Calculates real-time microstructural Z-Scores & maintains Day-Long Timeline Canvas Array)
 	enrichedTick := &models.EnrichedTick{Raw: rawTick}
 	if err := p.enrichment.Process(enrichedTick); err != nil {
 		return err
@@ -57,19 +57,16 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 4. ANALYTICS STAGE (Run Analytics to create the Snapshot using enriched metrics)
+	// 4. ANALYTICS STAGE (Evaluates the instantaneous pure Volume Burst Threshold)
 	var snapshot models.AnomalySnapshot
-	if p.analytics != nil && p.enrichment != nil {
-		// Extract the true ungameable continuous structural variables from the rolling buffer
-		_, rOpen, rHigh, rLow, rClose := p.enrichment.GetRollingStructure(rawTick.InstrumentToken)
-
-		// Supply the analytics engine with its required structural boundary variables
-		snapshot = p.analytics.Analyze(enrichedTick, rOpen, rHigh, rLow, rClose)
+	if p.analytics != nil {
+		// Cleaned: AnalyticsEngine queries lookback context vectors internally from Enrichment Stage
+		snapshot = p.analytics.Analyze(enrichedTick)
 	}
 
-	// 5. BAR MANAGER AGGREGATION LAYER (Handles timeframes and aggregates anomalies)
+	// 5. BAR MANAGER AGGREGATION LAYER (Handles timeframes and records peak ranks)
 	if p.barManager != nil {
-		if err := p.barManager.Process(enrichedTick, snapshot); err != nil { // ◄ Fixed
+		if err := p.barManager.Process(enrichedTick, snapshot); err != nil {
 			logger.Errorf("Pipeline Error: Failed to process bar accumulation: %v", err)
 		}
 	}

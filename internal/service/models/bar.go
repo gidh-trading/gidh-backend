@@ -21,14 +21,9 @@ type AbsorptionLevel struct {
 }
 
 type PeakAnomalyMetrics struct {
-	PeakVolumeRank      int               `json:"peak_volume_rank"`
-	PeakPriceRank       int               `json:"peak_price_rank"`
-	PeakTickRank        int               `json:"peak_tick_rank"`
-	MaxAnomalyDirection int               `json:"max_anomaly_direction"`
-	MaxAbsorptionSignal int               `json:"max_absorption_signal"`
-	ActiveLevels        []AbsorptionLevel `json:"active_levels,omitempty"`
-	PeakAnomalyPrice    float64           `json:"peak_anomaly_price"`
-	PeakAbsorptionPrice float64           `json:"peak_absorption_price"`
+	PeakVolumeRank int `json:"peak_volume_rank"`
+	PeakPriceRank  int `json:"peak_price_rank"`
+	PeakTickRank   int `json:"peak_tick_rank"`
 }
 
 type Bar struct {

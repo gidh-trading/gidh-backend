@@ -8,34 +8,14 @@ import (
 	"gidh-backend/internal/service/order"
 )
 
-// classifyPercentile maps the raw value against the DNA baseline percentiles
-func classifyPercentile(value, p05, p10, p25, p50, p75, p90, p97 float64) string {
-	switch {
-	case value >= p97:
-		return "P97" // burst/extreme
-	case value >= p90:
-		return "P90" // elevated
-	case value >= p75:
-		return "P75" // active
-	case value >= p50:
-		return "P50" // baseline
-	case value >= p25:
-		return "P25" // below normal
-	case value >= p10:
-		return "P10" // weak
-	case value >= p05:
-		return "P05" // drought
-	default:
-		return "DROUGHT_EXTREME" // Anything below P05 falls entirely below the grid floor
-	}
-}
-
 // InstrumentContext groups all rolling state and historical data per instrument
 type InstrumentContext struct {
-	LastVolume int64
-	LastPrice  float64
-	Buffer     *TokenRollingBuffer
-	DNA        map[int]models.TimeBucketDNA
+	LastVolume     int64
+	LastPrice      float64
+	Buffer         *TokenRollingBuffer
+	DNA            map[int]models.TimeBucketDNA
+	SessionCanvas  *models.SessionContext // Day-long continuous chronological timeline vector
+	LastSavedIndex int                    // Deduplicates snapshot updates by checking minute rollovers
 }
 
 type EnrichmentStage struct {
@@ -61,6 +41,11 @@ func NewEnrichmentStage(pm order.PositionManager, rawDnaMap map[uint32]*models.M
 			DNA:        fastDnaMap,
 			LastVolume: 0,
 			LastPrice:  0.0,
+			SessionCanvas: &models.SessionContext{
+				Timeline:       make([]models.SessionSnapshot, 0, 400), // Pre-allocate daily room
+				MaxStoredSteps: 375,                                    // Total trading minutes in an NSE cash session
+			},
+			LastSavedIndex: -1,
 		}
 	}
 
@@ -79,7 +64,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	price := tick.Raw.LastPrice
 	ts := tick.Raw.Timestamp.In(s.loc)
 
-	// 1. Grab unified state or initialize it if it's a new token
 	ctx, exists := s.instruments[token]
 	if !exists {
 		ctx = &InstrumentContext{
@@ -87,29 +71,29 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			DNA:        make(map[int]models.TimeBucketDNA),
 			LastVolume: 0,
 			LastPrice:  price,
+			SessionCanvas: &models.SessionContext{
+				Timeline:       make([]models.SessionSnapshot, 0, 400),
+				MaxStoredSteps: 375,
+			},
+			LastSavedIndex: -1,
 		}
 		s.instruments[token] = ctx
 	}
 
-	// 2. Calculate volume delta using the context
 	tick.TickVolume = s.calculateTickVolume(ctx, tick)
 	volDelta := float64(tick.TickVolume)
 
-	// Ignore zero-volume ticks that don't move the price
 	if tick.TickVolume == 0 && price == ctx.LastPrice {
 		return nil
 	}
 
-	// 3. Trigger Position Manager logic ONLY on price changes
 	if price != ctx.LastPrice && s.positionManager != nil {
 		s.positionManager.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice, tick.Raw.Timestamp)
 	}
 	ctx.LastPrice = price
 
-	// 4. Push to rolling buffer
 	ctx.Buffer.Push(ts, price, volDelta)
 
-	// 5. Fetch exactly the metrics requested (Volume, TickCount, Displacement)
 	liveVolume, liveTickCount, liveDisplacement := ctx.Buffer.GetProductionMetrics()
 
 	minOfDay := (ts.Hour() * 60) + ts.Minute()
@@ -117,7 +101,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	tick.MinuteIndex = minuteIndex
 	tick.EnrichedAt = time.Now().UnixMilli()
 
-	// 6. Populate the clean LiveTelemetry struct
 	tick.Telemetry = models.LiveTelemetry{
 		MinuteIndex:      minuteIndex,
 		TickCount:        liveTickCount,
@@ -125,10 +108,8 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		LiveDisplacement: liveDisplacement,
 	}
 
-	// Default fallbacks if no DNA exists
 	volPct, pricePct, tickPct := "NORMAL", "NORMAL", "NORMAL"
 
-	// 7. DNA Baseline Percentile Matching
 	if currBaseline, ok := ctx.DNA[minuteIndex]; ok {
 		tick.DNASampleCount = currBaseline.SampleCount
 
@@ -143,7 +124,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		weightCurr := sec / 60.0
 		weightPrev := (60.0 - sec) / 60.0
 
-		// A. Volume Percentile
 		v05 := (currBaseline.VolumeP05 * weightCurr) + (prevBaseline.VolumeP05 * weightPrev)
 		v10 := (currBaseline.VolumeP10 * weightCurr) + (prevBaseline.VolumeP10 * weightPrev)
 		v25 := (currBaseline.VolumeP25 * weightCurr) + (prevBaseline.VolumeP25 * weightPrev)
@@ -153,7 +133,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		v97 := (currBaseline.VolumeP97 * weightCurr) + (prevBaseline.VolumeP97 * weightPrev)
 		volPct = classifyPercentile(liveVolume, v05, v10, v25, v50, v75, v90, v97)
 
-		// B. Price Displacement Percentile
 		p05 := (currBaseline.PriceP05 * weightCurr) + (prevBaseline.PriceP05 * weightPrev)
 		p10 := (currBaseline.PriceP10 * weightCurr) + (prevBaseline.PriceP10 * weightPrev)
 		p25 := (currBaseline.PriceP25 * weightCurr) + (prevBaseline.PriceP25 * weightPrev)
@@ -163,7 +142,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		p97 := (currBaseline.PriceP97 * weightCurr) + (prevBaseline.PriceP97 * weightPrev)
 		pricePct = classifyPercentile(liveDisplacement, p05, p10, p25, p50, p75, p90, p97)
 
-		// C. Tick Count Percentile
 		tc05 := (currBaseline.TickCountP05 * weightCurr) + (prevBaseline.TickCountP05 * weightPrev)
 		tc10 := (currBaseline.TickCountP10 * weightCurr) + (prevBaseline.TickCountP10 * weightPrev)
 		tc25 := (currBaseline.TickCountP25 * weightCurr) + (prevBaseline.TickCountP25 * weightPrev)
@@ -174,13 +152,33 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		tickPct = classifyPercentile(float64(liveTickCount), tc05, tc10, tc25, tc50, tc75, tc90, tc97)
 	}
 
-	// 8. Populate Final State
 	tick.Enrichment = models.EnrichmentState{
 		MinuteIndex:      minuteIndex,
 		VolumePercentile: volPct,
 		PricePercentile:  pricePct,
 		TickPercentile:   tickPct,
 		Timestamp:        ts,
+	}
+
+	// === COMMIT SNAPSHOT ON EACH NEW MINUTE CHECKPOINT ===
+	if minuteIndex != ctx.LastSavedIndex {
+		snapshot := models.SessionSnapshot{
+			Timestamp:    ts,
+			MinuteIndex:  minuteIndex,
+			VolumeRank:   getPercentileRank(volPct),
+			PriceRank:    getPercentileRank(pricePct),
+			Displacement: liveDisplacement,
+			ClosePrice:   price,
+		}
+
+		ctx.SessionCanvas.Timeline = append(ctx.SessionCanvas.Timeline, snapshot)
+
+		// Prevent slice memory drift past maximum cash session limits
+		if len(ctx.SessionCanvas.Timeline) > ctx.SessionCanvas.MaxStoredSteps {
+			ctx.SessionCanvas.Timeline = ctx.SessionCanvas.Timeline[1:]
+		}
+
+		ctx.LastSavedIndex = minuteIndex
 	}
 
 	return nil
@@ -200,4 +198,29 @@ func (s *EnrichmentStage) calculateTickVolume(ctx *InstrumentContext, tick *mode
 	}
 	ctx.LastVolume = curr
 	return delta
+}
+
+// GetSessionContext returns a thread-safe context pointer for the analytics engine
+func (s *EnrichmentStage) GetSessionContext(token uint32) (*models.SessionContext, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, exists := s.instruments[token]
+	if !exists {
+		return nil, false
+	}
+	return ctx.SessionCanvas, true
+}
+
+// GetRollingStructure fetches the short-term 60s structure variables for the engine
+func (s *EnrichmentStage) GetRollingStructure(token uint32) (vol, rOpen, rHigh, rLow, rClose float64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	ctx, exists := s.instruments[token]
+	if !exists || ctx.Buffer == nil {
+		return 0, 0, 0, 0, 0
+	}
+
+	return ctx.Buffer.GetProductionStructure()
 }

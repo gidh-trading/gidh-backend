@@ -88,16 +88,3 @@ func (b *TokenRollingBuffer) GetProductionStructure() (vol float64, rOpen, rHigh
 
 	return vol, rOpen, rHigh, rLow, rClose
 }
-
-// GetRollingStructure fetches the current 60s window structural prices for an instrument token
-func (s *EnrichmentStage) GetRollingStructure(token uint32) (vol, rOpen, rHigh, rLow, rClose float64) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	ctx, exists := s.instruments[token]
-	if !exists || ctx.Buffer == nil {
-		return 0, 0, 0, 0, 0
-	}
-
-	return ctx.Buffer.GetProductionStructure()
-}
