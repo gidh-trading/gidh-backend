@@ -10,7 +10,6 @@ import (
 	"gidh-backend/internal/service/ws"
 )
 
-// ScoutHistoricalSnapshot matches the exact JSON schema your UI layout expects
 type ScoutHistoricalSnapshot struct {
 	Timestamp       time.Time `json:"timestamp"`
 	InstrumentToken uint32    `json:"instrument_token"`
@@ -25,58 +24,35 @@ type ScoutHistoricalSnapshot struct {
 	Active          bool      `json:"active"`
 }
 
+type cachedBoundaries struct {
+	POC float64
+	VAH float64
+	VAL float64
+}
+
+type alertState struct {
+	TriggerType      string
+	FirstTriggerTime time.Time
+	LastEvalTime     time.Time
+}
+
 type ScoutStage struct {
-	wsHub          *ws.Hub
-	profiles       map[uint32]*models.InstrumentProfile
-	mu             sync.Mutex
-	lastTrigger    map[uint32]string
-	lastAlertTime  map[uint32]time.Time
-	lastSeenActive map[uint32]time.Time
-	alertHistory   map[uint32][]ScoutHistoricalSnapshot // Map key is InstrumentToken
+	wsHub        *ws.Hub
+	profiles     map[uint32]*models.InstrumentProfile
+	mu           sync.Mutex
+	activeAlerts map[uint32]alertState
+	alertHistory map[uint32][]ScoutHistoricalSnapshot
+	profileCache map[uint32]cachedBoundaries
 }
 
 func NewScoutStage(hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile) *ScoutStage {
 	return &ScoutStage{
-		wsHub:          hub,
-		profiles:       profiles,
-		lastTrigger:    make(map[uint32]string),
-		lastAlertTime:  make(map[uint32]time.Time),
-		lastSeenActive: make(map[uint32]time.Time),
-		alertHistory:   make(map[uint32][]ScoutHistoricalSnapshot),
+		wsHub:        hub,
+		profiles:     profiles,
+		activeAlerts: make(map[uint32]alertState),
+		alertHistory: make(map[uint32][]ScoutHistoricalSnapshot),
+		profileCache: make(map[uint32]cachedBoundaries),
 	}
-}
-
-// GetAlertHistory returns history for a single ticker (used for single stock chart plotting)
-func (s *ScoutStage) GetAlertHistory(token uint32) []ScoutHistoricalSnapshot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	history, exists := s.alertHistory[token]
-	if !exists {
-		return []ScoutHistoricalSnapshot{}
-	}
-
-	dst := make([]ScoutHistoricalSnapshot, len(history))
-	copy(dst, history)
-	return dst
-}
-
-// GetAllAlertHistory merges and flattens all logs chronologically (used for whole Watchtower table init)
-func (s *ScoutStage) GetAllAlertHistory() []ScoutHistoricalSnapshot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	var flatHistory []ScoutHistoricalSnapshot
-	for _, snapshots := range s.alertHistory {
-		flatHistory = append(flatHistory, snapshots...)
-	}
-
-	// Sort chronologically by timestamp so the UI receives an orderly timeline sequence
-	sort.Slice(flatHistory, func(i, j int) bool {
-		return flatHistory[i].Timestamp.Before(flatHistory[j].Timestamp)
-	})
-
-	return flatHistory
 }
 
 func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
@@ -89,111 +65,190 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	volRank := tick.Enrichment.VolumeRank
 	tickRank := tick.Enrichment.TickRank
 
-	var currentTrigger string
-	active := false
-
-	if volRank >= 6 || tickRank >= 6 {
-		currentTrigger = "VOLUME_SPIKE"
-		active = true
-	}
-
-	if tick.VolProfile != nil && tick.VolProfile.VAH > 0 && tick.VolProfile.VAL > 0 {
-		s.mu.Lock()
-		prof, hasProfile := s.profiles[token]
-		s.mu.Unlock()
-
-		var dynamicBuffer float64 = 0.0
-		if hasProfile && prof != nil && prof.ATR14 > 0 {
-			dynamicBuffer = 0.05 * prof.ATR14
-		}
-
-		if price > (tick.VolProfile.VAH + dynamicBuffer) {
-			currentTrigger = "VAH_BREACH"
-			active = true
-		} else if price < (tick.VolProfile.VAL - dynamicBuffer) {
-			currentTrigger = "VAL_BREACH"
-			active = true
-		}
+	// 🟢 RULE 1: FILTER PACKET CHATTER NOISE
+	if volRank == 0 && tickRank == 0 {
+		return nil
 	}
 
 	s.mu.Lock()
+	state, hasActiveAlert := s.activeAlerts[token]
+	prof, hasProfile := s.profiles[token]
+
+	if tick.VolProfile != nil && tick.VolProfile.VAH > 0 && tick.VolProfile.VAL > 0 {
+		s.profileCache[token] = cachedBoundaries{
+			POC: tick.VolProfile.POC,
+			VAH: tick.VolProfile.VAH,
+			VAL: tick.VolProfile.VAL,
+		}
+	}
+	cached, hasCached := s.profileCache[token]
+	s.mu.Unlock()
+
+	now := time.Now()
+	var currentTrigger string
+
+	var dynamicBuffer float64 = 0.0
+	if hasProfile && prof != nil && prof.ATR14 > 0 {
+		dynamicBuffer = 0.05 * float64(prof.ATR14)
+	}
+
+	// ==========================================================
+	// 0. PROFILE MATURITY CHECK (9:30 AM GRACE PERIOD)
+	// ==========================================================
+	loc, _ := time.LoadLocation("Asia/Kolkata")
+	exchangeTime := tick.Raw.Timestamp.In(loc)
+
+	isProfileMature := true
+	if (exchangeTime.Hour() == 9 && exchangeTime.Minute() < 30) || exchangeTime.Hour() < 9 {
+		isProfileMature = false
+	}
+
+	// ==========================================================
+	// 1. STATE RE-EVALUATION LATCH
+	// ==========================================================
+	if hasActiveAlert {
+		if state.TriggerType == "VOLUME_SPIKE" {
+			if volRank >= 6 || tickRank >= 6 {
+				currentTrigger = "VOLUME_SPIKE"
+			}
+		} else if state.TriggerType == "VAH_BREACH" {
+			if hasCached && price >= cached.VAH {
+				currentTrigger = "VAH_BREACH"
+			}
+		} else if state.TriggerType == "VAL_BREACH" {
+			if hasCached && price <= cached.VAL {
+				currentTrigger = "VAL_BREACH"
+			}
+		}
+	}
+
+	// ==========================================================
+	// 2. FRESH ANOMALY SENSING (Only processed if currently idle)
+	// ==========================================================
+	if currentTrigger == "" && !hasActiveAlert {
+		if volRank >= 7 || tickRank >= 7 { // Syncs to P97 linear scale boundary
+			currentTrigger = "VOLUME_SPIKE"
+		} else if isProfileMature && hasCached {
+			if price > (cached.VAH + dynamicBuffer) {
+				currentTrigger = "VAH_BREACH"
+			} else if price < (cached.VAL - dynamicBuffer) {
+				currentTrigger = "VAL_BREACH"
+			}
+		}
+	}
+
+	// ==========================================================
+	// 3. BROADCAST LAYER & HANDSHAKE MANAGEMENT
+	// ==========================================================
+	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	lastTrig := s.lastTrigger[token]
-	now := time.Now()
+	// Leg A: Anomaly ended. Send single active: false payload to turn off UI highlight
+	if currentTrigger == "" && hasActiveAlert {
+		snapshot := s.compileSnapshot(tick, cached, state.FirstTriggerTime, state.TriggerType, false)
+		s.alertHistory[token] = append(s.alertHistory[token], snapshot)
+		s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
 
-	if active {
-		s.lastSeenActive[token] = now
-	} else if lastTrig != "" {
-		lastActiveTime := s.lastSeenActive[token]
-		if now.Sub(lastActiveTime) < 3*time.Second {
-			currentTrigger = lastTrig
-			active = true
-		}
+		delete(s.activeAlerts, token)
+		return nil
 	}
 
+	// Leg B: Stable equilibrium. Exit quietly.
 	if currentTrigger == "" {
-		if lastTrig != "" {
-			s.broadcastAndRecord(tick, lastTrig, false)
-			delete(s.lastTrigger, token)
-			delete(s.lastAlertTime, token)
-			delete(s.lastSeenActive, token)
+		return nil
+	}
+
+	// Leg C: Ongoing sustained breakout session. Send updates every 1 minute.
+	if hasActiveAlert && state.TriggerType == currentTrigger {
+		if now.Sub(state.LastEvalTime) < 1*time.Minute {
+			return nil
 		}
+
+		state.LastEvalTime = now
+		s.activeAlerts[token] = state
+
+		snapshot := s.compileSnapshot(tick, cached, state.FirstTriggerTime, currentTrigger, true)
+		s.alertHistory[token] = append(s.alertHistory[token], snapshot)
+		s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
 		return nil
 	}
 
-	lastTime := s.lastAlertTime[token]
-	if lastTrig == currentTrigger && now.Sub(lastTime) < 1*time.Second {
-		return nil
+	// Leg D: Fresh directional expansion crossover event initialized.
+	s.activeAlerts[token] = alertState{
+		TriggerType:      currentTrigger,
+		FirstTriggerTime: tick.Raw.Timestamp,
+		LastEvalTime:     now,
 	}
 
-	s.lastTrigger[token] = currentTrigger
-	s.lastAlertTime[token] = now
-
-	s.broadcastAndRecord(tick, currentTrigger, active)
+	snapshot := s.compileSnapshot(tick, cached, tick.Raw.Timestamp, currentTrigger, true)
+	s.alertHistory[token] = append(s.alertHistory[token], snapshot)
+	s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
 	return nil
 }
 
-func (s *ScoutStage) broadcastAndRecord(tick *models.EnrichedTick, trigger string, isActive bool) {
-	var poc, vah, val float64
-	if tick.VolProfile != nil {
-		poc = tick.VolProfile.POC
-		vah = tick.VolProfile.VAH
-		val = tick.VolProfile.VAL
+// 🟢 THE FIX: Aggregates history logs to deliver EXACTLY ONE matrix row per stock on load
+func (s *ScoutStage) GetAllAlertHistory() []ScoutHistoricalSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var dynamicMatrix []ScoutHistoricalSnapshot
+
+	for _, snapshots := range s.alertHistory {
+		if len(snapshots) == 0 {
+			continue
+		}
+		// Pull only the single latest chronological state marker row for this instrument
+		dynamicMatrix = append(dynamicMatrix, snapshots[len(snapshots)-1])
 	}
 
-	snapshot := ScoutHistoricalSnapshot{
-		Timestamp:       tick.Raw.Timestamp,
+	sort.Slice(dynamicMatrix, func(i, j int) bool {
+		if dynamicMatrix[i].Active && !dynamicMatrix[j].Active {
+			return true
+		}
+		if !dynamicMatrix[i].Active && dynamicMatrix[j].Active {
+			return false
+		}
+		return dynamicMatrix[i].Timestamp.After(dynamicMatrix[j].Timestamp)
+	})
+
+	return dynamicMatrix
+}
+
+func (s *ScoutStage) GetAlertHistory(token uint32) []ScoutHistoricalSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	history, exists := s.alertHistory[token]
+	if !exists {
+		return []ScoutHistoricalSnapshot{}
+	}
+	dst := make([]ScoutHistoricalSnapshot, len(history))
+	copy(dst, history)
+	return dst
+}
+
+func (s *ScoutStage) compileSnapshot(tick *models.EnrichedTick, cached cachedBoundaries, triggerTime time.Time, trigger string, isActive bool) ScoutHistoricalSnapshot {
+	var outPoc, outVah, outVal float64
+	if tick.VolProfile != nil && tick.VolProfile.VAH > 0 {
+		outPoc = tick.VolProfile.POC
+		outVah = tick.VolProfile.VAH
+		outVal = tick.VolProfile.VAL
+	} else {
+		outPoc = cached.POC
+		outVah = cached.VAH
+		outVal = cached.VAL
+	}
+
+	return ScoutHistoricalSnapshot{
+		Timestamp:       triggerTime,
 		InstrumentToken: tick.Raw.InstrumentToken,
 		StockName:       tick.Raw.StockName,
 		TriggerType:     trigger,
 		Price:           tick.Raw.LastPrice,
 		VolumeRank:      int32(tick.Enrichment.VolumeRank),
 		TickRank:        int32(tick.Enrichment.TickRank),
-		POC:             poc,
-		VAH:             vah,
-		VAL:             val,
+		POC:             outPoc,
+		VAH:             outVah,
+		VAL:             outVal,
 		Active:          isActive,
 	}
-	s.alertHistory[tick.Raw.InstrumentToken] = append(s.alertHistory[tick.Raw.InstrumentToken], snapshot)
-
-	payload := map[string]any{
-		"type": "scout_alert", // 👈 Matches your frontend switch statement case
-		"data": map[string]any{
-			"timestamp":        tick.Raw.Timestamp,
-			"instrument_token": tick.Raw.InstrumentToken,
-			"stock_name":       tick.Raw.StockName,
-			"trigger_type":     trigger,
-			"price":            tick.Raw.LastPrice,
-			"volume_rank":      tick.Enrichment.VolumeRank,
-			"tick_rank":        tick.Enrichment.TickRank,
-			"poc":              poc,
-			"vah":              vah,
-			"val":              val,
-			"active":           isActive,
-		},
-	}
-
-	// 🔥 FIXED: Changed from "global:alerts" to "global:trading" to route to the open socket
-	s.wsHub.BroadcastJSON("global:trading", payload)
 }

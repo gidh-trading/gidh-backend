@@ -193,7 +193,7 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// 1. Extract token if provided as a query string modifier (e.g. /api/alerts/2026-05-27?token=123)
+	// 1. Extract token if provided as a query string modifier (e.g. /api/alerts?token=123)
 	tokenStr := r.URL.Query().Get("token")
 	var history []pipeline.ScoutHistoricalSnapshot
 
@@ -210,10 +210,11 @@ func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
 				json.NewEncoder(w).Encode(map[string]string{"error": "Invalid instrument token parameter format"})
 				return
 			}
-			// Fetch filtered asset history for single stock chart plotting markers
+			// 🟢 Maintains full, detailed history for charting single asset lines
 			history = a.Pipeline.scoutStage.GetAlertHistory(uint32(tokenUint))
 		} else {
-			// Fetch the entire log across all 32 stocks to cleanly hydrate the Watchtower grid table
+			// 🟢 FIXED: Calls your new filtered method so the initial Watchtower table render
+			// loads only the active anomalies, completely wiping out historical row duplication!
 			history = a.Pipeline.scoutStage.GetAllAlertHistory()
 		}
 	} else {
@@ -221,7 +222,7 @@ func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
 	}
 	a.managerMu.Unlock()
 
-	response := map[string]interface{}{
+	response := map[string]any{
 		"status": "success",
 		"data":   history,
 	}
