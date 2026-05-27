@@ -196,67 +196,45 @@ func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime tim
 	}
 }
 
-// SaveVolumeRegimeSession archives a completed or snapshot frame of an independent
-// continuous volume regime session directly into the TimescaleDB hypertable layer.
-func (w *DBWriter) SaveVolumeRegimeSession(ctx context.Context, snap *models.VolumeRegimeSnapshot) error {
+// SaveVolumeRegimeSnapshot handles direct high-performance writing for concluded institutional anomalies
+func (w *DBWriter) SaveVolumeRegimeSnapshot(ctx context.Context, s *models.VolumeRegimeSnapshot) error {
 	if w.config.SkipDatabaseInsert {
 		return nil
 	}
 
 	query := `
 		INSERT INTO gidh_volume_regime_sessions (
-			timestamp,
-			instrument_token,
-			stock_name,
-			minute_index,
-			active,
-			anomaly_type,
-			direction,
-			start_time,
-			end_time,
-			start_price,
-			current_price,
-			signed_move,
-			abs_move,
-			peak_volume_rank,
-			current_price_rank
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-		ON CONFLICT (timestamp, instrument_token) 
-		DO UPDATE SET 
-			current_price      = EXCLUDED.current_price,
-			signed_move        = EXCLUDED.signed_move,
-			abs_move           = EXCLUDED.abs_move,
-			peak_volume_rank   = EXCLUDED.peak_volume_rank,
-			current_price_rank = EXCLUDED.current_price_rank,
-			active             = EXCLUDED.active,
-			anomaly_type       = EXCLUDED.anomaly_type,
-			direction          = EXCLUDED.direction,
-			end_time           = EXCLUDED.end_time;`
+			timestamp, instrument_token, stock_name, minute_index,
+			active, anomaly_type, direction, start_time, end_time,
+			start_price, current_price, signed_move, abs_move,
+			peak_volume_rank, current_price_rank
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15);
+	`
 
-	_, err := w.pool.Exec(ctx, query,
-		snap.Timestamp,
-		snap.InstrumentToken,
-		snap.StockName,
-		snap.MinuteIndex,
-		snap.Active,
-		snap.AnomalyType.String(), // Returns string representation matching your custom enum serialization code
-		int(snap.Direction),       // Maps RegimeDirection enum safely onto database integers (1, -1, 0)
-		snap.StartTime,            // Explicit exact tick burst entry boundary
-		snap.EndTime,              // Explicit exact tick burst termination boundary
-		snap.StartPrice,
-		snap.CurrentPrice,
-		snap.SignedMove,
-		snap.AbsMove,
-		snap.PeakVolumeRank,
-		snap.CurrentPriceRank,
+	// Enforce strict connection timeout protection
+	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	_, err := w.pool.Exec(
+		writeCtx,
+		query,
+		s.Timestamp,
+		s.InstrumentToken,
+		s.StockName,
+		s.MinuteIndex,
+		s.Active,
+		s.AnomalyType.String(), // Saves string identifiers ("BURST" / "ABSORPTION")
+		int(s.Direction),       // Saves explicit integers (1, -1, 0)
+		s.StartTime,
+		s.EndTime,
+		s.StartPrice,
+		s.CurrentPrice,
+		s.SignedMove,
+		s.AbsMove,
+		s.PeakVolumeRank,
+		s.CurrentPriceRank,
 	)
-
-	if err != nil {
-		logger.Errorf("DB Error saving volume regime session for %s: %v", snap.StockName, err)
-		return err
-	}
-
-	return nil
+	return err
 }
 
 func (w *DBWriter) flushTimer() {

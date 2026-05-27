@@ -26,9 +26,14 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 		High:            price,
 		Low:             price,
 		Close:           price,
+		VolumeRank:      1, // Absolute initial floor baseline coordinates
+		TickRank:        1,
+		PriceRank:       1,
 	}
 }
 
+// processTickForCandle aggregates tick details into standard OHLC structures.
+// It acts as a passive carrier executing peak tracking signatures.
 func (bm *BarManager) processTickForCandle(
 	cs *candleState,
 	tick *models.EnrichedTick,
@@ -45,6 +50,7 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.Low = price
 	}
 	cs.bar.Close = price
+
 	// 2. Direct Core Metric Summaries
 	cs.bar.Volume += vol
 	cs.bar.TickCount++
@@ -65,65 +71,22 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.VAL = tick.VolProfile.VAL
 	}
 
-	// 4. Microstructure Heatmap Allocation Layer
-	// Peak Capture: Lock in the highest Volume Rank observed during the entire candle timeline
+	// 4. 🔥 THE DUMB CARRIER PEAK CAPTURE ENGINE
+	// We extract metrics calculated upstream and permanently lock in
+	// the highest statistical intensity reached during this bar's lifespan.
 	if tick.Enrichment.VolumeRank > cs.bar.VolumeRank {
 		cs.bar.VolumeRank = tick.Enrichment.VolumeRank
 	}
 
-	// Peak Capture: Lock in the highest Tick Rank observed during the entire candle timeline
 	if tick.Enrichment.TickRank > cs.bar.TickRank {
 		cs.bar.TickRank = tick.Enrichment.TickRank
 	}
 
-	// Continuous Overwrite: The closing tick updates the exact velocity rank right at the bar cutoff boundary
-	cs.bar.PriceRank = tick.Enrichment.PriceRank
+	if tick.Enrichment.PriceRank > cs.bar.PriceRank {
+		cs.bar.PriceRank = tick.Enrichment.PriceRank
+	}
 
 	if timeframe == "1m" {
 		cs.bar.Ticks = append(cs.bar.Ticks, tick.Raw)
-	}
-}
-
-// classifyPercentile maps the raw value against the DNA baseline percentiles
-func classifyPercentile(value, p05, p10, p25, p50, p75, p90, p97 float64) string {
-	switch {
-	case value >= p97:
-		return "P97" // burst/extreme
-	case value >= p90:
-		return "P90" // elevated
-	case value >= p75:
-		return "P75" // active
-	case value >= p50:
-		return "P50" // baseline
-	case value >= p25:
-		return "P25" // below normal
-	case value >= p10:
-		return "P10" // weak
-	case value >= p05:
-		return "P05" // drought
-	default:
-		return "DROUGHT_EXTREME" // Anything below P05 falls entirely below the grid floor
-	}
-}
-
-// getPercentileRank normalizes non-linear distribution spaces into a linear 1-7 coordinate grid
-func getPercentileRank(p string) int {
-	switch p {
-	case "P97":
-		return 7 // burst/extreme
-	case "P90":
-		return 6 // elevated
-	case "P75":
-		return 5 // active
-	case "P50":
-		return 4 // baseline
-	case "P25":
-		return 3 // below normal
-	case "P10":
-		return 2 // weak
-	case "P05":
-		return 1 // drought
-	default:
-		return 4 // Balanced baseline fallback if an unexpected string leaks in
 	}
 }
