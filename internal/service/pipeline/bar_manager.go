@@ -16,12 +16,13 @@ type BarManager struct {
 	state5m  map[uint32]*candleState
 	state10m map[uint32]*candleState
 	state15m map[uint32]*candleState
+	profiles map[uint32]*models.InstrumentProfile
 	mu       sync.RWMutex
 	writer   *writer.DBWriter
 	wsHub    *ws.Hub
 }
 
-func NewBarManager(w *writer.DBWriter, hub *ws.Hub) *BarManager {
+func NewBarManager(w *writer.DBWriter, hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile) *BarManager {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 	return &BarManager{
 		loc:      loc,
@@ -30,6 +31,7 @@ func NewBarManager(w *writer.DBWriter, hub *ws.Hub) *BarManager {
 		state5m:  make(map[uint32]*candleState),
 		state10m: make(map[uint32]*candleState),
 		state15m: make(map[uint32]*candleState),
+		profiles: profiles,
 		writer:   w,
 		wsHub:    hub,
 	}

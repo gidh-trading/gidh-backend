@@ -175,10 +175,10 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 
 	// 4. THE SELF-CONTAINED INJECTION: Pass both DBWriter and wsHub right into the AnalyticsEngine
 	// This enables the engine to handle its own asset-scoped streaming and async TimescaleDB hypertable persistence.
-	analyticsEngine := pipeline.NewAnalyticsEngine(dnaMap, a.DBWriter, a.wsHub)
+	analyticsEngine := pipeline.NewAnalyticsEngine(dnaMap, profilesMap, a.DBWriter, a.wsHub)
 
 	// 5. Initialize the decoupled Bar Manager
-	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub)
+	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub, profilesMap)
 
 	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
 

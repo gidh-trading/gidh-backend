@@ -13,17 +13,19 @@ import (
 // VolumeRegimeSession tracks continuous participation expansions in memory
 // completely independent of standard time-series candle boundaries.
 type VolumeRegimeSession struct {
-	Active           bool            `json:"active"`             // true if volume is currently expanded above thresholds
-	Token            uint32          `json:"instrument_token"`   // Unique asset identifier
-	StockName        string          `json:"stock_name"`         // Asset ticker name
-	StartPrice       float64         `json:"start_price"`        // Price locked in at the exact birth moment of the burst
-	CurrentPrice     float64         `json:"current_price"`      // Last known price updated tick-by-tick
-	StartTime        time.Time       `json:"start_time"`         // Timestamp marking when the burst crossed limits
-	StartMinuteIndex int             `json:"start_minute_index"` // Locks in original baseline entry bucket index
-	PeakVolumeRank   int             `json:"peak_volume_rank"`   // Highest recorded volume coordinate reached during life
-	PeakTickRank     int             `json:"peak_tick_rank"`     // Highest recorded tick coordinate reached during life
-	PeakPriceRank    int             `json:"peak_price_rank"`    // Highest recorded price coordinate reached during life
-	Direction        RegimeDirection `json:"direction"`          // 1 = BULLISH, -1 = BEARISH, 0 = FLAT
+	Active           bool            `json:"active"`
+	Token            uint32          `json:"instrument_token"`
+	StockName        string          `json:"stock_name"`
+	StartPrice       float64         `json:"start_price"`
+	CurrentPrice     float64         `json:"current_price"`
+	SessionHigh      float64         `json:"session_high"` // 👈 Add structural ceiling bounds
+	SessionLow       float64         `json:"session_low"`  // 👈 Add structural floor bounds
+	StartTime        time.Time       `json:"start_time"`
+	StartMinuteIndex int             `json:"start_minute_index"`
+	PeakVolumeRank   int             `json:"peak_volume_rank"`
+	PeakTickRank     int             `json:"peak_tick_rank"`
+	PeakPriceRank    int             `json:"peak_price_rank"`
+	Direction        RegimeDirection `json:"direction"`
 }
 
 // =====================================================================

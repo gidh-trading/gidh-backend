@@ -14,18 +14,20 @@ type AnalyticsEngine struct {
 	mu       sync.RWMutex
 	sessions map[uint32]*models.VolumeRegimeSession
 	dnaMap   map[uint32]*models.MarketDNA
+	profiles map[uint32]*models.InstrumentProfile // 👈 Add property
 	dbWriter *writer.DBWriter
 	wsHub    *ws.Hub
 }
 
-// NewAnalyticsEngine initializes the stateful tracking engine with historical DNA and runtime dependency injections.
-func NewAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, db *writer.DBWriter, hub *ws.Hub) *AnalyticsEngine {
+// NewAnalyticsEngine initializes the stateful tracking engine with historical DNA, runtime profiles, and dependency injections.
+func NewAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, profiles map[uint32]*models.InstrumentProfile, db *writer.DBWriter, hub *ws.Hub) *AnalyticsEngine {
 	if dnaMap == nil {
 		dnaMap = make(map[uint32]*models.MarketDNA)
 	}
 	return &AnalyticsEngine{
 		sessions: make(map[uint32]*models.VolumeRegimeSession),
 		dnaMap:   dnaMap,
+		profiles: profiles, // 👈 Store reference
 		dbWriter: db,
 		wsHub:    hub,
 	}
@@ -58,6 +60,8 @@ func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick) {
 				StockName:        tick.Raw.StockName,
 				StartPrice:       tick.Raw.LastPrice,
 				CurrentPrice:     tick.Raw.LastPrice,
+				SessionHigh:      tick.Raw.LastPrice, // 👈 Initialize baseline bounds
+				SessionLow:       tick.Raw.LastPrice, // 👈 Initialize baseline bounds
 				StartTime:        tick.Raw.Timestamp,
 				StartMinuteIndex: tick.MinuteIndex,
 				PeakVolumeRank:   volRank,
@@ -81,8 +85,16 @@ func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick) {
 		return
 	}
 
-	// 2. REGIME CONTINUUM: Update step-by-step peaks to lock in maximum structural intensity metrics
+	// 2. REGIME CONTINUUM: Update step-by-step peaks and boundaries
 	session.CurrentPrice = tick.Raw.LastPrice
+
+	// Track total structural range traversed during this specific session
+	if tick.Raw.LastPrice > session.SessionHigh {
+		session.SessionHigh = tick.Raw.LastPrice
+	}
+	if tick.Raw.LastPrice < session.SessionLow {
+		session.SessionLow = tick.Raw.LastPrice
+	}
 
 	if volRank > session.PeakVolumeRank {
 		session.PeakVolumeRank = volRank
@@ -100,18 +112,29 @@ func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick) {
 		signedMove := session.CurrentPrice - session.StartPrice
 		absMove := math.Abs(signedMove)
 
-		// 🔥 OBJECTIVE ABSORPTION ANOMALY CLASSIFICATION RULE
-		// Institutional volume was immense, but the price vector failed to escape normal historical constraints (Rank <= 3)
-		var finalizedAnomaly models.AnomalyType
-		if session.PeakPriceRank <= 3 {
-			finalizedAnomaly = models.AnomalyAbsorption
+		// Programmatically determine macro expansion vs compression
+		var finalizedAnomaly models.AnomalyType = models.AnomalyVolumeBurst
+
+		if prof, ok := ae.profiles[token]; ok && prof != nil && prof.ATR14 > 0 {
+			// Pull total structural range spanned across the full multi-minute execution sequence
+			macroSessionRange := session.SessionHigh - session.SessionLow
+			sessionVolatilityFactor := macroSessionRange / prof.ATR14
+
+			// CRITICAL RULE: If the entire session failed to break out past 2% of daily ATR
+			// despite massive institutional volume expansion, it is programmatically classified as ABSORPTION.
+			if sessionVolatilityFactor <= 0.02 {
+				finalizedAnomaly = models.AnomalyAbsorption
+			}
 		} else {
-			finalizedAnomaly = models.AnomalyVolumeBurst
+			// Fallback to legacy tracking baseline if profile mapping row is completely absent
+			if session.PeakPriceRank <= 3 {
+				finalizedAnomaly = models.AnomalyAbsorption
+			}
 		}
 
 		// Map runtime memory variables onto the immutable snapshot model for database persistence
 		snapshot := &models.VolumeRegimeSnapshot{
-			Timestamp:        tick.Raw.Timestamp, // Hypertable partitioning criteria
+			Timestamp:        tick.Raw.Timestamp,
 			InstrumentToken:  int32(session.Token),
 			StockName:        session.StockName,
 			MinuteIndex:      tick.MinuteIndex,

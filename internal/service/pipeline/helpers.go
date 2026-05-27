@@ -82,9 +82,33 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.TickRank = tick.Enrichment.TickRank
 	}
 
-	// B. Volatility Price Rank is overwritten continuously
-	// This captures the exact 60s rolling value state at the moment the candle closes
-	cs.bar.PriceRank = tick.Enrichment.PriceRank
+	// 5. 🔥 DECOUPLED INDEPENDENT BAR TIME-SERIES VOLATILITY ESTIMATION
+	// Pull the stock's profile from the mapped manager store
+	if prof, ok := bm.profiles[tick.Raw.InstrumentToken]; ok && prof != nil && prof.ATR14 > 0 {
+		barRange := cs.bar.High - cs.bar.Low
+		volatilityFactor := barRange / prof.ATR14
+
+		// Scale threshold steps contextually normalized against the total bar length
+		switch {
+		case volatilityFactor >= 0.20:
+			cs.bar.PriceRank = 7 // Saturated Volatility Expansion
+		case volatilityFactor >= 0.10:
+			cs.bar.PriceRank = 6
+		case volatilityFactor >= 0.05:
+			cs.bar.PriceRank = 5
+		case volatilityFactor >= 0.02:
+			cs.bar.PriceRank = 4 // Baseline standard drift normal boundary
+		case volatilityFactor >= 0.01:
+			cs.bar.PriceRank = 3 // Structural limits compression box
+		case volatilityFactor >= 0.005:
+			cs.bar.PriceRank = 2 // Significant High-Volume Absorption Sign
+		default:
+			cs.bar.PriceRank = 1 // Ultimate Order-Book Limit Wall Deadlock
+		}
+	} else {
+		// Fallback baseline if profile row doesn't exist
+		cs.bar.PriceRank = tick.Enrichment.PriceRank
+	}
 
 	if timeframe == "1m" {
 		cs.bar.Ticks = append(cs.bar.Ticks, tick.Raw)
