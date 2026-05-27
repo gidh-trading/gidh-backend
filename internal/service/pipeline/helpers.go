@@ -71,9 +71,9 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.VAL = tick.VolProfile.VAL
 	}
 
-	// 4. 🔥 THE DUMB CARRIER PEAK CAPTURE ENGINE
-	// We extract metrics calculated upstream and permanently lock in
-	// the highest statistical intensity reached during this bar's lifespan.
+	// 4. 🔥 REFACTORED SEPARATION OF CAPTURE ENGINES
+
+	// A. Participation Ranks track maximum intensity reached during life
 	if tick.Enrichment.VolumeRank > cs.bar.VolumeRank {
 		cs.bar.VolumeRank = tick.Enrichment.VolumeRank
 	}
@@ -82,9 +82,9 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.TickRank = tick.Enrichment.TickRank
 	}
 
-	if tick.Enrichment.PriceRank > cs.bar.PriceRank {
-		cs.bar.PriceRank = tick.Enrichment.PriceRank
-	}
+	// B. Volatility Price Rank is overwritten continuously
+	// This captures the exact 60s rolling value state at the moment the candle closes
+	cs.bar.PriceRank = tick.Enrichment.PriceRank
 
 	if timeframe == "1m" {
 		cs.bar.Ticks = append(cs.bar.Ticks, tick.Raw)

@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"math"
 	"sync"
 	"time"
 
@@ -10,13 +9,11 @@ import (
 )
 
 type InstrumentContext struct {
-	LastVolume    int64
-	LastPrice     float64
-	CurrentBarMin int
-	BarOpenPrice  float64
-	Buffer        *TokenRollingBuffer
-	DNA           map[int]models.TimeBucketDNA
-	Profile       *models.InstrumentProfile // Injected profile data
+	LastVolume int64
+	LastPrice  float64
+	Buffer     *TokenRollingBuffer
+	DNA        map[int]models.TimeBucketDNA
+	Profile    *models.InstrumentProfile
 }
 
 type EnrichmentStage struct {
@@ -37,13 +34,11 @@ func NewEnrichmentStage(pm order.PositionManager, rawDnaMap map[uint32]*models.M
 		}
 
 		instruments[token] = &InstrumentContext{
-			Buffer:        NewTokenRollingBuffer(),
-			DNA:           fastDnaMap,
-			LastVolume:    0,
-			LastPrice:     0.0,
-			CurrentBarMin: -1,
-			BarOpenPrice:  0.0,
-			Profile:       profiles[token], // Store reference to ATR configurations
+			Buffer:     NewTokenRollingBuffer(),
+			DNA:        fastDnaMap,
+			LastVolume: 0,
+			LastPrice:  0.0,
+			Profile:    profiles[token],
 		}
 	}
 
@@ -65,12 +60,10 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	ctx, exists := s.instruments[token]
 	if !exists {
 		ctx = &InstrumentContext{
-			Buffer:        NewTokenRollingBuffer(),
-			DNA:           make(map[int]models.TimeBucketDNA),
-			LastVolume:    0,
-			LastPrice:     price,
-			CurrentBarMin: ts.Minute(),
-			BarOpenPrice:  price,
+			Buffer:     NewTokenRollingBuffer(),
+			DNA:        make(map[int]models.TimeBucketDNA),
+			LastVolume: 0,
+			LastPrice:  price,
 		}
 		s.instruments[token] = ctx
 	}
@@ -95,14 +88,9 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	}
 	ctx.LastPrice = price
 
+	// Push current trade details onto the sliding 60-second matrix
 	ctx.Buffer.Push(ts, price, float64(delta))
 	liveVolume, liveTickCount, _ := ctx.Buffer.GetProductionMetrics()
-
-	currentClockMin := ts.Minute()
-	if ctx.CurrentBarMin == -1 || currentClockMin != ctx.CurrentBarMin {
-		ctx.CurrentBarMin = currentClockMin
-		ctx.BarOpenPrice = price
-	}
 
 	minOfDay := (ts.Hour() * 60) + ts.Minute()
 	minuteIndex := minOfDay - 555
@@ -112,7 +100,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	tickRank := 4
 	priceRank := 4
 
-	// 1. EVALUATE PARTICIPATION (Safe to use circadian time baselines)
+	// 1. PARTICIPATION BASES (Evaluated via circadian baseline time frames)
 	if baseline, ok := ctx.DNA[minuteIndex]; ok {
 		switch {
 		case liveVolume >= baseline.VolumeP97:
@@ -150,28 +138,30 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 	}
 
-	// 2. 🔥 STATISTICALLY RELIABLE ATR NORMALIZATION
-	absCandleRange := math.Abs(price - ctx.BarOpenPrice)
+	// 2. 🔥 TRUE ROLLING WINDOW PRICE VELOCITY NORMALIZATION (Boundary-Free)
+	// Pull the pure ungameable rolling structural high/low across the active 60s matrix window
+	_, _, rHigh, rLow, _ := ctx.Buffer.GetProductionStructure()
+	rollingWindowRange := rHigh - rLow
 
 	if ctx.Profile != nil && ctx.Profile.ATR14 > 0 {
-		// Measures the raw percentage coefficient of the full 14-day daily range traversed in 60s
-		volatilityFactor := absCandleRange / float64(ctx.Profile.ATR14)
+		// Measures how much of the macro average daily variance has been exhausted within a rolling 60s block
+		volatilityFactor := rollingWindowRange / ctx.Profile.ATR14
 
 		switch {
 		case volatilityFactor >= 0.050:
-			priceRank = 7 // True Extreme Breakout Velocity (Saturated Magenta)
+			priceRank = 7 // True Extreme Continuous Breakout (Saturated Magenta)
 		case volatilityFactor >= 0.030:
-			priceRank = 6 // Significant Velocity Expansion
+			priceRank = 6 // Significant continuous expansion velocity
 		case volatilityFactor >= 0.015:
-			priceRank = 5 // Active Expansion
+			priceRank = 5 // Active directional flow expansion
 		case volatilityFactor >= 0.005:
-			priceRank = 4 // Normal Structural Mean progression
+			priceRank = 4 // Normal continuous drift mean
 		case volatilityFactor >= 0.002:
-			priceRank = 3 // Suppressed Expansion / High-Volume Anomaly Absorption
+			priceRank = 3 // Suppressed Continuous Range / High-Volume Absorption
 		case volatilityFactor >= 0.001:
-			priceRank = 2 // Low Volatility Churn Space
+			priceRank = 2 // Continuous low volatility consolidation
 		default:
-			priceRank = 1 // Absolute Range Squeeze / Deadlock State
+			priceRank = 1 // Absolute continuous pricing deadlock / Range compression
 		}
 	}
 
