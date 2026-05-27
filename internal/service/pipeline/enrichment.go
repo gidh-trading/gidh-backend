@@ -100,7 +100,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	tickRank := 4
 	priceRank := 4
 
-	// 1. PARTICIPATION BASES (Evaluated via circadian baseline time frames)
+	// Evaluate participation ranks via circadian baseline time frames
 	if baseline, ok := ctx.DNA[minuteIndex]; ok {
 		switch {
 		case liveVolume >= baseline.VolumeP97:
@@ -136,32 +136,29 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		default:
 			tickRank = 1
 		}
-	}
 
-	// 2. 🔥 TRUE ROLLING WINDOW PRICE VELOCITY NORMALIZATION (Boundary-Free)
-	// Pull the pure ungameable rolling structural high/low across the active 60s matrix window
-	_, _, rHigh, rLow, _ := ctx.Buffer.GetProductionStructure()
-	rollingWindowRange := rHigh - rLow
+		// Dynamic Baseline-Driven Volatility Normalization
+		if ctx.Profile != nil && ctx.Profile.ATR14 > 0 {
+			_, _, rHigh, rLow, _ := ctx.Buffer.GetProductionStructure()
+			rollingWindowRange := rHigh - rLow
+			liveVolatilityFactor := rollingWindowRange / ctx.Profile.ATR14
 
-	if ctx.Profile != nil && ctx.Profile.ATR14 > 0 {
-		// Measures how much of the macro average daily variance has been exhausted within a rolling 60s block
-		volatilityFactor := rollingWindowRange / ctx.Profile.ATR14
-
-		switch {
-		case volatilityFactor >= 0.050:
-			priceRank = 7 // True Extreme Continuous Breakout (Saturated Magenta)
-		case volatilityFactor >= 0.030:
-			priceRank = 6 // Significant continuous expansion velocity
-		case volatilityFactor >= 0.015:
-			priceRank = 5 // Active directional flow expansion
-		case volatilityFactor >= 0.005:
-			priceRank = 4 // Normal continuous drift mean
-		case volatilityFactor >= 0.002:
-			priceRank = 3 // Suppressed Continuous Range / High-Volume Absorption
-		case volatilityFactor >= 0.001:
-			priceRank = 2 // Continuous low volatility consolidation
-		default:
-			priceRank = 1 // Absolute continuous pricing deadlock / Range compression
+			switch {
+			case liveVolatilityFactor >= baseline.VolatilityP97:
+				priceRank = 7 // True Extreme Continuous Breakout
+			case liveVolatilityFactor >= baseline.VolatilityP90:
+				priceRank = 6 // Significant continuous expansion velocity
+			case liveVolatilityFactor >= baseline.VolatilityP75:
+				priceRank = 5 // Active directional flow expansion
+			case liveVolatilityFactor >= baseline.VolatilityP50:
+				priceRank = 4 // Normal continuous drift mean
+			case liveVolatilityFactor >= baseline.VolatilityP25:
+				priceRank = 3 // Suppressed Continuous Range / High-Volume Absorption
+			case liveVolatilityFactor >= baseline.VolatilityP10:
+				priceRank = 2 // Continuous low volatility consolidation
+			default:
+				priceRank = 1 // Absolute continuous pricing deadlock
+			}
 		}
 	}
 

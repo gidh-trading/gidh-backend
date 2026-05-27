@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"math"
 	"time"
 
 	"gidh-backend/internal/service/models"
@@ -26,14 +27,12 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 		High:            price,
 		Low:             price,
 		Close:           price,
-		VolumeRank:      1, // Absolute initial floor baseline coordinates
+		VolumeRank:      1,
 		TickRank:        1,
-		PriceRank:       1,
+		PriceRank:       4, // Default to a standard baseline state
 	}
 }
 
-// processTickForCandle aggregates tick details into standard OHLC structures.
-// It acts as a passive carrier executing peak tracking signatures.
 func (bm *BarManager) processTickForCandle(
 	cs *candleState,
 	tick *models.EnrichedTick,
@@ -42,7 +41,7 @@ func (bm *BarManager) processTickForCandle(
 ) {
 	price := tick.Raw.LastPrice
 
-	// 1. Structural OHLC Boundary Management
+	// 1. Structural Candlestick Boundary Extensions
 	if price > cs.bar.High {
 		cs.bar.High = price
 	}
@@ -51,7 +50,7 @@ func (bm *BarManager) processTickForCandle(
 	}
 	cs.bar.Close = price
 
-	// 2. Direct Core Metric Summaries
+	// 2. Accumulate Totals
 	cs.bar.Volume += vol
 	cs.bar.TickCount++
 
@@ -64,50 +63,46 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.ChangePct = (tick.Raw.Change / prevClose) * 100
 	}
 
-	// 3. Market Auction Framework Profile Allocation
 	if tick.VolProfile != nil {
 		cs.bar.POC = tick.VolProfile.POC
 		cs.bar.VAH = tick.VolProfile.VAH
 		cs.bar.VAL = tick.VolProfile.VAL
 	}
 
-	// 4. 🔥 REFACTORED SEPARATION OF CAPTURE ENGINES
-
-	// A. Participation Ranks track maximum intensity reached during life
+	// 3. Peak Volume and Tick Intensity tracking across interval lifetime
 	if tick.Enrichment.VolumeRank > cs.bar.VolumeRank {
 		cs.bar.VolumeRank = tick.Enrichment.VolumeRank
 	}
-
 	if tick.Enrichment.TickRank > cs.bar.TickRank {
 		cs.bar.TickRank = tick.Enrichment.TickRank
 	}
 
-	// 5. 🔥 DECOUPLED INDEPENDENT BAR TIME-SERIES VOLATILITY ESTIMATION
-	// Pull the stock's profile from the mapped manager store
+	// 4. 🔥 ALIGNED MANUAL VOLATILITY SEPARATION (Using Candle Body Displacement)
 	if prof, ok := bm.profiles[tick.Raw.InstrumentToken]; ok && prof != nil && prof.ATR14 > 0 {
-		barRange := cs.bar.High - cs.bar.Low
-		volatilityFactor := barRange / prof.ATR14
+		// Calculate the absolute directional body move (matches what your UI displays)
+		candleBodyMove := math.Abs(cs.bar.Close - cs.bar.Open)
+		volatilityFactor := candleBodyMove / prof.ATR14
 
-		// Scale threshold steps contextually normalized against the total bar length
 		switch {
 		case volatilityFactor >= 0.20:
-			cs.bar.PriceRank = 7 // Saturated Volatility Expansion
+			cs.bar.PriceRank = 7 // Saturated Volatility Expansion (P97 Magenta)
 		case volatilityFactor >= 0.10:
-			cs.bar.PriceRank = 6
+			cs.bar.PriceRank = 6 // Significant Outlier Velocity (P90 Purple)
 		case volatilityFactor >= 0.05:
-			cs.bar.PriceRank = 5
+			cs.bar.PriceRank = 5 // Active Directional Flow Expansion (P75 Orange)
 		case volatilityFactor >= 0.02:
-			cs.bar.PriceRank = 4 // Baseline standard drift normal boundary
+			cs.bar.PriceRank = 4 // Baseline standard drift normal boundary (P50 Yellow)
 		case volatilityFactor >= 0.01:
 			cs.bar.PriceRank = 3 // Structural limits compression box
 		case volatilityFactor >= 0.005:
-			cs.bar.PriceRank = 2 // Significant High-Volume Absorption Sign
+			cs.bar.PriceRank = 2 // High-Volume Absorption Sign
 		default:
-			cs.bar.PriceRank = 1 // Ultimate Order-Book Limit Wall Deadlock
+			cs.bar.PriceRank = 1 // Absolute Pricing Deadlock
 		}
 	} else {
-		// Fallback baseline if profile row doesn't exist
-		cs.bar.PriceRank = tick.Enrichment.PriceRank
+		if tick.Enrichment.PriceRank > cs.bar.PriceRank {
+			cs.bar.PriceRank = tick.Enrichment.PriceRank
+		}
 	}
 
 	if timeframe == "1m" {

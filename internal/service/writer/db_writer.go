@@ -196,47 +196,6 @@ func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime tim
 	}
 }
 
-// SaveVolumeRegimeSnapshot handles direct high-performance writing for concluded institutional anomalies
-func (w *DBWriter) SaveVolumeRegimeSnapshot(ctx context.Context, s *models.VolumeRegimeSnapshot) error {
-	if w.config.SkipDatabaseInsert {
-		return nil
-	}
-
-	query := `
-		INSERT INTO gidh_volume_regime_sessions (
-			timestamp, instrument_token, stock_name, minute_index,
-			active, anomaly_type, direction, start_time, end_time,
-			start_price, current_price, signed_move, abs_move,
-			peak_volume_rank, current_price_rank
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15);
-	`
-
-	// Enforce strict connection timeout protection
-	writeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-
-	_, err := w.pool.Exec(
-		writeCtx,
-		query,
-		s.Timestamp,
-		s.InstrumentToken,
-		s.StockName,
-		s.MinuteIndex,
-		s.Active,
-		s.AnomalyType.String(), // Saves string identifiers ("BURST" / "ABSORPTION")
-		int(s.Direction),       // Saves explicit integers (1, -1, 0)
-		s.StartTime,
-		s.EndTime,
-		s.StartPrice,
-		s.CurrentPrice,
-		s.SignedMove,
-		s.AbsMove,
-		s.PeakVolumeRank,
-		s.CurrentPriceRank,
-	)
-	return err
-}
-
 func (w *DBWriter) flushTimer() {
 	defer w.wg.Done()
 	ticker := time.NewTicker(w.flushInterval)

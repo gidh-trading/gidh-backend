@@ -30,15 +30,6 @@ type TimeBucketDNA struct {
 	VolumeStd  float64 `json:"volume_std"`
 	VolumeMean float64 `json:"volume_mean"`
 
-	// Price metrics
-	PriceP05 float64 `json:"price_p05"`
-	PriceP10 float64 `json:"price_p10"`
-	PriceP25 float64 `json:"price_p25"`
-	PriceP50 float64 `json:"price_p50"`
-	PriceP75 float64 `json:"price_p75"`
-	PriceP90 float64 `json:"price_p90"`
-	PriceP97 float64 `json:"price_p97"`
-
 	// Tick Count metrics
 	TickCountP05  float64 `json:"tick_count_p05"`
 	TickCountP10  float64 `json:"tick_count_p10"`
@@ -49,4 +40,13 @@ type TimeBucketDNA struct {
 	TickCountP97  float64 `json:"tick_count_p97"`
 	TickCountStd  float64 `json:"tick_count_std"`
 	TickCountMean float64 `json:"tick_count_mean"`
+
+	// Price / Volatility metrics
+	VolatilityP05 float64 `json:"volatility_p05"`
+	VolatilityP10 float64 `json:"volatility_p10"`
+	VolatilityP25 float64 `json:"volatility_p25"`
+	VolatilityP50 float64 `json:"volatility_p50"`
+	VolatilityP75 float64 `json:"volatility_p75"`
+	VolatilityP90 float64 `json:"volatility_p90"`
+	VolatilityP97 float64 `json:"volatility_p97"`
 }

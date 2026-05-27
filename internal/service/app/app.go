@@ -178,7 +178,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	analyticsEngine := pipeline.NewAnalyticsEngine(dnaMap, profilesMap, a.DBWriter, a.wsHub)
 
 	// 5. Initialize the decoupled Bar Manager
-	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub, profilesMap)
+	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub, profilesMap, dnaMap)
 
 	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
 
