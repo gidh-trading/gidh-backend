@@ -24,8 +24,13 @@ type Bar struct {
 	VAH float64 `json:"vah"`
 	VAL float64 `json:"val"`
 
-	TotalBuyQty  float64    `json:"total_buy_qty"`
-	TotalSellQty float64    `json:"total_sell_qty"`
-	ChangePct    float64    `json:"change_pct"`
-	Ticks        []TickData `json:"-"`
+	TotalBuyQty  float64 `json:"total_buy_qty"`
+	TotalSellQty float64 `json:"total_sell_qty"`
+	ChangePct    float64 `json:"change_pct"`
+
+	VolumeRank int `json:"volume_rank"`
+	TickRank   int `json:"tick_rank"`
+	PriceRank  int `json:"price_rank"`
+
+	Ticks []TickData `json:"-"`
 }

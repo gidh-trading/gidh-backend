@@ -1,3 +1,4 @@
+-- schema/006_create_gidh_bars.sql
 DROP TABLE IF EXISTS gidh_bars CASCADE;
 
 CREATE TABLE IF NOT EXISTS gidh_bars
@@ -24,6 +25,11 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     total_sell_qty   DOUBLE PRECISION NOT NULL DEFAULT 0,
     change_pct       DOUBLE PRECISION NOT NULL DEFAULT 0,
 
+    -- Flattened Microstructure Anomaly Heatmap Ranks
+    volume_rank      INTEGER          NOT NULL DEFAULT 4, -- Peak rolling volume rank reached in bar life (1-7)
+    tick_rank        INTEGER          NOT NULL DEFAULT 4, -- Peak rolling tick count rank reached in bar life (1-7)
+    price_rank       INTEGER          NOT NULL DEFAULT 4, -- Instantaneous rolling price velocity rank at bar close (1-7)
+
     PRIMARY KEY (timestamp, instrument_token, timeframe)
 );
 
@@ -37,7 +43,10 @@ CREATE INDEX IF NOT EXISTS idx_gidh_bars_token_time
 CREATE INDEX IF NOT EXISTS idx_gidh_bars_timeframe
     ON gidh_bars (timeframe, timestamp DESC);
 
--- Optional Performance Boost: Functional index for high-speed anomaly filtering
--- This allows you to instantly fetch bars with a specific peak volume rank without parsing the full JSON string inside every row.
+-- Performance Index: High-speed anomaly lookup for filtering bars with P90+ Volume Bursts
 CREATE INDEX IF NOT EXISTS idx_gidh_bars_peak_vol
-    ON gidh_bars (((peaks->>'peak_volume_rank')::integer), timestamp DESC);
+    ON gidh_bars (volume_rank, timestamp DESC);
+
+-- Performance Index: High-speed anomaly lookup for filtering compressed/absorption states
+CREATE INDEX IF NOT EXISTS idx_gidh_bars_absorption_seek
+    ON gidh_bars (volume_rank, price_rank, timestamp DESC);

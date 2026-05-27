@@ -45,10 +45,10 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.Low = price
 	}
 	cs.bar.Close = price
-
 	// 2. Direct Core Metric Summaries
 	cs.bar.Volume += vol
 	cs.bar.TickCount++
+
 	cs.bar.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
 	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
 	cs.bar.VWAP = tick.Raw.AverageTradedPrice
@@ -64,6 +64,20 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.VAH = tick.VolProfile.VAH
 		cs.bar.VAL = tick.VolProfile.VAL
 	}
+
+	// 4. Microstructure Heatmap Allocation Layer
+	// Peak Capture: Lock in the highest Volume Rank observed during the entire candle timeline
+	if tick.Enrichment.VolumeRank > cs.bar.VolumeRank {
+		cs.bar.VolumeRank = tick.Enrichment.VolumeRank
+	}
+
+	// Peak Capture: Lock in the highest Tick Rank observed during the entire candle timeline
+	if tick.Enrichment.TickRank > cs.bar.TickRank {
+		cs.bar.TickRank = tick.Enrichment.TickRank
+	}
+
+	// Continuous Overwrite: The closing tick updates the exact velocity rank right at the bar cutoff boundary
+	cs.bar.PriceRank = tick.Enrichment.PriceRank
 
 	if timeframe == "1m" {
 		cs.bar.Ticks = append(cs.bar.Ticks, tick.Raw)

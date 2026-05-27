@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -92,7 +93,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	// 3. Track 60s continuous window metrics
 	ctx.Buffer.Push(ts, price, float64(delta))
-	liveVolume, _, _ := ctx.Buffer.GetProductionMetrics()
+	liveVolume, liveTickCount, liveDisplacement := ctx.Buffer.GetProductionMetrics()
 
 	// 4. Build baseline index markers
 	minOfDay := (ts.Hour() * 60) + ts.Minute()
@@ -100,24 +101,65 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	tick.MinuteIndex = minuteIndex
 
 	// 5. Evaluate non-gaussian percentile ranks
-	volRank := 4 // Default balanced baseline coordinate
+	volRank := 4
+	tickRank := 4
+	priceRank := 4
 
 	if baseline, ok := ctx.DNA[minuteIndex]; ok {
+		// Calculate Volume Rank
 		switch {
 		case liveVolume >= baseline.VolumeP97:
-			volRank = 7 // Extreme Burst
+			volRank = 7
 		case liveVolume >= baseline.VolumeP90:
-			volRank = 6 // Elevated Activity
+			volRank = 6
 		case liveVolume >= baseline.VolumeP75:
-			volRank = 5 // Active Participation
+			volRank = 5
 		case liveVolume >= baseline.VolumeP50:
-			volRank = 4 // Normal baseline
+			volRank = 4
 		case liveVolume >= baseline.VolumeP25:
-			volRank = 3 // Below Normal
+			volRank = 3
 		case liveVolume >= baseline.VolumeP10:
-			volRank = 2 // Weak
+			volRank = 2
 		default:
-			volRank = 1 // Drought Minimal
+			volRank = 1
+		}
+
+		// Calculate Tick Rank (Execution Churn Activity Intensity)
+		floatTickCount := float64(liveTickCount)
+		switch {
+		case floatTickCount >= baseline.TickCountP97:
+			tickRank = 7
+		case floatTickCount >= baseline.TickCountP90:
+			tickRank = 6
+		case floatTickCount >= baseline.TickCountP75:
+			tickRank = 5
+		case floatTickCount >= baseline.TickCountP50:
+			tickRank = 4
+		case floatTickCount >= baseline.TickCountP25:
+			tickRank = 3
+		case floatTickCount >= baseline.TickCountP10:
+			tickRank = 2
+		default:
+			tickRank = 1
+		}
+
+		// Calculate Price Velocity Rank (Spatial Vector Intensity)
+		absDisp := math.Abs(liveDisplacement)
+		switch {
+		case absDisp >= baseline.PriceP97:
+			priceRank = 7
+		case absDisp >= baseline.PriceP90:
+			priceRank = 6
+		case absDisp >= baseline.PriceP75:
+			priceRank = 5
+		case absDisp >= baseline.PriceP50:
+			priceRank = 4
+		case absDisp >= baseline.PriceP25:
+			priceRank = 3
+		case absDisp >= baseline.PriceP10:
+			priceRank = 2
+		default:
+			priceRank = 1
 		}
 	}
 
@@ -125,6 +167,8 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		Timestamp:   ts,
 		MinuteIndex: minuteIndex,
 		VolumeRank:  volRank,
+		TickRank:    tickRank,
+		PriceRank:   priceRank,
 	}
 
 	return nil

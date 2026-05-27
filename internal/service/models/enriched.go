@@ -6,6 +6,8 @@ type SimplifiedEnrichment struct {
 	Timestamp   time.Time `json:"timestamp"`
 	MinuteIndex int       `json:"minute_index"`
 	VolumeRank  int       `json:"volume_rank"`
+	TickRank    int       `json:"tick_rank"`
+	PriceRank   int       `json:"price_rank"`
 }
 
 type EnrichedTick struct {
