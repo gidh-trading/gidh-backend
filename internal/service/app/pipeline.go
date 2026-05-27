@@ -12,6 +12,7 @@ type Pipeline struct {
 	enrichment *pipeline.EnrichmentStage
 	analytics  *pipeline.AnalyticsEngine
 	barManager *pipeline.BarManager
+	scoutStage *pipeline.ScoutStage
 	dbWriter   *writer.DBWriter
 }
 
@@ -20,6 +21,8 @@ func NewPipeline(
 	enrichment *pipeline.EnrichmentStage,
 	analytics *pipeline.AnalyticsEngine,
 	barManager *pipeline.BarManager,
+	scoutStage *pipeline.ScoutStage,
+
 	dbWriter *writer.DBWriter,
 ) *Pipeline {
 	return &Pipeline{
@@ -27,6 +30,7 @@ func NewPipeline(
 		enrichment: enrichment,
 		analytics:  analytics,
 		barManager: barManager,
+		scoutStage: scoutStage,
 		dbWriter:   dbWriter,
 	}
 }
@@ -66,6 +70,12 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 	if p.barManager != nil {
 		if err := p.barManager.Process(enrichedTick); err != nil {
 			logger.Errorf("Pipeline Error: Failed to process bar accumulation: %v", err)
+		}
+	}
+
+	if p.scoutStage != nil {
+		if err := p.scoutStage.Process(enrichedTick); err != nil {
+			logger.Errorf("Pipeline Error: Scout observer engine stage failure: %v", err)
 		}
 	}
 

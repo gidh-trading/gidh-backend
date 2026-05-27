@@ -7,12 +7,14 @@ import (
 	"fmt"
 	"gidh-backend/internal/service/db"
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/pipeline"
 	"gidh-backend/internal/service/reader"
 	"gidh-backend/internal/service/stream"
 	"gidh-backend/internal/service/ws"
 	"gidh-backend/pkg/logger"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 )
 
@@ -43,7 +45,7 @@ func (a *App) initWebServer() {
 	})
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
-	mux.HandleFunc("/api/alerts/", a.handleGetAlerts)
+	mux.HandleFunc("/api/alerts", a.handleGetAlerts)
 
 	mux.HandleFunc("/api/positions", a.handleGetPositions)
 	mux.HandleFunc("/api/orders/place", a.handleOrderPlace)
@@ -188,17 +190,46 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// 2. Implement the new handleGetAlerts function with the required response wrapper
 func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 
-	// Wrap the result in a 'data' field to match the UI's 'json.data' expectation
+	// 1. Extract token if provided as a query string modifier (e.g. /api/alerts/2026-05-27?token=123)
+	tokenStr := r.URL.Query().Get("token")
+	var history []pipeline.ScoutHistoricalSnapshot
+
+	a.managerMu.Lock()
+	pipelineValid := (a.Pipeline != nil && a.Pipeline.scoutStage != nil)
+
+	if pipelineValid {
+		if tokenStr != "" {
+			tokenUint, err := strconv.ParseUint(tokenStr, 10, 32)
+			if err != nil {
+				a.managerMu.Unlock()
+				logger.Errorf("GetAlerts Parse Error: Invalid token query parameter format '%s': %v", tokenStr, err)
+				w.WriteHeader(http.StatusBadRequest)
+				json.NewEncoder(w).Encode(map[string]string{"error": "Invalid instrument token parameter format"})
+				return
+			}
+			// Fetch filtered asset history for single stock chart plotting markers
+			history = a.Pipeline.scoutStage.GetAlertHistory(uint32(tokenUint))
+		} else {
+			// Fetch the entire log across all 32 stocks to cleanly hydrate the Watchtower grid table
+			history = a.Pipeline.scoutStage.GetAllAlertHistory()
+		}
+	} else {
+		history = []pipeline.ScoutHistoricalSnapshot{}
+	}
+	a.managerMu.Unlock()
+
 	response := map[string]interface{}{
 		"status": "success",
-		"data":   "[]",
+		"data":   history,
 	}
 
-	json.NewEncoder(w).Encode(response)
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		logger.Errorf("Web Server Error: Failed to serialize history array: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
 }
 
 func (a *App) handleOrderPlace(w http.ResponseWriter, r *http.Request) {

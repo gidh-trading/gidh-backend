@@ -180,8 +180,10 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// 5. Initialize the decoupled Bar Manager
 	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub)
 
+	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
+
 	// 6. Assemble the streamlined Execution Pipeline Stage
-	a.Pipeline = NewPipeline(vpStage, enrichmentStage, analyticsEngine, barManager, a.DBWriter)
+	a.Pipeline = NewPipeline(vpStage, enrichmentStage, analyticsEngine, barManager, scoutStage, a.DBWriter)
 	a.activePipe = a.Pipeline
 
 	return nil
