@@ -13,19 +13,21 @@ import (
 // VolumeRegimeSession tracks continuous participation expansions in memory
 // completely independent of standard time-series candle boundaries.
 type VolumeRegimeSession struct {
-	Active           bool            `json:"active"`
-	Token            uint32          `json:"instrument_token"`
-	StockName        string          `json:"stock_name"`
-	StartPrice       float64         `json:"start_price"`
-	CurrentPrice     float64         `json:"current_price"`
-	SessionHigh      float64         `json:"session_high"` // 👈 Add structural ceiling bounds
-	SessionLow       float64         `json:"session_low"`  // 👈 Add structural floor bounds
-	StartTime        time.Time       `json:"start_time"`
-	StartMinuteIndex int             `json:"start_minute_index"`
-	PeakVolumeRank   int             `json:"peak_volume_rank"`
-	PeakTickRank     int             `json:"peak_tick_rank"`
-	PeakPriceRank    int             `json:"peak_price_rank"`
-	Direction        RegimeDirection `json:"direction"`
+	Active             bool            `json:"active"`
+	Token              uint32          `json:"instrument_token"`
+	StockName          string          `json:"stock_name"`
+	StartPrice         float64         `json:"start_price"`
+	CurrentPrice       float64         `json:"current_price"`
+	LastTickPrice      float64         `json:"-"`
+	SessionHigh        float64         `json:"session_high"`
+	SessionLow         float64         `json:"session_low"`
+	StartTime          time.Time       `json:"start_time"`
+	StartMinuteIndex   int             `json:"start_minute_index"`
+	PeakVolumeRank     int             `json:"peak_volume_rank"`
+	PeakTickRank       int             `json:"peak_tick_rank"`
+	PeakPriceRank      int             `json:"peak_price_rank"`
+	Direction          RegimeDirection `json:"direction"`
+	LastUnderThreshold time.Time       `json:"-"`
 }
 
 // =====================================================================

@@ -4,6 +4,7 @@ import (
 	"context"
 	"math"
 	"sync"
+	"time"
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
@@ -14,12 +15,11 @@ type AnalyticsEngine struct {
 	mu       sync.RWMutex
 	sessions map[uint32]*models.VolumeRegimeSession
 	dnaMap   map[uint32]*models.MarketDNA
-	profiles map[uint32]*models.InstrumentProfile // 👈 Add property
+	profiles map[uint32]*models.InstrumentProfile
 	dbWriter *writer.DBWriter
 	wsHub    *ws.Hub
 }
 
-// NewAnalyticsEngine initializes the stateful tracking engine with historical DNA, runtime profiles, and dependency injections.
 func NewAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, profiles map[uint32]*models.InstrumentProfile, db *writer.DBWriter, hub *ws.Hub) *AnalyticsEngine {
 	if dnaMap == nil {
 		dnaMap = make(map[uint32]*models.MarketDNA)
@@ -27,41 +27,38 @@ func NewAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, profiles map[uint32
 	return &AnalyticsEngine{
 		sessions: make(map[uint32]*models.VolumeRegimeSession),
 		dnaMap:   dnaMap,
-		profiles: profiles, // 👈 Store reference
+		profiles: profiles,
 		dbWriter: db,
 		wsHub:    hub,
 	}
 }
 
-// Analyze processes incoming ticks to govern the stateful lifecycle of institutional volume regimes.
 func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick) {
 	ae.mu.Lock()
 	defer ae.mu.Unlock()
 
 	token := tick.Raw.InstrumentToken
+	currentPrice := tick.Raw.LastPrice
 	volRank := tick.Enrichment.VolumeRank
 	priceRank := tick.Enrichment.PriceRank
 	tickRank := tick.Enrichment.TickRank
 
 	session, active := ae.sessions[token]
 
-	// 1. REGIME BIRTH: Trigger active state tracking when Volume hits Rank 6 or 7
+	// 1. REGIME BIRTH
 	if !active {
 		if volRank >= 6 {
 			direction := models.DirectionFlat
-			prevClose := tick.Raw.LastPrice - tick.Raw.Change
-			if prevClose > 0 {
-				direction = ae.deduceDirection(tick.Raw.Change)
-			}
 
 			newSession := &models.VolumeRegimeSession{
 				Active:           true,
 				Token:            token,
 				StockName:        tick.Raw.StockName,
-				StartPrice:       tick.Raw.LastPrice,
-				CurrentPrice:     tick.Raw.LastPrice,
-				SessionHigh:      tick.Raw.LastPrice, // 👈 Initialize baseline bounds
-				SessionLow:       tick.Raw.LastPrice, // 👈 Initialize baseline bounds
+				StartPrice:       currentPrice,
+				CurrentPrice:     currentPrice,
+				LastTickPrice:    currentPrice,
+				SessionHigh:      currentPrice,
+				SessionLow:       currentPrice,
 				StartTime:        tick.Raw.Timestamp,
 				StartMinuteIndex: tick.MinuteIndex,
 				PeakVolumeRank:   volRank,
@@ -71,29 +68,31 @@ func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick) {
 			}
 			ae.sessions[token] = newSession
 
-			// Real-time notification layer push
 			if ae.wsHub != nil {
 				ae.wsHub.BroadcastJSON(tick.Raw.StockName+":regime", map[string]any{
 					"type":   "regime_start",
 					"token":  token,
 					"ticker": tick.Raw.StockName,
 					"time":   tick.Raw.Timestamp,
-					"price":  tick.Raw.LastPrice,
+					"price":  currentPrice,
 				})
 			}
 		}
 		return
 	}
 
-	// 2. REGIME CONTINUUM: Update step-by-step peaks and boundaries
-	session.CurrentPrice = tick.Raw.LastPrice
-
-	// Track total structural range traversed during this specific session
-	if tick.Raw.LastPrice > session.SessionHigh {
-		session.SessionHigh = tick.Raw.LastPrice
+	// 2. REGIME CONTINUUM
+	if session.Direction == models.DirectionFlat && currentPrice != session.LastTickPrice {
+		session.Direction = ae.deduceDirection(currentPrice - session.LastTickPrice)
 	}
-	if tick.Raw.LastPrice < session.SessionLow {
-		session.SessionLow = tick.Raw.LastPrice
+
+	session.CurrentPrice = currentPrice
+
+	if currentPrice > session.SessionHigh {
+		session.SessionHigh = currentPrice
+	}
+	if currentPrice < session.SessionLow {
+		session.SessionLow = currentPrice
 	}
 
 	if volRank > session.PeakVolumeRank {
@@ -106,75 +105,92 @@ func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick) {
 		session.PeakPriceRank = priceRank
 	}
 
-	// 3. REGIME DEATH: Conclude anomaly session when participation scores drop back to normal levels
+	session.LastTickPrice = currentPrice
+
+	// 3. REGIME DEATH STATE EVALUATION WITH TIME HYSTERESIS
+	// If participation falls below threshold, wait to confirm it isn't a temporary pause
 	if volRank <= 3 {
-		// Compile mathematical variables for the completed window
-		signedMove := session.CurrentPrice - session.StartPrice
-		absMove := math.Abs(signedMove)
-
-		// Programmatically determine macro expansion vs compression
-		var finalizedAnomaly models.AnomalyType = models.AnomalyVolumeBurst
-
-		if prof, ok := ae.profiles[token]; ok && prof != nil && prof.ATR14 > 0 {
-			// Pull total structural range spanned across the full multi-minute execution sequence
-			macroSessionRange := session.SessionHigh - session.SessionLow
-			sessionVolatilityFactor := macroSessionRange / prof.ATR14
-
-			// CRITICAL RULE: If the entire session failed to break out past 2% of daily ATR
-			// despite massive institutional volume expansion, it is programmatically classified as ABSORPTION.
-			if sessionVolatilityFactor <= 0.02 {
-				finalizedAnomaly = models.AnomalyAbsorption
-			}
-		} else {
-			// Fallback to legacy tracking baseline if profile mapping row is completely absent
-			if session.PeakPriceRank <= 3 {
-				finalizedAnomaly = models.AnomalyAbsorption
-			}
+		// 🟢 FIX 1: If this is the first tick below threshold, tag it but don't close yet
+		if session.LastUnderThreshold.IsZero() {
+			session.LastUnderThreshold = tick.Raw.Timestamp
+			return
 		}
 
-		// Map runtime memory variables onto the immutable snapshot model for database persistence
-		snapshot := &models.VolumeRegimeSnapshot{
-			Timestamp:        tick.Raw.Timestamp,
-			InstrumentToken:  int32(session.Token),
-			StockName:        session.StockName,
-			MinuteIndex:      tick.MinuteIndex,
-			Active:           false,
-			AnomalyType:      finalizedAnomaly,
-			Direction:        session.Direction,
-			StartTime:        session.StartTime,
-			EndTime:          tick.Raw.Timestamp,
-			StartPrice:       session.StartPrice,
-			CurrentPrice:     session.CurrentPrice,
-			SignedMove:       signedMove,
-			AbsMove:          absMove,
-			PeakVolumeRank:   session.PeakVolumeRank,
-			CurrentPriceRank: session.PeakPriceRank,
+		// 🟢 FIX 2: Check if the cool-off window has fully elapsed (e.g., 10 seconds grace period)
+		if tick.Raw.Timestamp.Sub(session.LastUnderThreshold) < 10*time.Second {
+			return
 		}
-
-		// Asynchronously dispatch the dataset to the persistence layer
-		if ae.dbWriter != nil {
-			go func(snap *models.VolumeRegimeSnapshot) {
-				_ = ae.dbWriter.SaveVolumeRegimeSnapshot(context.Background(), snap)
-			}(snapshot)
-		}
-
-		// Emit structural event payloads to your UI heatmaps
-		if ae.wsHub != nil {
-			ae.wsHub.BroadcastJSON(session.StockName+":regime", map[string]any{
-				"type":    "regime_end",
-				"anomaly": finalizedAnomaly.String(),
-				"token":   session.Token,
-				"ticker":  session.StockName,
-				"data":    snapshot,
-			})
-		}
-
-		// Flush active memory token slot
-		delete(ae.sessions, token)
+	} else {
+		// Reset cool-off timestamp if volume picks back up
+		session.LastUnderThreshold = time.Time{}
 	}
+
+	// Terminate Session
+	sessionDuration := tick.Raw.Timestamp.Sub(session.StartTime)
+
+	// 🟢 FIX 3: FILTER INFANT NOISE (Ignore sessions shorter than 15 seconds)
+	if sessionDuration < 15*time.Second {
+		delete(ae.sessions, token)
+		return
+	}
+
+	signedMove := session.CurrentPrice - session.StartPrice
+	absMove := math.Abs(signedMove)
+
+	var finalizedAnomaly models.AnomalyType = models.AnomalyVolumeBurst
+
+	if prof, ok := ae.profiles[token]; ok && prof != nil && prof.ATR14 > 0 {
+		macroSessionRange := session.SessionHigh - session.SessionLow
+		sessionVolatilityFactor := macroSessionRange / prof.ATR14
+
+		// 🟢 FIX 4: Use macro tracking metrics contextually scaled for duration
+		// For longer block executions, absorption typically holds range to <= 4% of ATR
+		if sessionVolatilityFactor <= 0.04 {
+			finalizedAnomaly = models.AnomalyAbsorption
+		}
+	} else {
+		if session.PeakPriceRank <= 3 {
+			finalizedAnomaly = models.AnomalyAbsorption
+		}
+	}
+
+	snapshot := &models.VolumeRegimeSnapshot{
+		Timestamp:        tick.Raw.Timestamp,
+		InstrumentToken:  int32(session.Token),
+		StockName:        session.StockName,
+		MinuteIndex:      tick.MinuteIndex,
+		Active:           false,
+		AnomalyType:      finalizedAnomaly,
+		Direction:        session.Direction,
+		StartTime:        session.StartTime,
+		EndTime:          tick.Raw.Timestamp,
+		StartPrice:       session.StartPrice,
+		CurrentPrice:     session.CurrentPrice,
+		SignedMove:       signedMove,
+		AbsMove:          absMove,
+		PeakVolumeRank:   session.PeakVolumeRank,
+		CurrentPriceRank: session.PeakPriceRank,
+	}
+
+	if ae.dbWriter != nil {
+		go func(snap *models.VolumeRegimeSnapshot) {
+			_ = ae.dbWriter.SaveVolumeRegimeSnapshot(context.Background(), snap)
+		}(snapshot)
+	}
+
+	if ae.wsHub != nil {
+		ae.wsHub.BroadcastJSON(session.StockName+":regime", map[string]any{
+			"type":    "regime_end",
+			"anomaly": finalizedAnomaly.String(),
+			"token":   session.Token,
+			"ticker":  session.StockName,
+			"data":    snapshot,
+		})
+	}
+
+	delete(ae.sessions, token)
 }
 
-// deduceDirection evaluates price variation vectors to assign type-safe integer direction states
 func (ae *AnalyticsEngine) deduceDirection(signedMove float64) models.RegimeDirection {
 	if signedMove > 0 {
 		return models.DirectionBullish
@@ -185,7 +201,7 @@ func (ae *AnalyticsEngine) deduceDirection(signedMove float64) models.RegimeDire
 	return models.DirectionFlat
 }
 
-// Deprecated lookup functions preserved to ensure backwards compatibility with legacy interfaces
+// Deprecated lookup functions preserved for compatibility
 func (ae *AnalyticsEngine) evaluatePriceRank(token uint32, targetMin int, velocityValue float64) int {
 	var bucket *models.TimeBucketDNA
 	if dna, ok := ae.dnaMap[token]; ok {
