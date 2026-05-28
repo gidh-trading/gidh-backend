@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"math"
 	"sync"
 	"time"
 
@@ -9,11 +10,12 @@ import (
 )
 
 type InstrumentContext struct {
-	LastVolume int64
-	LastPrice  float64
-	Buffer     *TokenRollingBuffer
-	DNA        map[int]models.TimeBucketDNA
-	Profile    *models.InstrumentProfile
+	LastVolume          int64
+	LastPrice           float64
+	Buffer              *TokenRollingBuffer
+	DNA                 map[int]models.TimeBucketDNA
+	IntervalPercentiles map[string]models.PercentileThresholds // 🔥 Baseline percentiles mapping for timeframe shapes
+	Profile             *models.InstrumentProfile
 }
 
 type EnrichmentStage struct {
@@ -34,11 +36,12 @@ func NewEnrichmentStage(pm order.PositionManager, rawDnaMap map[uint32]*models.M
 		}
 
 		instruments[token] = &InstrumentContext{
-			Buffer:     NewTokenRollingBuffer(),
-			DNA:        fastDnaMap,
-			LastVolume: 0,
-			LastPrice:  0.0,
-			Profile:    profiles[token],
+			Buffer:              NewTokenRollingBuffer(),
+			DNA:                 fastDnaMap,
+			IntervalPercentiles: dna.IntervalPercentiles, // 🔥 Ingest multi-timeframe baseline shapes into context cache
+			LastVolume:          0,
+			LastPrice:           0.0,
+			Profile:             profiles[token],
 		}
 	}
 
@@ -60,10 +63,11 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	ctx, exists := s.instruments[token]
 	if !exists {
 		ctx = &InstrumentContext{
-			Buffer:     NewTokenRollingBuffer(),
-			DNA:        make(map[int]models.TimeBucketDNA),
-			LastVolume: 0,
-			LastPrice:  price,
+			Buffer:              NewTokenRollingBuffer(),
+			DNA:                 make(map[int]models.TimeBucketDNA),
+			IntervalPercentiles: make(map[string]models.PercentileThresholds),
+			LastVolume:          0,
+			LastPrice:           price,
 		}
 		s.instruments[token] = ctx
 	}
@@ -90,7 +94,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	// Push current trade details onto the sliding 60-second matrix
 	ctx.Buffer.Push(ts, price, float64(delta))
-	liveVolume, liveTickCount, _ := ctx.Buffer.GetProductionMetrics()
+	liveVolume, liveTickCount, liveDisplacement := ctx.Buffer.GetProductionMetrics()
 
 	minOfDay := (ts.Hour() * 60) + ts.Minute()
 	minuteIndex := minOfDay - 555
@@ -99,6 +103,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	volRank := 4
 	tickRank := 4
 	priceRank := 4
+	rangeRank := 4
 
 	// Evaluate participation ranks via circadian baseline time frames
 	if baseline, ok := ctx.DNA[minuteIndex]; ok {
@@ -136,29 +141,51 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		default:
 			tickRank = 1
 		}
+	}
 
-		// Dynamic Baseline-Driven Volatility Normalization
-		if ctx.Profile != nil && ctx.Profile.ATR14 > 0 {
-			_, _, rHigh, rLow, _ := ctx.Buffer.GetProductionStructure()
-			rollingWindowRange := rHigh - rLow
-			liveVolatilityFactor := rollingWindowRange / ctx.Profile.ATR14
+	// 🔥 FIXED: Dynamic Baseline-Driven Price Rank Normalization using 1m interval percentiles
+	if baseline1m, has1mBaseline := ctx.IntervalPercentiles["1m"]; has1mBaseline {
+		// Calculate structural body move magnitude
+		absDisplacement := math.Abs(liveDisplacement)
 
-			switch {
-			case liveVolatilityFactor >= baseline.VolatilityP97:
-				priceRank = 7 // True Extreme Continuous Breakout
-			case liveVolatilityFactor >= baseline.VolatilityP90:
-				priceRank = 6 // Significant continuous expansion velocity
-			case liveVolatilityFactor >= baseline.VolatilityP75:
-				priceRank = 5 // Active directional flow expansion
-			case liveVolatilityFactor >= baseline.VolatilityP50:
-				priceRank = 4 // Normal continuous drift mean
-			case liveVolatilityFactor >= baseline.VolatilityP25:
-				priceRank = 3 // Suppressed Continuous Range / High-Volume Absorption
-			case liveVolatilityFactor >= baseline.VolatilityP10:
-				priceRank = 2 // Continuous low volatility consolidation
-			default:
-				priceRank = 1 // Absolute continuous pricing deadlock
-			}
+		// Calculate total peak-to-trough boundary range
+		_, _, rHigh, rLow, _ := ctx.Buffer.GetProductionStructure()
+		liveRollingRange := rHigh - rLow
+
+		// Track 1: Body Displacement Ranking (Compares against price_pXX)
+		switch {
+		case absDisplacement >= baseline1m.PriceP97:
+			priceRank = 7
+		case absDisplacement >= baseline1m.PriceP90:
+			priceRank = 6
+		case absDisplacement >= baseline1m.PriceP75:
+			priceRank = 5
+		case absDisplacement >= baseline1m.PriceP50:
+			priceRank = 4
+		case absDisplacement >= baseline1m.PriceP25:
+			priceRank = 3
+		case absDisplacement >= baseline1m.PriceP10:
+			priceRank = 2
+		default:
+			priceRank = 1
+		}
+
+		// Track 2: Total Volatility Boundary Ranking (Compares against range_pXX)
+		switch {
+		case liveRollingRange >= baseline1m.RangeP97:
+			rangeRank = 7
+		case liveRollingRange >= baseline1m.RangeP90:
+			rangeRank = 6
+		case liveRollingRange >= baseline1m.RangeP75:
+			rangeRank = 5
+		case liveRollingRange >= baseline1m.RangeP50:
+			rangeRank = 4
+		case liveRollingRange >= baseline1m.RangeP25:
+			rangeRank = 3
+		case liveRollingRange >= baseline1m.RangeP10:
+			rangeRank = 2
+		default:
+			rangeRank = 1
 		}
 	}
 
@@ -168,6 +195,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		VolumeRank:  volRank,
 		TickRank:    tickRank,
 		PriceRank:   priceRank,
+		RangeRank:   rangeRank,
 	}
 
 	return nil

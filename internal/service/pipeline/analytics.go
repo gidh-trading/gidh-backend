@@ -65,23 +65,6 @@ func (ae *AnalyticsEngine) Analyze(tick *models.EnrichedTick) {
 	}
 }
 
-// Deprecated lookup functions preserved for backward compatibility
-func (ae *AnalyticsEngine) evaluatePriceRank(token uint32, targetMin int, velocityValue float64) int {
-	var bucket *models.TimeBucketDNA
-	if dna, ok := ae.dnaMap[token]; ok {
-		for i := range dna.TimeBuckets {
-			if dna.TimeBuckets[i].MinuteIndex == targetMin {
-				bucket = &dna.TimeBuckets[i]
-				break
-			}
-		}
-	}
-	if bucket == nil {
-		return 4
-	}
-	return ae.evalThresholds(velocityValue, bucket.VolatilityP97, bucket.VolatilityP90, bucket.VolatilityP75, bucket.VolatilityP50, bucket.VolatilityP25, bucket.VolatilityP10)
-}
-
 func (ae *AnalyticsEngine) evalThresholds(velocityValue, p97, p90, p75, p50, p25, p10 float64) int {
 	switch {
 	case velocityValue >= p97:

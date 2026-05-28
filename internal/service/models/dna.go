@@ -3,15 +3,34 @@ package models
 import "time"
 
 type MarketDNA struct {
-	InstrumentToken uint32
-	StockName       string
-	TradingDate     time.Time
-	POC             float64
-	VAH             float64
-	VAL             float64
-	MacroHVNs       []VPExtrema
-	MacroLVNs       []VPExtrema
-	TimeBuckets     []TimeBucketDNA
+	InstrumentToken     uint32
+	StockName           string
+	TradingDate         time.Time
+	POC                 float64
+	VAH                 float64
+	VAL                 float64
+	MacroHVNs           []VPExtrema
+	MacroLVNs           []VPExtrema
+	TimeBuckets         []TimeBucketDNA
+	IntervalPercentiles map[string]PercentileThresholds
+}
+
+type PercentileThresholds struct {
+	PriceP05 float64 `json:"price_p05"`
+	PriceP10 float64 `json:"price_p10"`
+	PriceP25 float64 `json:"price_p25"`
+	PriceP50 float64 `json:"price_p50"`
+	PriceP75 float64 `json:"price_p75"`
+	PriceP90 float64 `json:"price_p90"`
+	PriceP97 float64 `json:"price_p97"`
+
+	RangeP05 float64 `json:"range_p05"`
+	RangeP10 float64 `json:"range_p10"`
+	RangeP25 float64 `json:"range_p25"`
+	RangeP50 float64 `json:"range_p50"`
+	RangeP75 float64 `json:"range_p75"`
+	RangeP90 float64 `json:"range_p90"`
+	RangeP97 float64 `json:"range_p97"`
 }
 
 type TimeBucketDNA struct {
@@ -40,13 +59,4 @@ type TimeBucketDNA struct {
 	TickCountP97  float64 `json:"tick_count_p97"`
 	TickCountStd  float64 `json:"tick_count_std"`
 	TickCountMean float64 `json:"tick_count_mean"`
-
-	// Price / Volatility metrics
-	VolatilityP05 float64 `json:"volatility_p05"`
-	VolatilityP10 float64 `json:"volatility_p10"`
-	VolatilityP25 float64 `json:"volatility_p25"`
-	VolatilityP50 float64 `json:"volatility_p50"`
-	VolatilityP75 float64 `json:"volatility_p75"`
-	VolatilityP90 float64 `json:"volatility_p90"`
-	VolatilityP97 float64 `json:"volatility_p97"`
 }

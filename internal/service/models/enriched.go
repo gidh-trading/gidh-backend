@@ -7,6 +7,7 @@ type SimplifiedEnrichment struct {
 	MinuteIndex int       `json:"minute_index"`
 	VolumeRank  int       `json:"volume_rank"`
 	TickRank    int       `json:"tick_rank"`
+	RangeRank   int       `json:"range_rank"`
 	PriceRank   int       `json:"price_rank"`
 }
 

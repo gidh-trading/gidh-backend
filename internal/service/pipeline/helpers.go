@@ -78,30 +78,29 @@ func (bm *BarManager) processTickForCandle(
 	}
 
 	// 4. 🔥 ALIGNED MANUAL VOLATILITY SEPARATION (Using Candle Body Displacement)
-	if prof, ok := bm.profiles[tick.Raw.InstrumentToken]; ok && prof != nil && prof.ATR14 > 0 {
-		// Calculate the absolute directional body move (matches what your UI displays)
-		candleBodyMove := math.Abs(cs.bar.Close - cs.bar.Open)
-		volatilityFactor := candleBodyMove / prof.ATR14
+	if dna, ok := bm.dnaMap[uint32(cs.bar.InstrumentToken)]; ok && dna != nil {
+		if baseline, hasTimeframeBaseline := dna.IntervalPercentiles[timeframe]; hasTimeframeBaseline {
 
-		switch {
-		case volatilityFactor >= 0.20:
-			cs.bar.PriceRank = 7 // Saturated Volatility Expansion (P97 Magenta)
-		case volatilityFactor >= 0.10:
-			cs.bar.PriceRank = 6 // Significant Outlier Velocity (P90 Purple)
-		case volatilityFactor >= 0.05:
-			cs.bar.PriceRank = 5 // Active Directional Flow Expansion (P75 Orange)
-		case volatilityFactor >= 0.02:
-			cs.bar.PriceRank = 4 // Baseline standard drift normal boundary (P50 Yellow)
-		case volatilityFactor >= 0.01:
-			cs.bar.PriceRank = 3 // Structural limits compression box
-		case volatilityFactor >= 0.005:
-			cs.bar.PriceRank = 2 // High-Volume Absorption Sign
-		default:
-			cs.bar.PriceRank = 1 // Absolute Pricing Deadlock
-		}
-	} else {
-		if tick.Enrichment.PriceRank > cs.bar.PriceRank {
-			cs.bar.PriceRank = tick.Enrichment.PriceRank
+			// Calculate the candle's live developing absolute body displacement
+			candleBody := math.Abs(cs.bar.Close - cs.bar.Open)
+
+			switch {
+			case candleBody >= baseline.PriceP97:
+				cs.bar.PriceRank = 7
+			case candleBody >= baseline.PriceP90:
+				cs.bar.PriceRank = 6
+			case candleBody >= baseline.PriceP75:
+				cs.bar.PriceRank = 5
+			case candleBody >= baseline.PriceP50:
+				cs.bar.PriceRank = 4
+			case candleBody >= baseline.PriceP25:
+				cs.bar.PriceRank = 3
+			case candleBody >= baseline.PriceP10:
+				cs.bar.PriceRank = 2
+			default:
+				cs.bar.PriceRank = 1
+			}
+
 		}
 	}
 
