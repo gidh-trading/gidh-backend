@@ -2,16 +2,17 @@
 
 CREATE TABLE IF NOT EXISTS gidh_market_dna
 (
-    instrument_token INTEGER NOT NULL,
-    stock_name       TEXT    NOT NULL,
-    trading_date     DATE    NOT NULL,
-    poc_5d           DOUBLE PRECISION,
-    vah_5d           DOUBLE PRECISION,
-    val_5d           DOUBLE PRECISION,
-    macro_hvns       JSONB,
-    macro_lvns       JSONB,
-    time_buckets     JSONB,
-    updated_at       TIMESTAMPTZ DEFAULT NOW(),
+    instrument_token     INTEGER NOT NULL,
+    stock_name           TEXT    NOT NULL,
+    trading_date         DATE    NOT NULL,
+    poc_5d               DOUBLE PRECISION,
+    vah_5d               DOUBLE PRECISION,
+    val_5d               DOUBLE PRECISION,
+    macro_hvns           JSONB       DEFAULT '{}'::jsonb,
+    macro_lvns           JSONB       DEFAULT '{}'::jsonb,
+    time_buckets         JSONB       DEFAULT '{}'::jsonb,
+    interval_percentiles JSONB       DEFAULT '{}'::jsonb,
+    updated_at           TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (instrument_token, trading_date) -- Satisfies TimescaleDB constraint (must include partitioning column)
 );
 
@@ -36,9 +37,7 @@ CREATE TABLE IF NOT EXISTS gidh_raw_observations
     price            DOUBLE PRECISION NOT NULL,
     volume           DOUBLE PRECISION NOT NULL,
     tick_count       DOUBLE PRECISION NOT NULL,
-    relative_volume  DOUBLE PRECISION NOT NULL,
     realized_range   DOUBLE PRECISION NOT NULL,
-    efficiency       DOUBLE PRECISION NOT NULL,
     has_valid_ticks  BOOLEAN     DEFAULT false,
     created_at       TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (instrument_token, minute_index, trading_date)
