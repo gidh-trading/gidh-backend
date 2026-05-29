@@ -126,7 +126,7 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	// 2. FRESH ANOMALY SENSING (Only processed if currently idle)
 	// ==========================================================
 	if currentTrigger == "" && !hasActiveAlert {
-		if volRank >= 7 || tickRank >= 7 { // Syncs to P97 linear scale boundary
+		if volRank >= 6 || tickRank >= 6 { // Syncs to P97 linear scale boundary
 			currentTrigger = "VOLUME_SPIKE"
 		} else if isProfileMature && hasCached {
 			if price > (cached.VAH + dynamicBuffer) {

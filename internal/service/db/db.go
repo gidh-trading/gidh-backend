@@ -56,7 +56,7 @@ func CleanupBacktestData(ctx context.Context, dateStr string) error {
 	// Using a transaction to ensure atomic cleanup
 	tx, err := activePool.Begin(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to begin cleanup transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 
@@ -69,17 +69,24 @@ func CleanupBacktestData(ctx context.Context, dateStr string) error {
 		{"live_order_depth", "timestamp"},
 		{"gidh_bars", "timestamp"},
 		{"gidh_volume_profiles", "trading_date"},
-		{"gidh_orders", "trading_date"},    // Added: Clear orders for this specific backtest run
-		{"gidh_positions", "trading_date"}, // Added: Clear positions for this specific backtest run
+		{"gidh_orders", "trading_date"},
+		{"gidh_positions", "trading_date"},
 	}
 
 	for _, q := range queries {
-		// Cast columns using ::date to handle TIMESTAMPTZ and DATE identically
-		query := fmt.Sprintf("DELETE FROM %s WHERE %s::date = $1", q.table, q.col)
+		// Use explicit cast mapping to ensure string input aligns perfectly with table types
+		query := fmt.Sprintf("DELETE FROM %s WHERE %s::date = $1::date", q.table, q.col)
+
+		logger.Debugf("Executing cleanup query: %s with param: %s", query, dateStr)
 		if _, err := tx.Exec(ctx, query, dateStr); err != nil {
 			return fmt.Errorf("failed to cleanup table %s: %w", q.table, err)
 		}
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit cleanup transaction: %w", err)
+	}
+
+	logger.Infof("Successfully wiped all tables for backtest date: %s", dateStr)
+	return nil
 }

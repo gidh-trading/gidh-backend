@@ -106,7 +106,10 @@ func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
 
 	// 4. Cleanup DB for the new date
 	if err := db.CleanupBacktestData(ctx, req.Date); err != nil {
-		logger.Warnf("Cleanup failed (continuing anyway): %v", err)
+		a.managerMu.Unlock()
+		logger.Errorf("CRITICAL: Backtest cleanup failed! Aborting run to protect data integrity: %v", err)
+		http.Error(w, fmt.Sprintf("Failed to clear database before backtest: %v", err), http.StatusInternalServerError)
+		return
 	}
 
 	// 5. Override Config with API params
