@@ -133,3 +133,27 @@ func (bm *BarManager) ClearState() {
 	bm.state10m = make(map[uint32]*candleState)
 	bm.state15m = make(map[uint32]*candleState)
 }
+
+func (bm *BarManager) GetActiveBarsSnapshot(token uint32) map[string]*models.Bar {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+
+	snapshot := make(map[string]*models.Bar)
+	if cs, ok := bm.state1m[token]; ok && cs != nil {
+		snapshot["1m"] = cs.bar
+	}
+	if cs, ok := bm.state3m[token]; ok && cs != nil {
+		snapshot["3m"] = cs.bar
+	}
+	if cs, ok := bm.state5m[token]; ok && cs != nil {
+		snapshot["5m"] = cs.bar
+	}
+	if cs, ok := bm.state10m[token]; ok && cs != nil {
+		snapshot["10m"] = cs.bar
+	}
+	if cs, ok := bm.state15m[token]; ok && cs != nil {
+		snapshot["15m"] = cs.bar
+	}
+
+	return snapshot
+}

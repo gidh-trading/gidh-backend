@@ -200,3 +200,13 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	return nil
 }
+
+func (s *EnrichmentStage) GetInstrumentProfile(token uint32) (*models.InstrumentProfile, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ctx, exists := s.instruments[token]
+	if !exists || ctx == nil {
+		return nil, false
+	}
+	return ctx.Profile, true
+}

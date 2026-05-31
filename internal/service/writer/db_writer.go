@@ -13,11 +13,12 @@ import (
 )
 
 type DBWriter struct {
-	pool       *pgxpool.Pool
-	config     *DBWriterConfig
-	tickBatch  []models.TickData
-	depthBatch []DepthRecord
-	barBatch   []models.Bar
+	pool         *pgxpool.Pool
+	config       *DBWriterConfig
+	tickBatch    []models.TickData
+	depthBatch   []DepthRecord
+	barBatch     []models.Bar
+	featureBatch []FeatureRecord
 
 	batchSize     int
 	flushInterval time.Duration
@@ -35,6 +36,15 @@ type DepthRecord struct {
 	Price           float64
 	Quantity        int64
 	Orders          int
+}
+
+type FeatureRecord struct {
+	Timestamp time.Time
+	StockName string
+	TickIndex int
+	LastPrice float64
+	ATR14     float64
+	Vector    []float32
 }
 
 type DBWriterConfig struct {
@@ -60,6 +70,7 @@ func NewDBWriter(cfg *DBWriterConfig) *DBWriter {
 		tickBatch:     make([]models.TickData, 0, cfg.BatchSize),
 		depthBatch:    make([]DepthRecord, 0, cfg.BatchSize),
 		barBatch:      make([]models.Bar, 0, cfg.BatchSize),
+		featureBatch:  make([]FeatureRecord, 0, cfg.BatchSize),
 		batchSize:     cfg.BatchSize,
 		flushInterval: cfg.FlushInterval,
 		ctx:           ctx,
@@ -196,6 +207,25 @@ func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime tim
 	}
 }
 
+func (w *DBWriter) AddHistoricalFeature(rec FeatureRecord) {
+	w.mu.Lock()
+	w.featureBatch = append(w.featureBatch, rec)
+
+	if len(w.featureBatch) >= w.batchSize {
+		batch := w.featureBatch
+		w.featureBatch = make([]FeatureRecord, 0, w.batchSize)
+		w.mu.Unlock()
+
+		w.wg.Add(1)
+		go func() {
+			defer w.wg.Done()
+			w.insertFeaturesBatch(batch)
+		}()
+	} else {
+		w.mu.Unlock()
+	}
+}
+
 func (w *DBWriter) flushTimer() {
 	defer w.wg.Done()
 	ticker := time.NewTicker(w.flushInterval)
@@ -208,10 +238,12 @@ func (w *DBWriter) flushTimer() {
 			tBatch := w.tickBatch
 			dBatch := w.depthBatch
 			bBatch := w.barBatch
+			fBatch := w.featureBatch
 
 			w.tickBatch = make([]models.TickData, 0, w.batchSize)
 			w.depthBatch = make([]DepthRecord, 0, w.batchSize)
 			w.barBatch = make([]models.Bar, 0, w.batchSize)
+			w.featureBatch = make([]FeatureRecord, 0, w.batchSize)
 			w.mu.Unlock()
 
 			if len(tBatch) > 0 {
@@ -225,6 +257,11 @@ func (w *DBWriter) flushTimer() {
 			if len(bBatch) > 0 {
 				w.wg.Add(1)
 				go func() { defer w.wg.Done(); w.insertBarsBatch(bBatch) }()
+			}
+
+			if len(fBatch) > 0 {
+				w.wg.Add(1)
+				go func() { defer w.wg.Done(); w.insertFeaturesBatch(fBatch) }()
 			}
 
 		case <-w.ctx.Done():
@@ -335,6 +372,31 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 	}
 }
 
+func (w *DBWriter) insertFeaturesBatch(batch []FeatureRecord) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	copyCount, err := w.pool.CopyFrom(
+		ctx,
+		pgx.Identifier{"gidh_ml_core", "historical_features"},
+		[]string{"timestamp", "stock_name", "tick_index", "last_price", "atr_14", "observation_vector"},
+		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
+			r := batch[i]
+			return []any{r.Timestamp, r.StockName, r.TickIndex, r.LastPrice, r.ATR14, r.Vector}, nil
+		}),
+	)
+
+	if err != nil {
+		logger.Errorf("Failed to mass insert machine learning feature batch: %v", err)
+	} else {
+		logger.Debugf("Successfully inserted %d compressed ML vector records (background)", copyCount)
+	}
+}
+
 func (w *DBWriter) Close() {
 	logger.Info("Closing DB writer, flushing remaining data...")
 	w.cancel()
@@ -343,7 +405,7 @@ func (w *DBWriter) Close() {
 	tBatch := w.tickBatch
 	dBatch := w.depthBatch
 	bBatch := w.barBatch
-
+	fBatch := w.featureBatch
 	w.mu.Unlock()
 
 	if len(tBatch) > 0 {
@@ -354,6 +416,10 @@ func (w *DBWriter) Close() {
 	}
 	if len(bBatch) > 0 {
 		w.insertBarsBatch(bBatch)
+	}
+
+	if len(fBatch) > 0 {
+		w.insertFeaturesBatch(fBatch)
 	}
 
 	w.wg.Wait()

@@ -5,15 +5,18 @@ import (
 	"gidh-backend/internal/service/pipeline"
 	"gidh-backend/internal/service/writer"
 	"gidh-backend/pkg/logger"
+	"sync"
 )
 
 type Pipeline struct {
-	vpStage    *pipeline.VolumeProfileStage
-	enrichment *pipeline.EnrichmentStage
-	analytics  *pipeline.AnalyticsEngine
-	barManager *pipeline.BarManager
-	scoutStage *pipeline.ScoutStage
-	dbWriter   *writer.DBWriter
+	vpStage      *pipeline.VolumeProfileStage
+	enrichment   *pipeline.EnrichmentStage
+	analytics    *pipeline.AnalyticsEngine
+	barManager   *pipeline.BarManager
+	scoutStage   *pipeline.ScoutStage
+	dbWriter     *writer.DBWriter
+	tickIndexMap map[uint32]int
+	indexMu      sync.Mutex
 }
 
 func NewPipeline(
@@ -26,12 +29,13 @@ func NewPipeline(
 	dbWriter *writer.DBWriter,
 ) *Pipeline {
 	return &Pipeline{
-		vpStage:    vpStage,
-		enrichment: enrichment,
-		analytics:  analytics,
-		barManager: barManager,
-		scoutStage: scoutStage,
-		dbWriter:   dbWriter,
+		vpStage:      vpStage,
+		enrichment:   enrichment,
+		analytics:    analytics,
+		barManager:   barManager,
+		scoutStage:   scoutStage,
+		dbWriter:     dbWriter,
+		tickIndexMap: make(map[uint32]int),
 	}
 }
 
@@ -79,6 +83,39 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
+	// 6. HISTORICAL TRANSLATION VECTOR CORE STORE
+	if p.dbWriter != nil && p.barManager != nil && p.enrichment != nil {
+		token := rawTick.InstrumentToken
+
+		// Safely fetch active rolling candles and core instrument properties
+		rollingBars := p.barManager.GetActiveBarsSnapshot(token)
+		profile, hasProfile := p.enrichment.GetInstrumentProfile(token)
+
+		atr14 := 0.0
+		if hasProfile && profile != nil {
+			atr14 = profile.ATR14
+		}
+
+		// 🧠 Execute the real-time matrix flattening method
+		observationVector := enrichedTick.CompileObservationVector(atr14, rollingBars)
+
+		// Increment individual index counts safely
+		p.indexMu.Lock()
+		p.tickIndexMap[token]++
+		currentTickIdx := p.tickIndexMap[token]
+		p.indexMu.Unlock()
+
+		// Push the final dataset matrix down into the async CopyFrom pipeline buffer
+		p.dbWriter.AddHistoricalFeature(writer.FeatureRecord{
+			Timestamp: enrichedTick.Raw.Timestamp,
+			StockName: enrichedTick.Raw.StockName,
+			TickIndex: currentTickIdx,
+			LastPrice: enrichedTick.Raw.LastPrice,
+			ATR14:     atr14,
+			Vector:    observationVector,
+		})
+	}
+
 	return nil
 }
 
@@ -86,4 +123,7 @@ func (p *Pipeline) Reset() {
 	if p.barManager != nil {
 		p.barManager.ClearState()
 	}
+	p.indexMu.Lock()
+	p.tickIndexMap = make(map[uint32]int)
+	p.indexMu.Unlock()
 }
