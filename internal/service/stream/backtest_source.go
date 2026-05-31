@@ -20,10 +20,11 @@ type BacktestSource struct {
 		Name  string
 		Token uint32
 	}
-	nameToToken map[string]uint32
-	ctx         context.Context
-	cancel      context.CancelFunc
-	mu          sync.RWMutex
+	nameToToken     map[string]uint32
+	ctx             context.Context
+	cancel          context.CancelFunc
+	mu              sync.RWMutex
+	speedUpdateChan chan struct{} // 🟢 Wakes up the sleeping loop immediately on changes
 }
 
 type BacktestSourceConfig struct {
@@ -40,12 +41,31 @@ type BacktestSourceConfig struct {
 // NewBacktestSource is the exported constructor for the backtest engine
 func NewBacktestSource(cfg *BacktestSourceConfig) *BacktestSource {
 	return &BacktestSource{
-		dataDir:     cfg.DataDir,
-		date:        cfg.Date,
-		speedFactor: cfg.SpeedFactor,
-		instruments: cfg.Instruments,
-		nameToToken: cfg.NameToToken,
+		dataDir:         cfg.DataDir,
+		date:            cfg.Date,
+		speedFactor:     cfg.SpeedFactor,
+		instruments:     cfg.Instruments,
+		nameToToken:     cfg.NameToToken,
+		speedUpdateChan: make(chan struct{}, 1), // Non-blocking buffer slot
 	}
+}
+
+func (b *BacktestSource) SetSpeedFactor(factor float64) {
+	b.mu.Lock()
+	b.speedFactor = factor
+	b.mu.Unlock()
+
+	// 🟢 Signal to instantly break out of any active sleep loops
+	select {
+	case b.speedUpdateChan <- struct{}{}:
+	default:
+	}
+}
+
+func (b *BacktestSource) GetSpeedFactor() float64 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.speedFactor
 }
 
 func (b *BacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models.TickData) error {
@@ -65,45 +85,88 @@ func (b *BacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models.T
 		}
 	}
 
-	var firstTickTime time.Time
-	var realStartTime time.Time
+	// 🧠 Track active baseline frames
+	var anchorMarketTime time.Time
+	var anchorRealTime time.Time
+	var activeSpeedFactor float64
+
+	timer := time.NewTimer(0)
+	if !timer.Stop() {
+		<-timer.C
+	}
+	defer timer.Stop()
 
 	for h.Len() > 0 {
 		item := heap.Pop(h).(*heapItem)
 
-		// Sync Depth to Tick
 		for item.iterator.nextDepth != nil && !item.iterator.nextDepth.timestamp.After(item.tick.Timestamp) {
 			item.iterator.currentDepth = item.iterator.nextDepth.depth
 			item.iterator.nextDepth, _ = item.iterator.readNextDepthSnapshot()
 		}
 		item.tick.Depth = item.iterator.currentDepth
 
-		// BACKPRESSURE
 		select {
 		case tickChan <- item.tick:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 
-		// ---> UPDATE SLEEP LOGIC: Track against real elapsed time <---
-		if b.speedFactor > 0 {
-			if firstTickTime.IsZero() {
-				firstTickTime = item.tick.Timestamp
-				realStartTime = time.Now()
-			} else {
-				// Calculate how much market time has passed since the backtest started
-				marketDuration := item.tick.Timestamp.Sub(firstTickTime)
-				// Calculate how much real-world time SHOULD have passed at 5x speed
-				simulatedDuration := time.Duration(float64(marketDuration) / b.speedFactor)
-
-				targetRealTime := realStartTime.Add(simulatedDuration)
-				now := time.Now()
-
-				// Only sleep if we are genuinely running ahead of the target schedule
-				if targetRealTime.After(now) {
-					time.Sleep(targetRealTime.Sub(now))
-				}
+		// ============================================================================
+		// DYNAMIC CLOCK RE-ANCHORING MATRIX
+		// ============================================================================
+		for {
+			currentSpeed := b.GetSpeedFactor()
+			if currentSpeed == 0 {
+				break
 			}
+
+			// ⚡ FORCE RE-ANCHOR: If first run OR if the speed factor changed mid-stream
+			if anchorMarketTime.IsZero() || currentSpeed != activeSpeedFactor {
+				anchorMarketTime = item.tick.Timestamp
+				anchorRealTime = time.Now()
+				activeSpeedFactor = currentSpeed
+				break // Skip sleep for this specific tick to establish new reference frame
+			}
+
+			// Calculate duration relative to our dynamic anchor point instead of session start
+			marketDuration := item.tick.Timestamp.Sub(anchorMarketTime)
+			var simulatedDuration time.Duration
+
+			if currentSpeed == -99 {
+				simulatedDuration = marketDuration
+			} else if currentSpeed > 0 {
+				simulatedDuration = time.Duration(float64(marketDuration) / currentSpeed)
+			} else {
+				break
+			}
+
+			targetRealTime := anchorRealTime.Add(simulatedDuration)
+			now := time.Now()
+			waitDuration := targetRealTime.Sub(now)
+
+			if waitDuration <= 0 {
+				break
+			}
+
+			timer.Reset(waitDuration)
+
+			select {
+			case <-timer.C:
+				// Normal timed wakeup
+				break
+			case <-b.speedUpdateChan:
+				// Interrupted by an API request! Force clean the timer wheel and loop immediately
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				continue // Triggers the condition check above to immediately re-anchor
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+			break
 		}
 
 		// Read next tick

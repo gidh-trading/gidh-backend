@@ -45,6 +45,7 @@ func (a *App) initWebServer() {
 	})
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
+	mux.HandleFunc("/api/backtest/speed", a.handleBacktestSpeedUpdate)
 	mux.HandleFunc("/api/alerts", a.handleGetAlerts)
 
 	mux.HandleFunc("/api/positions", a.handleGetPositions)
@@ -191,6 +192,49 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 			"message": "No active backtest to stop",
 		})
 	}
+}
+
+type UpdateSpeedRequest struct {
+	SpeedFactor float64 `json:"speed_factor"`
+}
+
+func (a *App) handleBacktestSpeedUpdate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req UpdateSpeedRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	a.managerMu.Lock()
+	defer a.managerMu.Unlock()
+
+	if a.StreamManager == nil {
+		http.Error(w, "No active backtest running to change speed", http.StatusBadRequest)
+		return
+	}
+
+	// Dynamic Type Assertion to find our BacktestSource implementation safely
+	// inside the active stream manager
+	if backtestSrc, ok := a.StreamManager.GetSource().(*stream.BacktestSource); ok {
+		backtestSrc.SetSpeedFactor(req.SpeedFactor)
+		a.Config.BacktestSpeedFactor = req.SpeedFactor // keep global config state in sync
+
+		logger.Infof("Backtest speed factor adjusted mid-run to: %.2f", req.SpeedFactor)
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":        "success",
+			"current_speed": req.SpeedFactor,
+		})
+		return
+	}
+
+	http.Error(w, "Speed updates are only supported in backtest mode", http.StatusBadRequest)
 }
 
 func (a *App) handleGetAlerts(w http.ResponseWriter, r *http.Request) {

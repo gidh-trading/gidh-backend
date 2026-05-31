@@ -152,3 +152,7 @@ func (sm *Manager) Done() <-chan struct{} {
 func (sm *Manager) Wait() {
 	sm.workerPool.Wait()
 }
+
+func (sm *Manager) GetSource() TickDataSource {
+	return sm.source
+}
