@@ -77,13 +77,12 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.TickRank = tick.Enrichment.TickRank
 	}
 
-	// 4. 🔥 ALIGNED MANUAL VOLATILITY SEPARATION (Using Candle Body Displacement)
+	// 4. 🔥 ALIGNED LIVE VOLATILITY & BODY SEPARATION
 	if dna, ok := bm.dnaMap[uint32(cs.bar.InstrumentToken)]; ok && dna != nil {
 		if baseline, hasTimeframeBaseline := dna.IntervalPercentiles[timeframe]; hasTimeframeBaseline {
 
-			// Calculate the candle's live developing absolute body displacement
+			// Track 1: Live Candlestick Absolute Body Displacement (Net Directional Force)
 			candleBody := math.Abs(cs.bar.Close - cs.bar.Open)
-
 			switch {
 			case candleBody >= baseline.PriceP97:
 				cs.bar.PriceRank = 7
@@ -101,6 +100,24 @@ func (bm *BarManager) processTickForCandle(
 				cs.bar.PriceRank = 1
 			}
 
+			// Track 2: Live Candlestick Total High-to-Low Range (Total Volatility Boundary)
+			candleRange := cs.bar.High - cs.bar.Low
+			switch {
+			case candleRange >= baseline.RangeP97:
+				cs.bar.RangeRank = 7
+			case candleRange >= baseline.RangeP90:
+				cs.bar.RangeRank = 6
+			case candleRange >= baseline.RangeP75:
+				cs.bar.RangeRank = 5
+			case candleRange >= baseline.RangeP50:
+				cs.bar.RangeRank = 4
+			case candleRange >= baseline.RangeP25:
+				cs.bar.RangeRank = 3
+			case candleRange >= baseline.RangeP10:
+				cs.bar.RangeRank = 2
+			default:
+				cs.bar.RangeRank = 1
+			}
 		}
 	}
 

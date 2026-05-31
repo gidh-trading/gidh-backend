@@ -31,6 +31,7 @@ type Bar struct {
 	VolumeRank int `json:"volume_rank"`
 	TickRank   int `json:"tick_rank"`
 	PriceRank  int `json:"price_rank"`
+	RangeRank  int `json:"range_rank"`
 
 	Ticks []TickData `json:"-"`
 }
