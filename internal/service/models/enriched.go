@@ -51,7 +51,7 @@ func (e *EnrichedTick) CompileObservationVector(atr14 float64, rollingBars map[s
 	// ========================================================================
 	// 2. Multi-Timeframe Context Alignment with RangeRank (16 Dimensions)
 	// ========================================================================
-	timeframes := []string{"1m", "3m", "5m", "10m"}
+	timeframes := []string{"1m", "3m", "5m", "10m", "15m"}
 	for _, tf := range timeframes {
 		if bar, ok := rollingBars[tf]; ok && bar != nil {
 			obs = append(obs,
@@ -92,38 +92,3 @@ func (e *EnrichedTick) CompileObservationVector(atr14 float64, rollingBars map[s
 
 	return obs
 }
-
-// ObservationVector represents the distilled 22-dimensional market profile.
-// This matches your Python Reinforcement Learning training array sequence.
-//type ObservationVector struct {
-//	// --- Sliding 60s Buffer Ranks (5 Dimensions) ---
-//	VolumeRank    float32 `json:"volume_rank"`
-//	TickRank      float32 `json:"tick_rank"`
-//	PriceRank     float32 `json:"price_rank"`
-//	RangeRank     float32 `json:"range_rank"`
-//	BookImbalance float32 `json:"book_imbalance"`
-//
-//	// --- Multi-Timeframe Context Alignment (12 Dimensions) ---
-//	TF1mChangePct  float32 `json:"tf_1m_change_pct"`
-//	TF1mVolumeRank float32 `json:"tf_1m_volume_rank"`
-//	TF1mPriceRank  float32 `json:"tf_1m_price_rank"`
-//
-//	TF3mChangePct  float32 `json:"tf_3m_change_pct"`
-//	TF3mVolumeRank float32 `json:"tf_3m_volume_rank"`
-//	TF3mPriceRank  float32 `json:"tf_3m_price_rank"`
-//
-//	TF5mChangePct  float32 `json:"tf_5m_change_pct"`
-//	TF5mVolumeRank float32 `json:"tf_5m_volume_rank"`
-//	TF5mPriceRank  float32 `json:"tf_5m_price_rank"`
-//
-//	TF10mChangePct  float32 `json:"tf_10m_change_pct"`
-//	TF10mVolumeRank float32 `json:"tf_10m_volume_rank"`
-//	TF10mPriceRank  float32 `json:"tf_10m_price_rank"`
-//
-//	// --- Volatility-Normalized Auction Geometry (5 Dimensions) ---
-//	DistToVwap float32 `json:"dist_to_vwap"`
-//	DistToPoc  float32 `json:"dist_to_poc"`
-//	DistToVah  float32 `json:"dist_to_vah"`
-//	DistToVal  float32 `json:"dist_to_val"`
-//	ATR14      float32 `json:"atr_14"`
-//}
