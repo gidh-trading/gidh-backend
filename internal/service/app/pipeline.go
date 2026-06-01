@@ -9,14 +9,16 @@ import (
 )
 
 type Pipeline struct {
-	vpStage      *pipeline.VolumeProfileStage
-	enrichment   *pipeline.EnrichmentStage
-	analytics    *pipeline.AnalyticsEngine
-	barManager   *pipeline.BarManager
-	scoutStage   *pipeline.ScoutStage
-	dbWriter     *writer.DBWriter
-	tickIndexMap map[uint32]int
-	indexMu      sync.Mutex
+	vpStage         *pipeline.VolumeProfileStage
+	enrichment      *pipeline.EnrichmentStage
+	analytics       *pipeline.AnalyticsEngine
+	barManager      *pipeline.BarManager
+	scoutStage      *pipeline.ScoutStage
+	dbWriter        *writer.DBWriter
+	tickIndexMap    map[uint32]int
+	lastVolRankMap  map[uint32]int // ⚡ Added for velocity tracking
+	lastTickRankMap map[uint32]int // ⚡ Added for velocity tracking
+	indexMu         sync.Mutex
 }
 
 func NewPipeline(
@@ -29,18 +31,22 @@ func NewPipeline(
 	dbWriter *writer.DBWriter,
 ) *Pipeline {
 	return &Pipeline{
-		vpStage:      vpStage,
-		enrichment:   enrichment,
-		analytics:    analytics,
-		barManager:   barManager,
-		scoutStage:   scoutStage,
-		dbWriter:     dbWriter,
-		tickIndexMap: make(map[uint32]int),
+		vpStage:         vpStage,
+		enrichment:      enrichment,
+		analytics:       analytics,
+		barManager:      barManager,
+		scoutStage:      scoutStage,
+		dbWriter:        dbWriter,
+		tickIndexMap:    make(map[uint32]int),
+		lastVolRankMap:  make(map[uint32]int),
+		lastTickRankMap: make(map[uint32]int),
 	}
 }
 
 // Process implements the stream.TickProcessor interface
 func (p *Pipeline) Process(rawTick models.TickData) error {
+	token := rawTick.InstrumentToken
+
 	// 1. RAW STRUCT ARCHIVE WRITER STORAGE
 	if p.dbWriter != nil {
 		p.dbWriter.AddTick(rawTick)
@@ -52,25 +58,25 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 2. ENRICHMENT STAGE (Calculates real-time microstructural Z-Scores & maintains Day-Long Timeline Canvas Array)
+	// 2. ENRICHMENT STAGE
 	enrichedTick := &models.EnrichedTick{Raw: rawTick}
 	if err := p.enrichment.Process(enrichedTick); err != nil {
 		return err
 	}
 
-	// 3. VOLUME PROFILE STAGE (Handles dynamic session market layout structures)
+	// 3. VOLUME PROFILE STAGE
 	if p.vpStage != nil {
 		if err := p.vpStage.Process(enrichedTick); err != nil {
 			logger.Errorf("Pipeline Error: Failed to process volume profile: %v", err)
 		}
 	}
 
-	// 4. ANALYTICS STAGE (Evaluates the instantaneous pure Volume Burst Threshold)
+	// 4. ANALYTICS STAGE
 	if p.analytics != nil {
 		p.analytics.Analyze(enrichedTick)
 	}
 
-	// 5. BAR MANAGER AGGREGATION LAYER (Handles timeframes and records peak ranks)
+	// 5. BAR MANAGER AGGREGATION LAYER
 	if p.barManager != nil {
 		if err := p.barManager.Process(enrichedTick); err != nil {
 			logger.Errorf("Pipeline Error: Failed to process bar accumulation: %v", err)
@@ -85,9 +91,6 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 
 	// 6. HISTORICAL TRANSLATION VECTOR CORE STORE
 	if p.dbWriter != nil && p.barManager != nil && p.enrichment != nil {
-		token := rawTick.InstrumentToken
-
-		// Safely fetch active rolling candles and core instrument properties
 		rollingBars := p.barManager.GetActiveBarsSnapshot(token)
 		profile, hasProfile := p.enrichment.GetInstrumentProfile(token)
 
@@ -96,16 +99,29 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 			atr14 = profile.ATR14
 		}
 
-		// 🧠 Execute the real-time matrix flattening method
-		observationVector := enrichedTick.CompileObservationVector(atr14, rollingBars)
-
-		// Increment individual index counts safely
 		p.indexMu.Lock()
+		prevVolRank := p.lastVolRankMap[token]
+		prevTickRank := p.lastTickRankMap[token]
+
+		// Fallback calibration defaults for initialization steps
+		if prevVolRank == 0 {
+			prevVolRank = 4
+		}
+		if prevTickRank == 0 {
+			prevTickRank = 4
+		}
+
+		// ⚡ Pass the cached previous steps down into our new 28-dimensional pipeline structure
+		observationVector := enrichedTick.CompileObservationVector(atr14, rollingBars, prevVolRank, prevTickRank)
+
+		// Overwrite priority rank history blocks for the next step execution
+		p.lastVolRankMap[token] = enrichedTick.Enrichment.VolumeRank
+		p.lastTickRankMap[token] = enrichedTick.Enrichment.TickRank
+
 		p.tickIndexMap[token]++
 		currentTickIdx := p.tickIndexMap[token]
 		p.indexMu.Unlock()
 
-		// Push the final dataset matrix down into the async CopyFrom pipeline buffer
 		p.dbWriter.AddHistoricalFeature(writer.FeatureRecord{
 			Timestamp: enrichedTick.Raw.Timestamp,
 			StockName: enrichedTick.Raw.StockName,
