@@ -141,5 +141,7 @@ func (p *Pipeline) Reset() {
 	}
 	p.indexMu.Lock()
 	p.tickIndexMap = make(map[uint32]int)
+	p.lastVolRankMap = make(map[uint32]int)
+	p.lastTickRankMap = make(map[uint32]int)
 	p.indexMu.Unlock()
 }

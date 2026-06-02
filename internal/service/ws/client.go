@@ -45,6 +45,11 @@ func (c *Client) readPump() {
 			break
 		}
 
+		if string(message) == `{"action":"ping"}` {
+			c.conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"pong"}`))
+			continue
+		}
+
 		var req WSRequest
 		if err := json.Unmarshal(message, &req); err != nil {
 			log.Printf("error unmarshalling ws request: %v", err)
