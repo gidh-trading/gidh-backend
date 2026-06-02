@@ -48,16 +48,15 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/backtest/speed", a.handleBacktestSpeedUpdate)
 	mux.HandleFunc("/api/alerts", a.handleGetAlerts)
 
-	mux.HandleFunc("/api/positions", a.handleGetPositions)
+	// --- LOCAL REFACTORED CHANNELS ---
 	mux.HandleFunc("/api/orders/place", a.handleOrderPlace)
-
-	// Order Management Routes
 	mux.HandleFunc("/api/orders/modify", a.handleOrderModify)
 	mux.HandleFunc("/api/orders/cancel", a.handleOrderCancel)
-
-	// Position Management Routes
-	mux.HandleFunc("/api/positions/metadata", a.handlePositionMetadata)
+	mux.HandleFunc("/api/positions/metadata", a.handleUpdateExits)
 	mux.HandleFunc("/api/positions/exit", a.handlePositionExit)
+
+	mux.HandleFunc("/api/orders/", a.handleGetHistoricalOrders)
+	mux.HandleFunc("/api/positions/history/", a.handleGetHistoricalPositions)
 
 	handlerWithLogging := LoggingMiddleware(mux)
 
@@ -288,79 +287,23 @@ func (a *App) handleOrderPlace(w http.ResponseWriter, r *http.Request) {
 
 	var req models.OrderRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 
-	// a.OrderManager would be an interface initialized in app.go
-	id, err := a.OrderManager.PlaceOrder(r.Context(), req)
+	orderID, err := a.OrderManager.PlaceOrder(r.Context(), req)
 	if err != nil {
-		logger.Errorf("Order Placement Failed: %v | Request: %+v", err, req)
+		logger.Errorf("Order Execution Failed: %v", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	json.NewEncoder(w).Encode(map[string]string{"order_id": id, "status": "success"})
-}
-
-// Add the handler implementation:
-func (a *App) handleGetPositions(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-
-	// 1. Fetch positions from the manager
-	positions := a.OrderManager.GetAllPositions()
-
-	// 2. Wrap in the 'data' field to match your UI's expectation
-	response := map[string]interface{}{
-		"status": "success",
-		"data":   positions,
-	}
-
-	// 3. Send response
-	if err := json.NewEncoder(w).Encode(response); err != nil {
-		logger.Errorf("Failed to encode positions: %v", err)
-		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
-	}
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":   "success",
+		"order_id": orderID,
+	})
 }
-
-func (a *App) handlePositionMetadata(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		return
-	}
-	var req struct {
-		Symbol  string  `json:"symbol"`
-		Product string  `json:"product"`
-		TP      float64 `json:"target_price"`
-		SL      float64 `json:"stop_loss_price"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-	err := a.OrderManager.UpdatePositionMetadata(req.Symbol, req.Product, req.TP, req.SL)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	w.WriteHeader(200)
-}
-
-func (a *App) handlePositionExit(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		return
-	}
-	var req struct {
-		Symbol    string `json:"symbol"`
-		Product   string `json:"product"`
-		Qty       int    `json:"quantity"`
-		UserEmail string `json:"user_email"`
-	}
-	json.NewDecoder(r.Body).Decode(&req)
-	err := a.OrderManager.ExitPosition(r.Context(), req.Symbol, req.Product, req.Qty, req.UserEmail)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
-	w.WriteHeader(200)
-}
-
 func (a *App) handleOrderModify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -378,8 +321,8 @@ func (a *App) handleOrderModify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Call the modified OrderManager interface method
-	err := a.OrderManager.ModifyOrder(req.OrderID, req.Price, req.TargetPrice, req.StopLossPrice, req.UserEmail)
+	// ⚡ FIXED: Route purely the order modification variables down to the interface
+	err := a.OrderManager.ModifyOrder(req.OrderID, req.Price, req.UserEmail)
 	if err != nil {
 		logger.Errorf("Order Modification Failed: %v | OrderID: %s", err, req.OrderID)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -393,8 +336,6 @@ func (a *App) handleOrderModify(w http.ResponseWriter, r *http.Request) {
 		"order_id": req.OrderID,
 	})
 }
-
-// handleOrderCancel processes requests to move a pending order to a CANCELLED state.
 func (a *App) handleOrderCancel(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -407,12 +348,6 @@ func (a *App) handleOrderCancel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.OrderID == "" {
-		http.Error(w, "order_id is required", http.StatusBadRequest)
-		return
-	}
-
-	// Call the OrderManager to cancel the pending order
 	err := a.OrderManager.CancelOrder(req.OrderID, req.UserEmail)
 	if err != nil {
 		logger.Errorf("Order Cancellation Failed: %v | OrderID: %s", err, req.OrderID)
@@ -427,6 +362,120 @@ func (a *App) handleOrderCancel(w http.ResponseWriter, r *http.Request) {
 		"order_id": req.OrderID,
 	})
 }
+func (a *App) handleUpdateExits(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Symbol        string  `json:"symbol"`
+		Product       string  `json:"product"`
+		TargetPrice   float64 `json:"target_price"`
+		StopLossPrice float64 `json:"stop_loss_price"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	product := req.Product
+	if product == "" {
+		product = "MIS"
+	}
+
+	// ⚡ FIXED: Commits the manual risk targets straight into localized position RAM map
+	err := a.OrderManager.UpdatePositionMetadata(req.Symbol, product, req.TargetPrice, req.StopLossPrice)
+	if err != nil {
+		logger.Errorf("Failed to update position local metrics: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Local position parameters updated successfully",
+	})
+}
+func (a *App) handlePositionExit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req struct {
+		Symbol    string `json:"symbol"`
+		Product   string `json:"product"`
+		Quantity  int    `json:"quantity"`
+		UserEmail string `json:"user_email"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	product := req.Product
+	if product == "" {
+		product = "MIS"
+	}
+
+	err := a.OrderManager.ExitPosition(r.Context(), req.Symbol, product, req.Quantity, req.UserEmail)
+	if err != nil {
+		logger.Errorf("Manual position liquidation routing encountered error: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{
+		"status":  "success",
+		"message": "Market liquidation execution triggered successfully",
+	})
+}
+func (a *App) handleGetHistoricalOrders(w http.ResponseWriter, r *http.Request) {
+	dateStr := r.URL.Path[len("/api/orders/"):]
+	if dateStr == "" {
+		http.Error(w, "date query parameter is mandatory", http.StatusBadRequest)
+		return
+	}
+
+	orders, err := db.GetOrdersByDate(r.Context(), a.pool, dateStr)
+	if err != nil {
+		logger.Errorf("Failed to retrieve historical order rows: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "success",
+		"data":   orders,
+	})
+}
+
+func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Request) {
+	dateStr := r.URL.Path[len("/api/positions/history/"):]
+	if dateStr == "" {
+		http.Error(w, "date tracking sequence identifier is required", http.StatusBadRequest)
+		return
+	}
+
+	positions, err := db.GetPositionsByDate(r.Context(), a.pool, dateStr)
+	if err != nil {
+		logger.Errorf("Failed to query database position entities: %v", err)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"status": "success",
+		"data":   positions,
+	})
+}
 
 type StartBacktestRequest struct {
 	Date        string   `json:"date"`
@@ -435,11 +484,9 @@ type StartBacktestRequest struct {
 }
 
 type ModifyOrderRequest struct {
-	OrderID       string  `json:"order_id"`
-	Price         float64 `json:"price"`
-	TargetPrice   float64 `json:"target_price"`
-	StopLossPrice float64 `json:"stop_loss_price"`
-	UserEmail     string  `json:"user_email"`
+	OrderID   string  `json:"order_id"`
+	Price     float64 `json:"price"`
+	UserEmail string  `json:"user_email"`
 }
 
 type CancelOrderRequest struct {
@@ -475,20 +522,8 @@ func (rw *responseWriter) Flush() {
 func LoggingMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
-
-		// Initialize with 200 as default
 		wrappedWriter := &responseWriter{ResponseWriter: w, statusCode: http.StatusOK}
-
-		// Call the next handler
 		next.ServeHTTP(wrappedWriter, r)
-
-		// Log the results using your structured logger
-		duration := time.Since(start)
-		logger.Infof("%s %s | Status: %d | Duration: %v",
-			r.Method,
-			r.URL.Path,
-			wrappedWriter.statusCode,
-			duration,
-		)
+		logger.Infof("%s %s %d %v", r.Method, r.URL.Path, wrappedWriter.statusCode, time.Since(start))
 	})
 }
