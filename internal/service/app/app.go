@@ -248,12 +248,41 @@ func (a *App) Stop() {
 }
 
 func (a *App) initLiveState(ctx context.Context) {
-	if a.Config.Mode == "live" && a.OrderManager != nil {
-		// Cast the interface to the concrete LiveOrderManager
-		if liveMgr, ok := a.OrderManager.(*order.LiveOrderManager); ok {
-			if err := liveMgr.SyncExchangeState(ctx); err != nil {
-				logger.Errorf("Failed to sync exchange state: %v", err)
-			}
+	if a.Config.Mode != "live" || a.OrderManager == nil {
+		return
+	}
+
+	logger.Infof("[Startup] Initiating system crash-recovery and state reconstitution sequence...")
+
+	// 1. Recover Session Snapshot from the Local Core Database Tables
+	// This pulls today's baseline order audit log and active metadata risk positions
+	dbOrders, dbPositions, err := db.LoadSessionSnapshotFromDB(ctx, a.pool)
+	if err != nil {
+		logger.Errorf("[Startup] CRITICAL Recovery Deficit: Could not load snapshot from DB hypertables: %v", err)
+		// Do not return; try to proceed with exchange sync as a emergency fallback
+	}
+
+	// Cast the PositionManager interface to its concrete implementation types to inject data
+	if liveMgr, ok := a.OrderManager.(*order.LiveOrderManager); ok {
+		// 2. Hydrate internal RAM matrices using database historical snapshots
+		if err == nil {
+			liveMgr.ReconstituteState(dbOrders, dbPositions)
+			logger.Info("[Startup] Local RAM memory buffers successfully rehydrated from database ledger.")
+		}
+
+		// 3. Perform Live Broker Exchange Audit Verification Checklist
+		// Reconciles matching executions or manual user interventions done while server was offline
+		logger.Info("[Startup] Synchronizing state directly with broker exchange books...")
+		if err := liveMgr.SyncExchangeState(ctx); err != nil {
+			logger.Errorf("[Startup] Broker synchronization failure: %v", err)
+		} else {
+			logger.Info("[Startup] Exchange state audit complete. Local memory is perfectly calibrated.")
+		}
+	} else if paperMgr, ok := a.OrderManager.(*order.PaperPositionManager); ok {
+		// Paper mode doesn't connect to an external broker, so it relies entirely on local storage rehydration
+		if err == nil {
+			paperMgr.ReconstituteState(dbOrders, dbPositions)
+			logger.Info("[Paper Startup] Engine state fully rehydrated from database storage.")
 		}
 	}
 }

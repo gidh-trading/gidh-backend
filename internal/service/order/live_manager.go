@@ -241,42 +241,180 @@ func (lm *LiveOrderManager) executeBrokerMarketLiquidation(symbol, product, side
 	}
 }
 
-// HandleOrderUpdate ingests streaming postbacks from the Zerodha Ticker WebSocket
+// HandleOrderUpdate processes real-time execution updates streamed asynchronously from Zerodha Kite Connect.
+// This preserves localized memory risk boundaries while syncing execution changes down to the UI stores.
 func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	logger.Infof("[Live] Broker Order Postback Received: %s -> %s", o.OrderID, o.Status)
+	statusUpper := strings.ToUpper(o.Status)
+	logger.Infof("[Live Engine] Processing broker update for OrderID: %s, Status: %s (Filled: %d/%d)",
+		o.OrderID, statusUpper, o.FilledQuantity, o.Quantity)
 
-	fillQty := int(o.FilledQuantity)
-	prevFillQty := 0
-	for _, ob := range lm.orderBook {
-		if ob.OrderID == o.OrderID {
-			prevFillQty = ob.FilledQty
+	var existingEntry *models.OrderBookEntry
+
+	// 1. Locate the existing entry inside our localized session cache book
+	for i := range lm.orderBook {
+		if lm.orderBook[i].OrderID == o.OrderID {
+			existingEntry = &lm.orderBook[i]
 			break
 		}
 	}
 
-	// Discard out-of-order network frames to prevent corrupting partial fill calculation metrics
-	if fillQty < prevFillQty {
-		logger.Warnf("[Live] Ignoring stale out-of-order frame update for %s (Received: %d, Current: %d)", o.OrderID, fillQty, prevFillQty)
-		return
+	// 2. If the order entity doesn't exist yet (e.g. execution frame caught right at boot), allocate it in cache
+	if existingEntry == nil {
+		newEntry := models.OrderBookEntry{
+			OrderID:   o.OrderID,
+			Symbol:    strings.ToUpper(o.TradingSymbol),
+			Side:      strings.ToUpper(o.TransactionType),
+			OrderType: strings.ToUpper(o.OrderType),
+			Qty:       int(o.Quantity),
+			FilledQty: int(o.FilledQuantity),
+			Price:     o.Price,
+			Status:    statusUpper,
+			Timestamp: o.OrderTimestamp.Time,
+		}
+		if newEntry.Timestamp.IsZero() {
+			newEntry.Timestamp = time.Now()
+		}
+		lm.orderBook = append(lm.orderBook, newEntry)
+		existingEntry = &lm.orderBook[len(lm.orderBook)-1]
+	} else {
+		// Update core incremental tracking variables safely via the active map pointer
+		existingEntry.FilledQty = int(o.FilledQuantity)
+		existingEntry.Status = statusUpper
 	}
 
-	qtyDelta := fillQty - prevFillQty
-	entry := lm.mapKiteOrderToLocal(o)
-	lm.updateLocalOrderBookCache(entry)
-
-	// Dynamically absorb partial executions into the active stock position box
-	if qtyDelta > 0 {
-		lm.updatePositionStateFromFill(o.TradingSymbol, o.Product, o.TransactionType, qtyDelta, o.AveragePrice)
+	// 3. Persist entry audit state directly to the SQL database tables
+	if lm.dbWriter != nil {
+		lm.dbWriter.PersistOrder(*existingEntry)
 	}
+
+	// 4. Dispatch Event Frame A to keep frontend execution meters perfectly synchronized
+	lm.broadcastOrderUpdate(*existingEntry)
+
+	// 5. Manage active position mapping tracking if an order has registered fills
+	if o.FilledQuantity > 0 {
+		symbolKey := strings.ToUpper(o.TradingSymbol)
+		productKey := strings.ToUpper(o.Product)
+		key := fmt.Sprintf("%s:%s", symbolKey, productKey)
+
+		pos, exists := lm.activePositions[key]
+		if !exists {
+			// Allocate a brand-new live position box.
+			// We intentionally start risk boundaries at 0.00 to avoid client guessing games.
+			pos = &models.Position{
+				Symbol:        symbolKey,
+				Product:       productKey,
+				NetQuantity:   0,
+				AveragePrice:  0,
+				TargetPrice:   0,
+				StopLossPrice: 0,
+			}
+			lm.activePositions[key] = pos
+		}
+
+		// Calculate matching fills safely using last fill differences
+		// This protects position calculation logic if Kite fires multiple partial fill frames sequentially
+		fillDelta := int(o.FilledQuantity) - pos.LastFillQty
+		if fillDelta > 0 {
+			sideUpper := strings.ToUpper(o.TransactionType)
+
+			// Recalculate average execution rates and current active exposure direction blocks
+			if pos.NetQuantity == 0 {
+				pos.AveragePrice = o.Price
+				if sideUpper == "BUY" {
+					pos.Side = "LONG"
+					pos.NetQuantity = int(fillDelta)
+				} else {
+					pos.Side = "SHORT"
+					pos.NetQuantity = int(-fillDelta)
+				}
+			} else {
+				// Aggregate calculation for active scaling modifications
+				currentQty := pos.NetQuantity
+				if pos.Side == "SHORT" {
+					currentQty = -pos.NetQuantity
+				}
+
+				tradeQty := fillDelta
+				if sideUpper == "SELL" {
+					tradeQty = -fillDelta
+				}
+
+				newNetQty := currentQty + int(tradeQty)
+
+				// If adding to the position direction, recalculate weighted average execution entry rate
+				if (currentQty > 0 && tradeQty > 0) || (currentQty < 0 && tradeQty < 0) {
+					totalCost := (float64(abs(currentQty)) * pos.AveragePrice) + (float64(abs(tradeQty)) * o.Price)
+					pos.AveragePrice = totalCost / float64(abs(newNetQty))
+				}
+
+				// Assign exposure direction strings
+				if newNetQty > 0 {
+					pos.Side = "LONG"
+					pos.NetQuantity = newNetQty
+				} else if newNetQty < 0 {
+					pos.Side = "SHORT"
+					pos.NetQuantity = abs(newNetQty)
+				} else {
+					// The position has completely flattened out to 0
+					pos.NetQuantity = 0
+				}
+			}
+
+			// Cache historical fill markers to handle consecutive calculation packages smoothly
+			pos.LastFillQty = int(o.FilledQuantity)
+		}
+
+		// 6. Absolute Squaring Off Cleanup Workflow Checklist Verification
+		// If a position returns to 0 shares, clear risk allocations instantly to wipe chart lines
+		if pos.NetQuantity == 0 {
+			pos.Side = ""
+			pos.AveragePrice = 0
+			pos.RealizedPnL = 0
+			pos.UnrealizedPnL = 0
+			pos.TargetPrice = 0
+			pos.StopLossPrice = 0
+			pos.LastFillQty = 0
+		}
+
+		// 7. Flush the position state box down into the core persistent hypertables
+		if lm.dbWriter != nil {
+			lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
+		}
+
+		// 8. Dispatch Event Frame B to immediately refresh client dashboards or wipe ghost chart lines
+		lm.broadcastPositionUpdate(pos)
+	}
+
+	// Reset fill state counters if the underlying entry has fully finalized its execution path
+	if statusUpper == "COMPLETE" || statusUpper == "CANCELLED" || statusUpper == "REJECTED" {
+		if existingEntry != nil {
+			// Zero out position reference fields for future order tickets
+			symbolKey := strings.ToUpper(o.TradingSymbol)
+			productKey := strings.ToUpper(o.Product)
+			key := fmt.Sprintf("%s:%s", symbolKey, productKey)
+			if pos, exists := lm.activePositions[key]; exists {
+				pos.LastFillQty = 0
+			}
+		}
+	}
+}
+
+// Simple absolute value helper function for integer calculations
+func abs(v int) int {
+	if v < 0 {
+		return -v
+	}
+	return v
 }
 
 // ============================================================================
 // 3. Local Memory Position Risk Mutators
 // ============================================================================
 
+// UpdatePositionMetadata commits manual risk targets straight into localized position RAM map
 func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string, tp float64, sl float64) error {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
@@ -288,15 +426,17 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 		return fmt.Errorf("cannot assign risk boundaries to an empty position for %s", symbol)
 	}
 
+	// Update RAM coordinates directly. 0 overrides past constraints to clear visual targets.
 	pos.TargetPrice = tp
 	pos.StopLossPrice = sl
 
 	if lm.dbWriter != nil {
 		lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
 	}
-	lm.broadcastPositionUpdate(pos)
 
 	logger.Infof("[Live] In-Memory Risk Bounds Saved for %s: TP=%.2f, SL=%.2f", symbolKey, tp, sl)
+	lm.broadcastPositionUpdate(pos)
+
 	return nil
 }
 
@@ -510,4 +650,40 @@ func (lm *LiveOrderManager) ClearPositions() {
 	lm.orderBook = make([]models.OrderBookEntry, 0)
 	lm.lastPrices = make(map[string]float64)
 	logger.Info("Live Position Manager cache state wiped cleanly.")
+}
+
+// ReconstituteState rehydrates active live exposures and session logs into RAM upon a backend crash or restart.
+func (lm *LiveOrderManager) ReconstituteState(orders []models.OrderBookEntry, positions []models.Position) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+
+	// 1. Rehydrate the underlying order book ledger for the current session
+	lm.orderBook = orders
+
+	// 2. Scan and rehydrate only unhedged/open risk entries directly into the memory container
+	for i := range positions {
+		pos := positions[i]
+
+		// The frontend terminal explicitly tracks protection borders for slots with active exposure
+		if pos.NetQuantity != 0 {
+			key := fmt.Sprintf("%s:%s", strings.ToUpper(pos.Symbol), strings.ToUpper(pos.Product))
+
+			// Allocate memory and copy values to avoid structural slice alignment leaks
+			lm.activePositions[key] = &models.Position{
+				Symbol:        pos.Symbol,
+				Product:       pos.Product,
+				Side:          pos.Side,
+				NetQuantity:   pos.NetQuantity,
+				AveragePrice:  pos.AveragePrice,
+				RealizedPnL:   pos.RealizedPnL,
+				UnrealizedPnL: pos.UnrealizedPnL,
+				TargetPrice:   pos.TargetPrice,   // Restores the exact horizontal boundary coordinate
+				StopLossPrice: pos.StopLossPrice, // Restores the exact floor line coordinate
+			}
+
+			logger.Infof("[Live Startup] Reconstituted active engine map for %s: NetQty=%d, SL=%.2f, TP=%.2f",
+				key, pos.NetQuantity, pos.StopLossPrice, pos.TargetPrice)
+		}
+	}
+	logger.Infof("[Live Startup] Memory footprint restoration complete. %d orders and %d active positions tracked.", len(lm.orderBook), len(lm.activePositions))
 }

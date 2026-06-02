@@ -24,4 +24,5 @@ type PositionManager interface {
 	GetOrders(symbol string) []models.OrderBookEntry
 	GetAllPositions() []models.Position
 	ClearPositions()
+	ReconstituteState(orders []models.OrderBookEntry, positions []models.Position)
 }

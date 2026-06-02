@@ -88,8 +88,11 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	if price != ctx.LastPrice && s.positionManager != nil {
+		// Triggers real-time evaluation rules safely
 		s.positionManager.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice, tick.Raw.Timestamp)
 	}
+
+	// Update the cache context AFTER the position manager checks its constraints
 	ctx.LastPrice = price
 
 	// Push current trade details onto the sliding 60-second matrix

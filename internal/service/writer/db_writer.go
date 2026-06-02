@@ -2,6 +2,7 @@ package writer
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"time"
 
@@ -152,35 +153,55 @@ func (w *DBWriter) AddBar(bar models.Bar) {
 	}
 }
 
+// PersistOrder commits an entry tracking attempt lifecycle log directly to storage.
+// It is fully decoupled from trailing stop-loss or take-profit threshold modifications.
 func (w *DBWriter) PersistOrder(order models.OrderBookEntry) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	// Clean, downscaled SQL schema format featuring exactly 13 target coordinates
 	query := `
-		INSERT INTO gidh_orders (
-			order_id, symbol, product, side, order_type, quantity, 
-			filled_qty, price, status, timestamp, target_price, sl_price, trading_date, user_email, sibling_order_id
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-		ON CONFLICT (order_id) DO UPDATE SET
-			status = EXCLUDED.status,
-			filled_qty = EXCLUDED.filled_qty,
-			price = EXCLUDED.price,
-			user_email = EXCLUDED.user_email,
-			sibling_order_id = EXCLUDED.sibling_order_id;`
+	INSERT INTO gidh_orders (
+		order_id, symbol, product, side, order_type, quantity, 
+		filled_qty, price, status, timestamp, trading_date, user_email
+	) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+	ON CONFLICT (order_id) DO UPDATE SET
+		status = EXCLUDED.status,
+		filled_qty = EXCLUDED.filled_qty,
+		price = EXCLUDED.price,
+		user_email = EXCLUDED.user_email;`
 
-	// 🧠 Maps order.UserEmail directly to the 14th placeholder query argument ($14)
+	// Derive the product context if it's missing or mixed case (fallback to MIS standard safety)
 	_, err := w.pool.Exec(ctx, query,
-		order.OrderID, order.Symbol, "MIS", order.Side, order.OrderType, order.Qty,
-		order.FilledQty, order.Price, order.Status, order.Timestamp,
-		order.TargetPrice, order.StopLossPrice, order.Timestamp, order.UserEmail, order.SiblingOrderID)
+		order.OrderID,
+		strings.ToUpper(order.Symbol),
+		"MIS",
+		strings.ToUpper(order.Side),
+		strings.ToUpper(order.OrderType),
+		order.Qty,
+		order.FilledQty,
+		order.Price,
+		strings.ToUpper(order.Status),
+		order.Timestamp,
+		order.Timestamp,
+		order.UserEmail,
+	)
 
 	if err != nil {
-		logger.Errorf("DB Error persisting order %s: %v", order.OrderID, err)
+		logger.Errorf("DB Error persisting order event %s: %v", order.OrderID, err)
 	}
 }
 
+// PersistPositionSnapshot commits manual or market-triggered risk boundary limits to persistent records.
+// This completely updates coordinates, safely archiving 0.00 clear values on absolute liquidations.
 func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime time.Time) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -199,11 +220,19 @@ func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime tim
 			updated_at = NOW();`
 
 	_, err := w.pool.Exec(ctx, query,
-		sessionTime, pos.Symbol, pos.Product, pos.Side, pos.NetQuantity,
-		pos.AveragePrice, pos.RealizedPnL, pos.TargetPrice, pos.StopLossPrice)
+		sessionTime.Format("2006-01-02"),
+		strings.ToUpper(pos.Symbol),
+		strings.ToUpper(pos.Product),
+		strings.ToUpper(pos.Side),
+		pos.NetQuantity,
+		pos.AveragePrice,
+		pos.RealizedPnL,
+		pos.TargetPrice,
+		pos.StopLossPrice,
+	)
 
 	if err != nil {
-		logger.Errorf("DB Error persisting position %s: %v", pos.Symbol, err)
+		logger.Errorf("DB Error persisting risk boundary snapshot for token %s: %v", pos.Symbol, err)
 	}
 }
 

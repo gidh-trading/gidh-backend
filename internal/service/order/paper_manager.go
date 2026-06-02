@@ -150,6 +150,7 @@ func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product st
 		return fmt.Errorf("cannot assign risk limits to an empty position for %s", symbol)
 	}
 
+	// Commit floor/ceiling targets directly. 0 explicitly turns off the horizontal metric lines.
 	pos.TargetPrice = tp
 	pos.StopLossPrice = sl
 
@@ -161,12 +162,22 @@ func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product st
 		sessionTime = time.Now()
 	}
 
+	if pos.NetQuantity == 0 {
+		pos.Side = ""
+		pos.AveragePrice = 0
+		pos.RealizedPnL = 0
+		pos.UnrealizedPnL = 0
+		pos.TargetPrice = 0
+		pos.StopLossPrice = 0
+	}
+
 	if pm.dbWriter != nil {
 		pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
 	}
+
+	logger.Infof("[Paper] Risk Balance Synchronized for %s: TP=%.2f, SL=%.2f", symbolUpper, tp, sl)
 	pm.broadcastPositionUpdate(pos)
 
-	logger.Infof("[Paper] Local Risk Boundaries Committed for %s: TP=%.2f, SL=%.2f", symbolUpper, tp, sl)
 	return nil
 }
 
@@ -195,22 +206,29 @@ func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, us
 	return fmt.Errorf("pending order ID %s not found in memory cache", orderID)
 }
 
-// CancelOrder revokes local tracking for pending items
+// CancelOrder revokes local tracking for pending items or unexecuted leaves of a partial fill
 func (pm *PaperPositionManager) CancelOrder(orderID string, userEmail string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	for i := range pm.orderBook {
 		if pm.orderBook[i].OrderID == orderID {
-			if pm.orderBook[i].Status != "PENDING" {
+			// If it's already completely filled or rejected, it can't be cancelled
+			if pm.orderBook[i].Status == "COMPLETE" || pm.orderBook[i].Status == "REJECTED" || pm.orderBook[i].Status == "CANCELLED" {
 				return fmt.Errorf("order is already finalized with status: %s", pm.orderBook[i].Status)
 			}
+
+			// Transition order status to CANCELLED but preserve filled_qty for progress bars
 			pm.orderBook[i].Status = "CANCELLED"
 			pm.orderBook[i].UserEmail = userEmail
 
 			if pm.dbWriter != nil {
 				pm.dbWriter.PersistOrder(pm.orderBook[i])
 			}
+
+			logger.Infof("[Paper] Pending entry leaves truncated for OrderID: %s (Filled: %d/%d)",
+				orderID, pm.orderBook[i].FilledQty, pm.orderBook[i].Qty)
+
 			pm.broadcastOrderUpdate(pm.orderBook[i])
 			return nil
 		}
@@ -433,4 +451,25 @@ func (pm *PaperPositionManager) ClearPositions() {
 	pm.lastTimestamps = make(map[string]time.Time)
 	pm.currentSimTime = time.Time{}
 	logger.Info("Paper Position Manager state cleared cleanly.")
+}
+
+// ReconstituteState hydrates the active memory maps using structural records pulled from storage on startup.
+func (pm *PaperPositionManager) ReconstituteState(orders []models.OrderBookEntry, positions []models.Position) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+
+	// 1. Rehydrate the live engine order book cache
+	pm.orderBook = orders
+
+	// 2. Rehydrate active open exposures into RAM
+	for i := range positions {
+		pos := positions[i]
+		// The UI only cares about tracking active boundaries for items with open market exposure
+		if pos.NetQuantity != 0 {
+			key := fmt.Sprintf("%s:%s", strings.ToUpper(pos.Symbol), strings.ToUpper(pos.Product))
+			pm.activePositions[key] = &pos
+			logger.Infof("[Paper Startup] Reconstituted active memory slot for %s: NetQty=%d, SL=%.2f, TP=%.2f",
+				key, pos.NetQuantity, pos.StopLossPrice, pos.TargetPrice)
+		}
+	}
 }

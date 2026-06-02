@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"gidh-backend/internal/service/db"
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/order"
 	"gidh-backend/internal/service/pipeline"
 	"gidh-backend/internal/service/reader"
 	"gidh-backend/internal/service/stream"
@@ -14,7 +15,9 @@ import (
 	"gidh-backend/pkg/logger"
 	"net"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -436,44 +439,178 @@ func (a *App) handlePositionExit(w http.ResponseWriter, r *http.Request) {
 	})
 }
 func (a *App) handleGetHistoricalOrders(w http.ResponseWriter, r *http.Request) {
-	dateStr := r.URL.Path[len("/api/orders/"):]
-	if dateStr == "" {
-		http.Error(w, "date query parameter is mandatory", http.StatusBadRequest)
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	orders, err := db.GetOrdersByDate(r.Context(), a.pool, dateStr)
-	if err != nil {
-		logger.Errorf("Failed to retrieve historical order rows: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	// 1. Path sanitization wrapper matching the UI URL layout
+	pathOnly := r.URL.Path
+	if len(pathOnly) <= len("/api/orders/") {
+		http.Error(w, "date query parameter identifier is mandatory", http.StatusBadRequest)
 		return
 	}
+	dateStr := pathOnly[len("/api/orders/"):]
+	if idx := strings.Index(dateStr, "?"); idx != -1 {
+		dateStr = dateStr[:idx]
+	}
+	dateStr = strings.TrimSpace(strings.TrimSuffix(dateStr, "/"))
+
+	if dateStr == "" {
+		http.Error(w, "date query parameter identifier is mandatory", http.StatusBadRequest)
+		return
+	}
+
+	// 2. Query historical entries recorded in the SQL Hypertable
+	dbOrders := make([]models.OrderBookEntry, 0)
+	rows, err := a.pool.Query(r.Context(), `
+		SELECT order_id, symbol, side, order_type, quantity, filled_qty, price, status, timestamp, user_email
+		FROM gidh_orders
+		WHERE trading_date::date = $1::date
+		ORDER BY timestamp DESC`, dateStr)
+	if err != nil {
+		logger.Errorf("Failed to query historical orders ledger for date %s: %v", dateStr, err)
+		http.Error(w, "Database query execution failure", http.StatusInternalServerError)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var o models.OrderBookEntry
+		var side, oType string
+		err := rows.Scan(&o.OrderID, &o.Symbol, &side, &oType, &o.Qty, &o.FilledQty, &o.Price, &o.Status, &o.Timestamp, &o.UserEmail)
+		if err != nil {
+			logger.Errorf("Failed to scan historical order row: %v", err)
+			continue
+		}
+		o.Side = strings.ToUpper(side)
+		o.OrderType = strings.ToUpper(oType)
+		dbOrders = append(dbOrders, o)
+	}
+
+	// 3. Extract unexecuted/floating orders currently active inside internal engine memory
+	// This captures pending orders if they haven't written flush frames to the database yet.
+	orderMap := make(map[string]models.OrderBookEntry)
+	for _, o := range dbOrders {
+		orderMap[o.OrderID] = o
+	}
+
+	// Blend active configurations memory entries on top of historical slices
+	if a.OrderManager != nil {
+		// Gather orders via the underlying concrete memory book map loops
+		var memoryOrders []models.OrderBookEntry
+		if liveMgr, ok := a.OrderManager.(*order.LiveOrderManager); ok {
+			memoryOrders = liveMgr.GetOrders("") // Empty string gets all, or loop symbols
+		} else if paperMgr, ok := a.OrderManager.(*order.PaperPositionManager); ok {
+			memoryOrders = paperMgr.GetOrders("")
+		}
+
+		for _, mo := range memoryOrders {
+			// Memory cache always overrides stale database logs for open entries
+			orderMap[mo.OrderID] = mo
+		}
+	}
+
+	// Flatten the map back into a clean chronological array sequence
+	finalOrders := make([]models.OrderBookEntry, 0, len(orderMap))
+	for _, o := range orderMap {
+		finalOrders = append(finalOrders, o)
+	}
+
+	// Sort array descending so newest entry items sit right on top of the UI list view
+	sort.Slice(finalOrders, func(i, j int) bool {
+		return finalOrders[i].Timestamp.After(finalOrders[j].Timestamp)
+	})
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
 		"status": "success",
-		"data":   orders,
+		"data":   finalOrders,
 	})
 }
-
 func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Request) {
-	dateStr := r.URL.Path[len("/api/positions/history/"):]
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	pathOnly := r.URL.Path
+	if len(pathOnly) <= len("/api/positions/history/") {
+		http.Error(w, "date tracking sequence identifier is required", http.StatusBadRequest)
+		return
+	}
+	dateStr := pathOnly[len("/api/positions/history/"):]
+	if idx := strings.Index(dateStr, "?"); idx != -1 {
+		dateStr = dateStr[:idx]
+	}
+	dateStr = strings.TrimSpace(strings.TrimSuffix(dateStr, "/"))
+
 	if dateStr == "" {
 		http.Error(w, "date tracking sequence identifier is required", http.StatusBadRequest)
 		return
 	}
 
-	positions, err := db.GetPositionsByDate(r.Context(), a.pool, dateStr)
+	// 1. Fetch completed/settled historical position frames from the database table
+	positionMap := make(map[string]models.Position)
+	rows, err := a.pool.Query(r.Context(), `
+		SELECT symbol, product, side, net_quantity, avg_price, realized_pnl, target_price, stop_loss_price
+		FROM gidh_positions
+		WHERE trading_date = $1::date`, dateStr)
 	if err != nil {
-		logger.Errorf("Failed to query database position entities: %v", err)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		logger.Errorf("Failed to query historical positions ledger for date %s: %v", dateStr, err)
+		http.Error(w, "Database query execution failure", http.StatusInternalServerError)
 		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var p models.Position
+		err := rows.Scan(&p.Symbol, &p.Product, &p.Side, &p.NetQuantity, &p.AveragePrice, &p.RealizedPnL, &p.TargetPrice, &p.StopLossPrice)
+		if err != nil {
+			logger.Errorf("Failed to scan historical position entry: %v", err)
+			continue
+		}
+		p.Symbol = strings.ToUpper(p.Symbol)
+		p.Product = strings.ToUpper(p.Product)
+		p.Side = strings.ToUpper(p.Side)
+
+		key := fmt.Sprintf("%s:%s", p.Symbol, p.Product)
+		positionMap[key] = p
+	}
+
+	// 2. Ingest live exposure slots from RAM memory caches to override active parameters
+	if a.OrderManager != nil {
+		livePositions := a.OrderManager.GetAllPositions()
+
+		for _, lp := range livePositions {
+			lp.Symbol = strings.ToUpper(lp.Symbol)
+			lp.Product = strings.ToUpper(lp.Product)
+			key := fmt.Sprintf("%s:%s", lp.Symbol, lp.Product)
+
+			// RAM state always dictates the true active net_quantity and current localized boundaries
+			positionMap[key] = lp
+		}
+	}
+
+	// 3. Convert integrated state map back into an unified layout response slice
+	finalPositions := make([]models.Position, 0, len(positionMap))
+	for _, pos := range positionMap {
+		// Clean up fields if position is flat to satisfy squaring off canvas logic
+		if pos.NetQuantity == 0 {
+			pos.Side = ""
+			pos.TargetPrice = 0
+			pos.StopLossPrice = 0
+			pos.UnrealizedPnL = 0
+		}
+		finalPositions = append(finalPositions, pos)
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
 		"status": "success",
-		"data":   positions,
+		"data":   finalPositions,
 	})
 }
 
