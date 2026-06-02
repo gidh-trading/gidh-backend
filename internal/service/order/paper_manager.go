@@ -3,13 +3,13 @@ package order
 import (
 	"context"
 	"fmt"
-	"gidh-backend/internal/service/writer"
 	"math"
 	"strings"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/writer"
 	"gidh-backend/internal/service/ws"
 	"gidh-backend/pkg/logger"
 )
@@ -19,8 +19,8 @@ type PaperPositionManager struct {
 	activePositions map[string]*models.Position
 	orderBook       []models.OrderBookEntry
 	lastPrices      map[string]float64
-	lastTimestamps  map[string]time.Time // NEW: Tracks latest historical timestamp per symbol
-	currentSimTime  time.Time            // NEW: Tracks global simulation milestone time
+	lastTimestamps  map[string]time.Time
+	currentSimTime  time.Time
 	wsHub           *ws.Hub
 	dbWriter        *writer.DBWriter
 }
@@ -30,61 +30,56 @@ func NewPaperPositionManager(hub *ws.Hub, db *writer.DBWriter) *PaperPositionMan
 		activePositions: make(map[string]*models.Position),
 		orderBook:       make([]models.OrderBookEntry, 0),
 		lastPrices:      make(map[string]float64),
-		lastTimestamps:  make(map[string]time.Time), // NEW
+		lastTimestamps:  make(map[string]time.Time),
 		wsHub:           hub,
 		dbWriter:        db,
 	}
 }
 
-// PlaceOrder handles the initial intent. MARKET fills immediately, LIMIT stays PENDING.
+// PlaceOrder routes entry intent. MARKET fills instantly, LIMIT remains PENDING.
 func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.OrderRequest) (string, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	orderID := fmt.Sprintf("PPR-%d", time.Now().UnixNano())
-
-	// FIX: Deduce simulation time context instead of system clock wall-time
 	orderTime := pm.currentSimTime
 	if orderTime.IsZero() {
 		orderTime = time.Now()
 	}
 
 	entry := models.OrderBookEntry{
-		OrderID:       orderID,
-		Symbol:        req.Symbol,
-		Side:          req.TransactionType,
-		OrderType:     req.OrderType,
-		Qty:           req.Quantity,
-		Price:         req.Price,
-		TargetPrice:   req.TargetPrice,
-		StopLossPrice: req.StopLossPrice,
-		Status:        "PENDING",
-		Timestamp:     orderTime,
-		UserEmail:     req.UserEmail,
+		OrderID:   orderID,
+		Symbol:    strings.ToUpper(req.Symbol),
+		Side:      strings.ToUpper(req.TransactionType),
+		OrderType: strings.ToUpper(req.OrderType),
+		Qty:       req.Quantity,
+		Price:     req.Price,
+		Status:    "PENDING",
+		Timestamp: orderTime,
+		UserEmail: req.UserEmail,
 	}
 
-	if req.OrderType == "MARKET" {
-		ltp, exists := pm.lastPrices[strings.ToUpper(req.Symbol)]
+	if entry.OrderType == "MARKET" {
+		ltp, exists := pm.lastPrices[entry.Symbol]
 		if !exists {
 			return "", fmt.Errorf("no market price available for %s", req.Symbol)
 		}
-
 		entry.Price = ltp
 		entry.Status = "COMPLETE"
 		entry.FilledQty = req.Quantity
-		pm.updatePositionState(req, ltp, entry.Timestamp)
+		pm.updatePositionState(entry.Symbol, req.Product, entry.Side, req.Quantity, ltp, entry.Timestamp)
 	}
 
 	pm.orderBook = append(pm.orderBook, entry)
-
 	if pm.dbWriter != nil {
 		pm.dbWriter.PersistOrder(entry)
 	}
-
 	pm.broadcastOrderUpdate(entry)
+
 	return orderID, nil
 }
 
+// OnPriceUpdate parses ticks, executes limit order fills, and scans local SL/TP boundaries
 func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts time.Time) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -94,12 +89,11 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 	pm.lastTimestamps[symbolKey] = ts
 	pm.currentSimTime = ts
 
-	// 1. Check Order Book for pending LIMIT orders (Upgraded to handle case-insensitivity)
+	// 1. Process Pending LIMIT Orders
 	for i := range pm.orderBook {
 		order := &pm.orderBook[i]
-		if order.Status == "PENDING" && strings.ToUpper(order.Symbol) == symbolKey && order.OrderType == "LIMIT" {
+		if order.Status == "PENDING" && order.OrderType == "LIMIT" && order.Symbol == symbolKey {
 			shouldFill := (order.Side == "BUY" && ltp <= order.Price) || (order.Side == "SELL" && ltp >= order.Price)
-
 			if shouldFill {
 				order.Status = "COMPLETE"
 				order.FilledQty = order.Qty
@@ -108,27 +102,19 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 				if pm.dbWriter != nil {
 					pm.dbWriter.PersistOrder(*order)
 				}
-
-				req := models.OrderRequest{
-					Symbol:          order.Symbol,
-					Product:         "MIS",
-					TransactionType: order.Side,
-					Quantity:        order.Qty,
-					TargetPrice:     order.TargetPrice,
-					StopLossPrice:   order.StopLossPrice,
-				}
-				pm.updatePositionState(req, order.Price, order.Timestamp)
+				pm.updatePositionState(order.Symbol, "MIS", order.Side, order.Qty, order.Price, ts)
 				pm.broadcastOrderUpdate(*order)
 			}
 		}
 	}
 
-	// 2. Recalculate PnL and Check Target/StopLoss for active positions
+	// 2. Track Risk Metrics & Scan for Local SL/TP Breaks
 	for _, product := range []string{"MIS", "CNC"} {
 		key := fmt.Sprintf("%s:%s", symbolKey, product)
 		pos, exists := pm.activePositions[key]
 
 		if exists && pos.NetQuantity != 0 {
+			// Update ongoing simulation open metrics
 			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 
 			isTargetHit := (pos.Side == "LONG" && pos.TargetPrice > 0 && ltp >= pos.TargetPrice) ||
@@ -138,8 +124,12 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 				(pos.Side == "SHORT" && pos.StopLossPrice > 0 && ltp >= pos.StopLossPrice)
 
 			if isTargetHit || isSLHit {
-				logger.Infof("[Paper] Exit Triggered for %s at %.2f", pos.Symbol, ltp)
-				pm.executeMarketExit(pos, ltp, ts)
+				triggerType := "TAKE_PROFIT"
+				if isSLHit {
+					triggerType = "STOP_LOSS"
+				}
+				logger.Infof("[Paper] Local %s Triggered for %s at %.2f", triggerType, pos.Symbol, ltp)
+				pm.executeInternalMarketExit(pos, ltp, ts)
 			} else {
 				pm.broadcastPositionUpdate(pos)
 			}
@@ -147,7 +137,7 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 	}
 }
 
-// UpdatePositionMetadata updates TP/SL for active trades
+// UpdatePositionMetadata commits local boundaries straight onto our position memory box
 func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product string, tp float64, sl float64) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -156,65 +146,44 @@ func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product st
 	key := fmt.Sprintf("%s:%s", symbolUpper, strings.ToUpper(product))
 	pos, exists := pm.activePositions[key]
 
-	updatedAny := false
-
-	// 1. If the position is already active and open, update its targets directly
-	if exists && pos.NetQuantity != 0 {
-		pos.TargetPrice = tp
-		pos.StopLossPrice = sl
-		updatedAny = true
-
-		sessionTime := pm.lastTimestamps[symbolUpper]
-		if sessionTime.IsZero() {
-			sessionTime = pm.currentSimTime
-		}
-		if sessionTime.IsZero() {
-			sessionTime = time.Now()
-		}
-		if pm.dbWriter != nil {
-			pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
-		}
-		pm.broadcastPositionUpdate(pos)
+	if !exists || pos.NetQuantity == 0 {
+		return fmt.Errorf("cannot assign risk limits to an empty position for %s", symbol)
 	}
 
-	// 2. ALSO update any PENDING limit orders for this asset.
-	// This ensures that if the position hasn't filled yet, the configurations update safely.
-	for i := range pm.orderBook {
-		if pm.orderBook[i].Status == "PENDING" && strings.ToUpper(pm.orderBook[i].Symbol) == symbolUpper && pm.orderBook[i].OrderType == "LIMIT" {
-			pm.orderBook[i].TargetPrice = tp
-			pm.orderBook[i].StopLossPrice = sl
-			updatedAny = true
+	pos.TargetPrice = tp
+	pos.StopLossPrice = sl
 
-			if pm.dbWriter != nil {
-				pm.dbWriter.PersistOrder(pm.orderBook[i])
-			}
-			pm.broadcastOrderUpdate(pm.orderBook[i])
-		}
+	sessionTime := pm.lastTimestamps[symbolUpper]
+	if sessionTime.IsZero() {
+		sessionTime = pm.currentSimTime
+	}
+	if sessionTime.IsZero() {
+		sessionTime = time.Now()
 	}
 
-	if !updatedAny {
-		return fmt.Errorf("no open position or pending limit orders found for %s", symbol)
+	if pm.dbWriter != nil {
+		pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
 	}
+	pm.broadcastPositionUpdate(pos)
 
+	logger.Infof("[Paper] Local Risk Boundaries Committed for %s: TP=%.2f, SL=%.2f", symbolUpper, tp, sl)
 	return nil
 }
 
-// ModifyOrder updates a pending limit order price and mirrors to database
-func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, newTP float64, newSL float64, userEmail string) error {
+// ModifyOrder updates a pending limit order's price within the paper book
+func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, userEmail string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
 	for i := range pm.orderBook {
 		if pm.orderBook[i].OrderID == orderID {
 			if pm.orderBook[i].Status != "PENDING" {
-				return fmt.Errorf("cannot modify non-pending order")
+				return fmt.Errorf("cannot modify order %s because its status is %s", orderID, pm.orderBook[i].Status)
 			}
+
 			pm.orderBook[i].Price = newPrice
-			pm.orderBook[i].TargetPrice = newTP
-			pm.orderBook[i].StopLossPrice = newSL
 			pm.orderBook[i].UserEmail = userEmail
 
-			// FIX: Persist changes to DB
 			if pm.dbWriter != nil {
 				pm.dbWriter.PersistOrder(pm.orderBook[i])
 			}
@@ -223,10 +192,10 @@ func (pm *PaperPositionManager) ModifyOrder(orderID string, newPrice float64, ne
 			return nil
 		}
 	}
-	return fmt.Errorf("order %s not found", orderID)
+	return fmt.Errorf("pending order ID %s not found in memory cache", orderID)
 }
 
-// CancelOrder changes order state to CANCELLED and mirrors to database
+// CancelOrder revokes local tracking for pending items
 func (pm *PaperPositionManager) CancelOrder(orderID string, userEmail string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -234,37 +203,36 @@ func (pm *PaperPositionManager) CancelOrder(orderID string, userEmail string) er
 	for i := range pm.orderBook {
 		if pm.orderBook[i].OrderID == orderID {
 			if pm.orderBook[i].Status != "PENDING" {
-				return fmt.Errorf("order is already %s", pm.orderBook[i].Status)
+				return fmt.Errorf("order is already finalized with status: %s", pm.orderBook[i].Status)
 			}
 			pm.orderBook[i].Status = "CANCELLED"
 			pm.orderBook[i].UserEmail = userEmail
 
-			// FIX: Persist changes to DB
 			if pm.dbWriter != nil {
 				pm.dbWriter.PersistOrder(pm.orderBook[i])
 			}
-
 			pm.broadcastOrderUpdate(pm.orderBook[i])
 			return nil
 		}
 	}
-	return fmt.Errorf("order not found")
+	return fmt.Errorf("order ID %s not found in tracking cache", orderID)
 }
 
-// ExitPosition handles manual exits
+// ExitPosition acts as our immediate user liquidation router
 func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string, product string, quantity int, userEmail string) error {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
 
-	key := fmt.Sprintf("%s:%s", strings.ToUpper(symbol), strings.ToUpper(product))
+	symbolUpper := strings.ToUpper(symbol)
+	key := fmt.Sprintf("%s:%s", symbolUpper, strings.ToUpper(product))
 	pos, exists := pm.activePositions[key]
 	if !exists || pos.NetQuantity == 0 {
-		return fmt.Errorf("no active position to exit")
+		return fmt.Errorf("no active exposure found to liquidate for asset %s", symbol)
 	}
 
-	ltp := pm.lastPrices[strings.ToUpper(symbol)]
+	ltp := pm.lastPrices[symbolUpper]
 	if ltp == 0 {
-		return fmt.Errorf("market price unavailable")
+		return fmt.Errorf("market transaction price vector presently unavailable for %s", symbol)
 	}
 
 	side := "SELL"
@@ -272,8 +240,7 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 		side = "BUY"
 	}
 
-	// FIX: Dedure accurate backtest clock for manual exit placement logging
-	exitTime := pm.lastTimestamps[strings.ToUpper(symbol)]
+	exitTime := pm.lastTimestamps[symbolUpper]
 	if exitTime.IsZero() {
 		exitTime = pm.currentSimTime
 	}
@@ -281,7 +248,7 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 	exitOrderID := fmt.Sprintf("PPR-MANUAL-EXIT-%d", time.Now().UnixNano())
 	exitOrder := models.OrderBookEntry{
 		OrderID:   exitOrderID,
-		Symbol:    symbol,
+		Symbol:    symbolUpper,
 		Side:      side,
 		OrderType: "MARKET",
 		Qty:       quantity,
@@ -293,46 +260,69 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 	}
 
 	pm.orderBook = append(pm.orderBook, exitOrder)
-
 	if pm.dbWriter != nil {
 		pm.dbWriter.PersistOrder(exitOrder)
 	}
 	pm.broadcastOrderUpdate(exitOrder)
 
-	pm.updatePositionState(models.OrderRequest{
-		Symbol:          symbol,
-		Product:         product,
-		TransactionType: side,
-		Quantity:        quantity,
-	}, ltp, exitTime)
-
+	pm.updatePositionState(symbolUpper, product, side, quantity, ltp, exitTime)
 	return nil
 }
 
-func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fillPrice float64, sessionTime time.Time) {
-	key := fmt.Sprintf("%s:%s", strings.ToUpper(req.Symbol), strings.ToUpper(req.Product))
+// executeInternalMarketExit fires immediate liquidation orders matching the actual net position size
+func (pm *PaperPositionManager) executeInternalMarketExit(pos *models.Position, price float64, executionTime time.Time) {
+	side := "SELL"
+	if pos.Side == "SHORT" {
+		side = "BUY"
+	}
+
+	// Pull the exact, live outstanding net position allocation volume
+	absQty := int(math.Abs(float64(pos.NetQuantity)))
+
+	exitOrderID := fmt.Sprintf("PPR-AUTO-RISK-EXIT-%d", executionTime.UnixNano())
+	exitOrder := models.OrderBookEntry{
+		OrderID:   exitOrderID,
+		Symbol:    pos.Symbol,
+		Side:      side,
+		OrderType: "MARKET",
+		Qty:       absQty,
+		FilledQty: absQty,
+		Price:     price,
+		Status:    "COMPLETE",
+		Timestamp: executionTime,
+		UserEmail: "bot.risk@gidh.tech",
+	}
+
+	pm.orderBook = append(pm.orderBook, exitOrder)
+	if pm.dbWriter != nil {
+		pm.dbWriter.PersistOrder(exitOrder)
+	}
+	pm.broadcastOrderUpdate(exitOrder)
+
+	// Update our tracking maps—trailing un-filled partial entries remain entirely un-affected
+	pm.updatePositionState(pos.Symbol, pos.Product, side, absQty, price, executionTime)
+}
+
+// updatePositionState calculates stock-level blended performance values
+func (pm *PaperPositionManager) updatePositionState(symbol, product, side string, qty int, fillPrice float64, sessionTime time.Time) {
+	key := fmt.Sprintf("%s:%s", symbol, strings.ToUpper(product))
 	pos, exists := pm.activePositions[key]
 
 	if !exists {
 		pos = &models.Position{
-			Symbol:        strings.ToUpper(req.Symbol), // 👈 Forces uppercase for clean key tracking
-			Product:       req.Product,
-			TargetPrice:   req.TargetPrice,
-			StopLossPrice: req.StopLossPrice,
+			Symbol:  symbol,
+			Product: strings.ToUpper(product),
 		}
 		pm.activePositions[key] = pos
-	} else if pos.NetQuantity == 0 {
-		pos.TargetPrice = req.TargetPrice
-		pos.StopLossPrice = req.StopLossPrice
 	}
 
-	qty := req.Quantity
-	isBuy := strings.ToUpper(req.TransactionType) == "BUY"
+	isBuy := side == "BUY"
 	isIncreasing := (isBuy && pos.NetQuantity >= 0) || (!isBuy && pos.NetQuantity <= 0)
 
 	if isIncreasing {
 		currentAbsQty := math.Abs(float64(pos.NetQuantity))
 		totalCost := (pos.AveragePrice * currentAbsQty) + (fillPrice * float64(qty))
+
 		if isBuy {
 			pos.NetQuantity += qty
 		} else {
@@ -359,10 +349,11 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 			pos.NetQuantity -= qty
 		}
 
+		// Reversal check step
 		if (isBuy && pos.NetQuantity > 0) || (!isBuy && pos.NetQuantity < 0) {
 			pos.AveragePrice = fillPrice
-			pos.TargetPrice = req.TargetPrice
-			pos.StopLossPrice = req.StopLossPrice
+			pos.TargetPrice = 0
+			pos.StopLossPrice = 0
 		} else if pos.NetQuantity == 0 {
 			pos.AveragePrice = 0
 			pos.UnrealizedPnL = 0
@@ -371,6 +362,7 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 		}
 	}
 
+	// Calibrate Directional Identifiers
 	if pos.NetQuantity > 0 {
 		pos.Side = "LONG"
 	} else if pos.NetQuantity < 0 {
@@ -384,66 +376,22 @@ func (pm *PaperPositionManager) updatePositionState(req models.OrderRequest, fil
 	if pm.dbWriter != nil {
 		pm.dbWriter.PersistPositionSnapshot(pos, sessionTime)
 	}
-
 	pm.broadcastPositionUpdate(pos)
 }
 
-// executeMarketExit logs an explicit MARKET exit order into the DB historical record
-func (pm *PaperPositionManager) executeMarketExit(pos *models.Position, price float64, executionTime time.Time) {
-	side := "SELL"
-	if pos.Side == "SHORT" {
-		side = "BUY"
-	}
-
-	// Generate an exit order tracking entry for history logs
-	exitOrderID := fmt.Sprintf("PPR-EXIT-%d", executionTime.UnixNano())
-	exitOrder := models.OrderBookEntry{
-		OrderID:   exitOrderID,
-		Symbol:    pos.Symbol,
-		Side:      side,
-		OrderType: "MARKET",
-		Qty:       int(math.Abs(float64(pos.NetQuantity))),
-		FilledQty: int(math.Abs(float64(pos.NetQuantity))),
-		Price:     price,
-		Status:    "COMPLETE",
-		Timestamp: executionTime,
-		UserEmail: "bot@gidh.tech",
-	}
-
-	pm.orderBook = append(pm.orderBook, exitOrder)
-
-	if pm.dbWriter != nil {
-		pm.dbWriter.PersistOrder(exitOrder)
-	}
-	pm.broadcastOrderUpdate(exitOrder)
-
-	pm.updatePositionState(models.OrderRequest{
-		Symbol:          pos.Symbol,
-		Product:         pos.Product,
-		TransactionType: side,
-		Quantity:        int(math.Abs(float64(pos.NetQuantity))),
-	}, price, executionTime)
-}
-
-// --- Broadcast Helpers ---
+// --- Internal Broadcast & Inspection Handlers ---
 
 func (pm *PaperPositionManager) broadcastOrderUpdate(entry models.OrderBookEntry) {
 	if pm.wsHub != nil {
-		pm.wsHub.BroadcastJSON("global:trading", map[string]any{
-			"type": "order_update",
-			"data": entry,
-		})
+		pm.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "order_update", "data": entry})
 	}
 }
 
 func (pm *PaperPositionManager) broadcastPositionUpdate(pos *models.Position) {
 	if pm.wsHub != nil {
-		payload := map[string]any{"type": "position_update", "data": pos}
-		pm.wsHub.BroadcastJSON("global:trading", payload)
+		pm.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "position_update", "data": pos})
 	}
 }
-
-// --- Existing Getters ---
 
 func (pm *PaperPositionManager) GetPosition(symbol string, product string) (*models.Position, bool) {
 	pm.mu.RLock()
@@ -482,7 +430,7 @@ func (pm *PaperPositionManager) ClearPositions() {
 	pm.activePositions = make(map[string]*models.Position)
 	pm.orderBook = make([]models.OrderBookEntry, 0)
 	pm.lastPrices = make(map[string]float64)
-	pm.lastTimestamps = make(map[string]time.Time) // NEW: Reset timestamps on teardown
-	pm.currentSimTime = time.Time{}                // NEW: Reset simulation clock
-	logger.Info("Paper Position Manager state cleared.")
+	pm.lastTimestamps = make(map[string]time.Time)
+	pm.currentSimTime = time.Time{}
+	logger.Info("Paper Position Manager state cleared cleanly.")
 }
