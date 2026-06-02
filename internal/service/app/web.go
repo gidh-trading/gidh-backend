@@ -447,6 +447,7 @@ func (a *App) handleGetHistoricalOrders(w http.ResponseWriter, r *http.Request) 
 	// 1. Path sanitization wrapper matching the UI URL layout
 	pathOnly := r.URL.Path
 	if len(pathOnly) <= len("/api/orders/") {
+		logger.Errorf("Historical Orders API Error: Missing date parameter in URL path: %s", pathOnly)
 		http.Error(w, "date query parameter identifier is mandatory", http.StatusBadRequest)
 		return
 	}
@@ -457,30 +458,38 @@ func (a *App) handleGetHistoricalOrders(w http.ResponseWriter, r *http.Request) 
 	dateStr = strings.TrimSpace(strings.TrimSuffix(dateStr, "/"))
 
 	if dateStr == "" {
+		logger.Error("Historical Orders API Error: Extracted date parameter is empty")
 		http.Error(w, "date query parameter identifier is mandatory", http.StatusBadRequest)
 		return
 	}
 
-	// 2. Query historical entries recorded in the SQL Hypertable
+	logger.Infof("[API Request] Fetching historical orders for date tracking sequence: %s", dateStr)
+
+	// 2. Query historical entries recorded in the SQL Hypertable using indexable trading_date
 	dbOrders := make([]models.OrderBookEntry, 0)
+	logger.Warnf("Executing DB query on gidh_orders for trading_date: %s", dateStr)
+
 	rows, err := a.pool.Query(r.Context(), `
 		SELECT order_id, symbol, side, order_type, quantity, filled_qty, price, status, timestamp, user_email
 		FROM gidh_orders
-		WHERE trading_date::date = $1::date
+		WHERE trading_date = $1::date
 		ORDER BY timestamp DESC`, dateStr)
 	if err != nil {
-		logger.Errorf("Failed to query historical orders ledger for date %s: %v", dateStr, err)
+		logger.Errorf("CRITICAL: Database query execution failure for date %s: %v", dateStr, err)
 		http.Error(w, "Database query execution failure", http.StatusInternalServerError)
 		return
 	}
 	defer rows.Close()
 
+	var scanCount int
 	for rows.Next() {
 		var o models.OrderBookEntry
 		var side, oType string
+		scanCount++
+
 		err := rows.Scan(&o.OrderID, &o.Symbol, &side, &oType, &o.Qty, &o.FilledQty, &o.Price, &o.Status, &o.Timestamp, &o.UserEmail)
 		if err != nil {
-			logger.Errorf("Failed to scan historical order row: %v", err)
+			logger.Errorf("Scan Error on row %d for date %s: %v", scanCount, dateStr, err)
 			continue
 		}
 		o.Side = strings.ToUpper(side)
@@ -488,8 +497,9 @@ func (a *App) handleGetHistoricalOrders(w http.ResponseWriter, r *http.Request) 
 		dbOrders = append(dbOrders, o)
 	}
 
+	logger.Infof("Successfully fetched and parsed %d historical orders from database for date %s", len(dbOrders), dateStr)
+
 	// 3. Extract unexecuted/floating orders currently active inside internal engine memory
-	// This captures pending orders if they haven't written flush frames to the database yet.
 	orderMap := make(map[string]models.OrderBookEntry)
 	for _, o := range dbOrders {
 		orderMap[o.OrderID] = o
@@ -497,17 +507,23 @@ func (a *App) handleGetHistoricalOrders(w http.ResponseWriter, r *http.Request) 
 
 	// Blend active configurations memory entries on top of historical slices
 	if a.OrderManager != nil {
-		// Gather orders via the underlying concrete memory book map loops
 		var memoryOrders []models.OrderBookEntry
 		if liveMgr, ok := a.OrderManager.(*order.LiveOrderManager); ok {
-			memoryOrders = liveMgr.GetOrders("") // Empty string gets all, or loop symbols
+			logger.Debug("Blending active LiveOrderManager memory cache states...")
+			memoryOrders = liveMgr.GetOrders("")
 		} else if paperMgr, ok := a.OrderManager.(*order.PaperPositionManager); ok {
+			logger.Debug("Blending active PaperPositionManager memory cache states...")
 			memoryOrders = paperMgr.GetOrders("")
 		}
 
+		var blendCount int
 		for _, mo := range memoryOrders {
 			// Memory cache always overrides stale database logs for open entries
 			orderMap[mo.OrderID] = mo
+			blendCount++
+		}
+		if blendCount > 0 {
+			logger.Infof("Blended %d floating/pending orders from volatile memory into layout stream", blendCount)
 		}
 	}
 
@@ -524,11 +540,14 @@ func (a *App) handleGetHistoricalOrders(w http.ResponseWriter, r *http.Request) 
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]any{
+	if err := json.NewEncoder(w).Encode(map[string]any{
 		"status": "success",
 		"data":   finalOrders,
-	})
+	}); err != nil {
+		logger.Errorf("Web Server Serializer Error: Failed to flush history payload down network pipeline: %v", err)
+	}
 }
+
 func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)

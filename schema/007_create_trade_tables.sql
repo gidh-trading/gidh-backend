@@ -13,8 +13,7 @@ CREATE TABLE IF NOT EXISTS gidh_orders
     price            DOUBLE PRECISION,
     status           TEXT        NOT NULL, -- PENDING, COMPLETE, CANCELLED, REJECTED
     timestamp        TIMESTAMPTZ NOT NULL,
-    user_email       TEXT,
-    sibling_order_id TEXT
+    user_email       TEXT
 );
 
 CREATE TABLE IF NOT EXISTS gidh_positions
