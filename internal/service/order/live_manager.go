@@ -57,18 +57,19 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 		Tradingsymbol:   strings.ToUpper(req.Symbol),
 		TransactionType: transactionType,
 		Quantity:        req.Quantity,
-		Product:         kiteconnect.ProductMIS,
+		Product:         kiteconnect.ProductMIS, // Rigidly locked to Equity MIS
 		OrderType:       orderType,
 		Validity:        kiteconnect.ValidityDay,
 	}
 
 	if orderType == kiteconnect.OrderTypeLimit {
-		params.Price = req.Price
+		// Cleanly round the raw UI input price to the required 0.05 or 1.00 steps
+		tickSize := GetTickSizeForSymbol(req.Symbol)
+		params.Price = RoundToTick(req.Price, tickSize)
 	} else if orderType == kiteconnect.OrderTypeMarket {
-		params.MarketProtection = -1 // Let Zerodha handle standard risk slippage protection bands
+		params.MarketProtection = -1
 	}
 
-	// Route order directly to exchange without any nested SL/TP bracket parameters attached
 	orderResp, err := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, params)
 	if err != nil {
 		logger.Errorf("[Live] Failed to route order for %s: %v", req.Symbol, err)
@@ -81,9 +82,23 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 
 // ModifyOrder alters a pending limit entry's price boundary on the exchange
 func (lm *LiveOrderManager) ModifyOrder(orderID string, newPrice float64, userEmail string) error {
+	lm.mu.Lock()
+	var symbol string
+	for _, o := range lm.orderBook {
+		if o.OrderID == orderID {
+			symbol = o.Symbol
+			break
+		}
+	}
+	lm.mu.Unlock()
+
+	// Apply identical cleaning logic to modifications
+	tickSize := GetTickSizeForSymbol(symbol)
+	roundedPrice := RoundToTick(newPrice, tickSize)
+
 	params := kiteconnect.OrderParams{
 		OrderType: kiteconnect.OrderTypeLimit,
-		Price:     newPrice,
+		Price:     roundedPrice,
 	}
 
 	_, err := lm.kiteClient.ModifyOrder(kiteconnect.VarietyRegular, orderID, params)
@@ -96,7 +111,7 @@ func (lm *LiveOrderManager) ModifyOrder(orderID string, newPrice float64, userEm
 
 	for i := range lm.orderBook {
 		if lm.orderBook[i].OrderID == orderID {
-			lm.orderBook[i].Price = newPrice
+			lm.orderBook[i].Price = roundedPrice
 			lm.orderBook[i].UserEmail = userEmail
 
 			if lm.dbWriter != nil {
@@ -686,4 +701,25 @@ func (lm *LiveOrderManager) ReconstituteState(orders []models.OrderBookEntry, po
 		}
 	}
 	logger.Infof("[Live Startup] Memory footprint restoration complete. %d orders and %d active positions tracked.", len(lm.orderBook), len(lm.activePositions))
+}
+
+// RoundToTick safely conforms floating price inputs to valid exchange tick step boundaries
+func RoundToTick(price float64, tickSize float64) float64 {
+	if tickSize <= 0 {
+		return price
+	}
+	return math.Round(price/tickSize) * tickSize
+}
+
+// GetTickSizeForSymbol returns the correct tick size based on NSE Equity conventions
+func GetTickSizeForSymbol(symbol string) float64 {
+	sym := strings.ToUpper(symbol)
+
+	// If you trade Liquid ETFs under Equity MIS, they enforce a 1.00 tick size
+	if strings.Contains(sym, "LIQUID") || strings.Contains(sym, "CASE") || strings.Contains(sym, "BEES") {
+		return 1.00
+	}
+
+	// Standard baseline for 99% of all NSE Equity MIS stocks
+	return 0.05
 }
