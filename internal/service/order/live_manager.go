@@ -305,7 +305,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 
 	rawStatus := strings.ToUpper(o.Status)
 
-	// Apply the UI Status Mapping
 	mappedStatus := rawStatus
 	if rawStatus == "OPEN" || rawStatus == "TRIGGER PENDING" || rawStatus == "UPDATE" || rawStatus == "PUT ORDER REQ RECEIVED" || rawStatus == "VALIDATION PENDING" {
 		mappedStatus = "PENDING"
@@ -324,7 +323,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		}
 	}
 
-	// Accurate Price Tracking Strategy
 	var displayPrice float64
 	if rawStatus == "COMPLETE" {
 		if o.AveragePrice > 0 {
@@ -336,6 +334,13 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		displayPrice = o.Price
 	}
 
+	// --- Visual Fix: Ensure pending Market Orders show the live price instead of $0 in the UI grid
+	if displayPrice <= 0 {
+		if ltp, hasLtp := lm.lastPrices[strings.ToUpper(o.TradingSymbol)]; hasLtp && ltp > 0 {
+			displayPrice = ltp
+		}
+	}
+
 	if existingEntry == nil {
 		email := ""
 		for _, entry := range lm.orderBook {
@@ -344,7 +349,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				break
 			}
 		}
-
 		if email == "" {
 			email = "bot.live@gidh.tech"
 		}
@@ -378,10 +382,8 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 	if lm.dbWriter != nil {
 		lm.dbWriter.PersistOrder(*existingEntry)
 	}
-
 	lm.broadcastOrderUpdate(*existingEntry)
 
-	// Manage active position mapping tracking
 	if o.FilledQuantity > 0 {
 		symbolKey := strings.ToUpper(o.TradingSymbol)
 		productKey := strings.ToUpper(o.Product)
@@ -390,12 +392,10 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		pos, exists := lm.activePositions[key]
 		if !exists {
 			pos = &models.Position{
-				Symbol:        symbolKey,
-				Product:       productKey,
-				NetQuantity:   0,
-				AveragePrice:  0,
-				TargetPrice:   0,
-				StopLossPrice: 0,
+				Symbol:       symbolKey,
+				Product:      productKey,
+				NetQuantity:  0,
+				AveragePrice: 0,
 			}
 			lm.activePositions[key] = pos
 		}
@@ -418,12 +418,22 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				currentSignedQty = pos.NetQuantity
 			}
 
+			// --- CRITICAL MATH SAFETY FIX ---
 			executionFillPrice := o.AveragePrice
-			if executionFillPrice == 0 {
+			if executionFillPrice <= 0 {
 				executionFillPrice = o.Price
 			}
 
-			// --- FIX 1: ACCUMULATE REALIZED PNL ON EXITS ---
+			// Protect against incomplete Market Order WebSocket frames
+			if executionFillPrice <= 0 {
+				if ltp, hasLtp := lm.lastPrices[symbolKey]; hasLtp && ltp > 0 {
+					executionFillPrice = ltp
+				} else if pos.AveragePrice > 0 {
+					// Absolute worst-case fallback: simulate breakeven so math doesn't crash to -6 Lakhs
+					executionFillPrice = pos.AveragePrice
+				}
+			}
+
 			isBuy := sideUpper == "BUY"
 			isReducing := (isBuy && currentSignedQty < 0) || (!isBuy && currentSignedQty > 0)
 
@@ -473,8 +483,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				pos.UnrealizedPnL = 0
 			}
 
-			// --- FIX 2: INSTANTLY RECALCULATE UNREALIZED PNL ---
-			// Don't wait for the next market tick to update the UI
 			if ltp, hasLtp := lm.lastPrices[symbolKey]; hasLtp && pos.NetQuantity != 0 {
 				if pos.Side == "LONG" {
 					pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
@@ -484,11 +492,9 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			}
 		}
 
-		// 6. Absolute Squaring Off Cleanup Workflow Verification
 		if pos.NetQuantity == 0 {
 			pos.Side = ""
 			pos.AveragePrice = 0
-			// pos.RealizedPnL = 0  <--- DELETED: Never wipe out the profit history!
 			pos.UnrealizedPnL = 0
 			pos.TargetPrice = 0
 			pos.StopLossPrice = 0
@@ -497,7 +503,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		if lm.dbWriter != nil {
 			lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
 		}
-
 		lm.broadcastPositionUpdate(pos)
 	}
 }
@@ -699,7 +704,6 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	// Track which keys were confirmed by the exchange
 	exchangeKeys := make(map[string]bool)
 
 	for _, pos := range positions.Net {
@@ -719,6 +723,9 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 				localPos.StopLossPrice = 0
 				localPos.LastFillQty = 0
 
+				// --- FIX: Heal corrupted database values using Zerodha's API truth ---
+				localPos.RealizedPnL = pos.Realised
+
 				if lm.dbWriter != nil {
 					lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
 				}
@@ -737,7 +744,6 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			lm.activePositions[key] = localPos
 		}
 
-		// Directly overwrite the local quantity with Zerodha's absolute truth
 		localPos.NetQuantity = int(math.Abs(float64(pos.Quantity)))
 		if pos.Quantity > 0 {
 			localPos.Side = "LONG"
@@ -745,22 +751,19 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			localPos.Side = "SHORT"
 		}
 
-		// --- FIX: Stop overwriting accurate open-leg prices with day-averaged prices ---
-		// Only adopt Zerodha's API average price if we don't currently have a local one
 		if localPos.AveragePrice == 0 {
 			localPos.AveragePrice = pos.AveragePrice
 		}
 
-		// Flush the corrected state to the database and broadcast
+		// --- FIX: Synchronize Realized Profit safely ---
+		localPos.RealizedPnL = pos.Realised
+
 		if lm.dbWriter != nil {
 			lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
 		}
 		lm.broadcastPositionUpdate(localPos)
-
-		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d at %.2f", pos.Tradingsymbol, pos.Quantity, localPos.AveragePrice)
 	}
 
-	// 3. Optional: Wipe out local ghost entries that do not exist in the broker's portfolio response at all
 	for key, localPos := range lm.activePositions {
 		if !exchangeKeys[key] && localPos.NetQuantity != 0 {
 			localPos.NetQuantity = 0
