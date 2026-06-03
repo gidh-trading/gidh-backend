@@ -305,19 +305,19 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 
 	rawStatus := strings.ToUpper(o.Status)
 
-	// --- FIX: Apply the UI Status Mapping in the Real-Time Stream ---
+	// Apply the UI Status Mapping
 	mappedStatus := rawStatus
 	if rawStatus == "OPEN" || rawStatus == "TRIGGER PENDING" || rawStatus == "UPDATE" || rawStatus == "PUT ORDER REQ RECEIVED" || rawStatus == "VALIDATION PENDING" {
 		mappedStatus = "PENDING"
 	}
 
+	// FIX: Cast kiteconnect float64 quantities to int for the logger to prevent format crashes
 	logger.Infof("[Live Engine] Processing broker update for OrderID: %s, Status: %s -> %s (Filled: %d/%d)",
-		o.OrderID, rawStatus, mappedStatus, o.FilledQuantity, o.Quantity)
+		o.OrderID, rawStatus, mappedStatus, int(o.FilledQuantity), int(o.Quantity))
 
 	var existingEntry *models.OrderBookEntry
 	var previousFilledQty int
 
-	// 1. Locate the existing entry inside our localized session cache book
 	for i := range lm.orderBook {
 		if lm.orderBook[i].OrderID == o.OrderID {
 			existingEntry = &lm.orderBook[i]
@@ -325,13 +325,18 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		}
 	}
 
-	// Extract accurate trade execution price
-	tradePrice := o.AveragePrice
-	if tradePrice == 0 {
-		tradePrice = o.Price
+	// Accurate Price Tracking Strategy
+	var displayPrice float64
+	if rawStatus == "COMPLETE" {
+		if o.AveragePrice > 0 {
+			displayPrice = o.AveragePrice
+		} else {
+			displayPrice = o.Price
+		}
+	} else {
+		displayPrice = o.Price // If working/pending, always track the live target limit
 	}
 
-	// 2. If the order entity doesn't exist yet allocate it in cache
 	if existingEntry == nil {
 		email := ""
 		for _, entry := range lm.orderBook {
@@ -352,8 +357,8 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			OrderType: strings.ToUpper(o.OrderType),
 			Qty:       int(o.Quantity),
 			FilledQty: int(o.FilledQuantity),
-			Price:     tradePrice,
-			Status:    mappedStatus, // Uses safely mapped UI status
+			Price:     displayPrice,
+			Status:    mappedStatus,
 			Timestamp: o.OrderTimestamp.Time,
 			UserEmail: email,
 		}
@@ -366,24 +371,23 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		// Capture previous state before updating to calculate perfect deltas
 		previousFilledQty = existingEntry.FilledQty
 
+		// --- FIX: Synchronize ALL mutable fields in case modified directly on Zerodha ---
 		existingEntry.FilledQty = int(o.FilledQuantity)
-		existingEntry.Status = mappedStatus // Uses safely mapped UI status
-
-		// Update to true execution price if we now have it
-		if tradePrice > 0 {
-			existingEntry.Price = tradePrice
-		}
+		existingEntry.Qty = int(o.Quantity)                    // Captures quantity modifications
+		existingEntry.OrderType = strings.ToUpper(o.OrderType) // Captures Limit <-> Market switches
+		existingEntry.Status = mappedStatus
+		existingEntry.Price = displayPrice // Captures Price modifications instantly
 	}
 
-	// 3. Persist entry audit state directly to the SQL database tables
+	// Persist entry audit state directly to the SQL database tables
 	if lm.dbWriter != nil {
 		lm.dbWriter.PersistOrder(*existingEntry)
 	}
 
-	// 4. Dispatch Event Frame A to keep frontend execution meters perfectly synchronized
+	// Dispatch Event Frame A to keep frontend execution meters perfectly synchronized
 	lm.broadcastOrderUpdate(*existingEntry)
 
-	// 5. Manage active position mapping tracking if an order has registered fills
+	// Manage active position mapping tracking if an order has registered fills
 	if o.FilledQuantity > 0 {
 		symbolKey := strings.ToUpper(o.TradingSymbol)
 		productKey := strings.ToUpper(o.Product)
@@ -414,7 +418,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				tradeChange = -fillDelta
 			}
 
-			// Convert localized state into a true signed integer exposure
 			var currentSignedQty int
 			if pos.Side == "SHORT" {
 				currentSignedQty = -pos.NetQuantity
@@ -422,33 +425,35 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				currentSignedQty = pos.NetQuantity
 			}
 
-			// Compute the accurate net target exposure
 			netSignedQty := currentSignedQty + tradeChange
+
+			// ALWAYS use actual execution average for PnL / Position math
+			executionFillPrice := o.AveragePrice
+			if executionFillPrice == 0 {
+				executionFillPrice = o.Price
+			}
 
 			if netSignedQty > 0 {
 				pos.Side = "LONG"
 				pos.NetQuantity = netSignedQty
 
 				if currentSignedQty >= 0 {
-					totalCost := (float64(currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * tradePrice)
+					totalCost := (float64(currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * executionFillPrice)
 					pos.AveragePrice = totalCost / float64(netSignedQty)
 				} else {
-					// Position flipped from Short to Long. Old average is wiped!
-					pos.AveragePrice = tradePrice
+					pos.AveragePrice = executionFillPrice
 				}
 			} else if netSignedQty < 0 {
 				pos.Side = "SHORT"
 				pos.NetQuantity = -netSignedQty // Keep absolute
 
 				if currentSignedQty <= 0 {
-					totalCost := (float64(-currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * tradePrice)
+					totalCost := (float64(-currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * executionFillPrice)
 					pos.AveragePrice = totalCost / float64(-netSignedQty)
 				} else {
-					// Position flipped from Long to Short. Old average is wiped!
-					pos.AveragePrice = tradePrice
+					pos.AveragePrice = executionFillPrice
 				}
 			} else {
-				// Correctly clear out all spatial parameters when position neutralizes perfectly
 				pos.Side = ""
 				pos.NetQuantity = 0
 				pos.AveragePrice = 0
@@ -458,7 +463,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			}
 		}
 
-		// 6. Absolute Squaring Off Cleanup Workflow Verification
 		if pos.NetQuantity == 0 {
 			pos.Side = ""
 			pos.AveragePrice = 0
@@ -468,12 +472,10 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			pos.StopLossPrice = 0
 		}
 
-		// 7. Flush the position state box down into the core persistent hypertables
 		if lm.dbWriter != nil {
 			lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
 		}
 
-		// 8. Dispatch Event Frame B to immediately refresh client dashboards
 		lm.broadcastPositionUpdate(pos)
 	}
 }
@@ -589,12 +591,12 @@ func (lm *LiveOrderManager) updatePositionStateFromFill(symbol, product, transac
 // ============================================================================
 
 func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.OrderBookEntry {
-	statusUpper := strings.ToUpper(o.Status)
-	status := statusUpper
+	rawStatus := strings.ToUpper(o.Status)
+	mappedStatus := rawStatus
 
 	// Standardize all broker working execution frames safely to "PENDING" for your UI mapping
-	if statusUpper == "OPEN" || statusUpper == "TRIGGER PENDING" || statusUpper == "UPDATE" || statusUpper == "PUT ORDER REQ RECEIVED" || statusUpper == "VALIDATION PENDING" {
-		status = "PENDING"
+	if rawStatus == "OPEN" || rawStatus == "TRIGGER PENDING" || rawStatus == "UPDATE" || rawStatus == "PUT ORDER REQ RECEIVED" || rawStatus == "VALIDATION PENDING" {
+		mappedStatus = "PENDING"
 	}
 
 	email := "bot.live@gidh.tech" // Fallback fallback string
@@ -605,10 +607,17 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		}
 	}
 
-	// --- FIX: Capture actual execution price instead of 0 for market orders ---
-	tradePrice := o.AveragePrice
-	if tradePrice == 0 {
-		tradePrice = o.Price
+	// Accurate Price Tracking Strategy
+	var displayPrice float64
+	if rawStatus == "COMPLETE" {
+		if o.AveragePrice > 0 {
+			displayPrice = o.AveragePrice
+		} else {
+			displayPrice = o.Price
+		}
+	} else {
+		// If working/pending, track the live requested limit target
+		displayPrice = o.Price
 	}
 
 	return models.OrderBookEntry{
@@ -618,8 +627,8 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		OrderType: strings.ToUpper(o.OrderType),
 		Qty:       int(o.Quantity),
 		FilledQty: int(o.FilledQuantity),
-		Price:     tradePrice,
-		Status:    status, // Safely outputs "PENDING" to your web application UI
+		Price:     displayPrice,
+		Status:    mappedStatus,
 		Timestamp: o.OrderTimestamp.Time,
 		UserEmail: email,
 	}
