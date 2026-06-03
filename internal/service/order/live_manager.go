@@ -735,9 +735,9 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			localPos.StopLossPrice = 0
 			localPos.LastFillQty = 0
 
-			// THE ULTIMATE HEALER: For closed intraday positions, Zerodha's total Pnl
-			// is the absolute, verified Realized PnL truth.
-			localPos.RealizedPnL = pos.Pnl
+			// THE ULTIMATE HEALER: For closed intraday positions, Zerodha's total PnL
+			// is the absolute, verified Realized PnL truth. (Notice the capital 'L' here!)
+			localPos.RealizedPnL = pos.PnL
 
 			if lm.dbWriter != nil {
 				lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
