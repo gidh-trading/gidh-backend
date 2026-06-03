@@ -78,19 +78,38 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 	}
 
 	lm.mu.Lock()
-	initialEntry := models.OrderBookEntry{
-		OrderID:   orderResp.OrderID,
-		Symbol:    strings.ToUpper(req.Symbol),
-		Side:      string(transactionType),
-		OrderType: string(orderType),
-		Qty:       req.Quantity,
-		Status:    "PENDING",
-		Timestamp: time.Now(),
-		UserEmail: req.UserEmail, // Capture requesting user email
+
+	// --- FIX 1: Prevent Race Conditions with WebSocket ---
+	var existingIdx = -1
+	for i, entry := range lm.orderBook {
+		if entry.OrderID == orderResp.OrderID {
+			existingIdx = i
+			break
+		}
 	}
-	lm.orderBook = append(lm.orderBook, initialEntry)
-	if lm.dbWriter != nil {
-		lm.dbWriter.PersistOrder(initialEntry)
+
+	if existingIdx != -1 {
+		// The WebSocket beat the HTTP response. Just enrich the missing user data.
+		lm.orderBook[existingIdx].UserEmail = req.UserEmail
+		if lm.dbWriter != nil {
+			lm.dbWriter.PersistOrder(lm.orderBook[existingIdx])
+		}
+	} else {
+		// Normal flow: The HTTP response arrived first. Append safely.
+		initialEntry := models.OrderBookEntry{
+			OrderID:   orderResp.OrderID,
+			Symbol:    strings.ToUpper(req.Symbol),
+			Side:      string(transactionType),
+			OrderType: string(orderType),
+			Qty:       req.Quantity,
+			Status:    "PENDING",
+			Timestamp: time.Now(),
+			UserEmail: req.UserEmail, // Capture requesting user email
+		}
+		lm.orderBook = append(lm.orderBook, initialEntry)
+		if lm.dbWriter != nil {
+			lm.dbWriter.PersistOrder(initialEntry)
+		}
 	}
 	lm.mu.Unlock()
 
@@ -274,8 +293,6 @@ func (lm *LiveOrderManager) executeBrokerMarketLiquidation(symbol, product, side
 	}
 }
 
-// HandleOrderUpdate processes real-time execution updates streamed asynchronously from Zerodha Kite Connect.
-// This preserves localized memory risk boundaries while syncing execution changes down to the UI stores.
 func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
@@ -285,6 +302,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		o.OrderID, statusUpper, o.FilledQuantity, o.Quantity)
 
 	var existingEntry *models.OrderBookEntry
+	var previousFilledQty int // Tracker to stop duplicate WebSocket packets from double-counting
 
 	// 1. Locate the existing entry inside our localized session cache book
 	for i := range lm.orderBook {
@@ -296,7 +314,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 
 	// 2. If the order entity doesn't exist yet (e.g. execution frame caught right at boot), allocate it in cache
 	if existingEntry == nil {
-
 		email := ""
 		for _, entry := range lm.orderBook {
 			if entry.OrderID == o.OrderID && entry.UserEmail != "" {
@@ -327,7 +344,9 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		lm.orderBook = append(lm.orderBook, newEntry)
 		existingEntry = &lm.orderBook[len(lm.orderBook)-1]
 	} else {
-		// Update core incremental tracking variables safely via the active map pointer
+		// --- FIX 2: Capture previous state before updating to calculate perfect deltas ---
+		previousFilledQty = existingEntry.FilledQty
+
 		existingEntry.FilledQty = int(o.FilledQuantity)
 		existingEntry.Status = statusUpper
 		if o.Price > 0 {
@@ -351,8 +370,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 
 		pos, exists := lm.activePositions[key]
 		if !exists {
-			// Allocate a brand-new live position box.
-			// We intentionally start risk boundaries at 0.00 to avoid client guessing games.
 			pos = &models.Position{
 				Symbol:        symbolKey,
 				Product:       productKey,
@@ -364,9 +381,8 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			lm.activePositions[key] = pos
 		}
 
-		// Calculate matching fills safely using last fill differences
-		// This protects position calculation logic if Kite fires multiple partial fill frames sequentially
-		fillDelta := int(o.FilledQuantity) - pos.LastFillQty
+		// Calculate matching fills safely using order delta, immune to duplicate socket pings
+		fillDelta := int(o.FilledQuantity) - previousFilledQty
 		if fillDelta > 0 {
 			sideUpper := strings.ToUpper(o.TransactionType)
 
@@ -378,7 +394,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				tradeChange = -fillDelta
 			}
 
-			// Convert the existing localized state into a true signed integer exposure
+			// --- FIX 3: Convert the localized state into a true signed integer exposure ---
 			var currentSignedQty int
 			if pos.Side == "SHORT" {
 				currentSignedQty = -pos.NetQuantity
@@ -399,7 +415,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				}
 			} else if netSignedQty < 0 {
 				pos.Side = "SHORT"
-				pos.NetQuantity = -netSignedQty // Keep NetQuantity as an absolute positive value
+				pos.NetQuantity = -netSignedQty // Keep NetQuantity absolute
 				if currentSignedQty <= 0 {
 					totalCost := (float64(-currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * o.Price)
 					pos.AveragePrice = totalCost / float64(-netSignedQty)
@@ -413,13 +429,9 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				pos.StopLossPrice = 0
 				pos.UnrealizedPnL = 0
 			}
-
-			// Cache historical fill markers to handle consecutive calculation packages smoothly
-			pos.LastFillQty = int(o.FilledQuantity)
 		}
 
-		// 6. Absolute Squaring Off Cleanup Workflow Checklist Verification
-		// If a position returns to 0 shares, clear risk allocations instantly to wipe chart lines
+		// 6. Absolute Squaring Off Cleanup Workflow Verification
 		if pos.NetQuantity == 0 {
 			pos.Side = ""
 			pos.AveragePrice = 0
@@ -427,7 +439,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			pos.UnrealizedPnL = 0
 			pos.TargetPrice = 0
 			pos.StopLossPrice = 0
-			pos.LastFillQty = 0
 		}
 
 		// 7. Flush the position state box down into the core persistent hypertables
@@ -435,21 +446,8 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
 		}
 
-		// 8. Dispatch Event Frame B to immediately refresh client dashboards or wipe ghost chart lines
+		// 8. Dispatch Event Frame B to immediately refresh client dashboards
 		lm.broadcastPositionUpdate(pos)
-	}
-
-	// Reset fill state counters if the underlying entry has fully finalized its execution path
-	if statusUpper == "COMPLETE" || statusUpper == "CANCELLED" || statusUpper == "REJECTED" {
-		if existingEntry != nil {
-			// Zero out position reference fields for future order tickets
-			symbolKey := strings.ToUpper(o.TradingSymbol)
-			productKey := strings.ToUpper(o.Product)
-			key := fmt.Sprintf("%s:%s", symbolKey, productKey)
-			if pos, exists := lm.activePositions[key]; exists {
-				pos.LastFillQty = 0
-			}
-		}
 	}
 }
 
@@ -654,7 +652,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		key := fmt.Sprintf("%s:%s", symbolKey, productKey)
 		exchangeKeys[key] = true
 
-		// If exchange confirms it's flat, explicitly neutralize our local structure
+		// 1. If exchange confirms it's flat, explicitly neutralize our local structure
 		if pos.Quantity == 0 {
 			if localPos, exists := lm.activePositions[key]; exists {
 				localPos.NetQuantity = 0
@@ -673,16 +671,36 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			continue
 		}
 
-		txType := kiteconnect.TransactionTypeBuy
-		if pos.Quantity < 0 {
-			txType = kiteconnect.TransactionTypeSell
+		// 2. --- NEW OVERWRITE LOGIC: Apply absolute state from Zerodha ---
+		localPos, exists := lm.activePositions[key]
+		if !exists {
+			localPos = &models.Position{
+				Symbol:  symbolKey,
+				Product: productKey,
+			}
+			lm.activePositions[key] = localPos
 		}
 
-		lm.updatePositionStateFromFill(pos.Tradingsymbol, pos.Product, txType, int(math.Abs(float64(pos.Quantity))), pos.AveragePrice)
-		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d", pos.Tradingsymbol, pos.Quantity)
+		// Directly overwrite the local state with Zerodha's absolute truth
+		localPos.NetQuantity = int(math.Abs(float64(pos.Quantity)))
+		localPos.AveragePrice = pos.AveragePrice
+
+		if pos.Quantity > 0 {
+			localPos.Side = "LONG"
+		} else {
+			localPos.Side = "SHORT"
+		}
+
+		// Flush the corrected state to the database and broadcast
+		if lm.dbWriter != nil {
+			lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
+		}
+		lm.broadcastPositionUpdate(localPos)
+
+		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d at %.2f", pos.Tradingsymbol, pos.Quantity, pos.AveragePrice)
 	}
 
-	// Optional: Wipe out local ghost entries that do not exist in the broker's portfolio response at all
+	// 3. Optional: Wipe out local ghost entries that do not exist in the broker's portfolio response at all
 	for key, localPos := range lm.activePositions {
 		if !exchangeKeys[key] && localPos.NetQuantity != 0 {
 			localPos.NetQuantity = 0
