@@ -74,7 +74,7 @@ func LoadSessionSnapshotFromDB(ctx context.Context, pool *pgxpool.Pool) ([]model
 		var side, oType string
 		err := orderRows.Scan(
 			&o.OrderID, &o.Symbol, &side, &oType, &o.Qty,
-			&o.FilledQty, &o.Price, &o.Status, &o.Timestamp,
+			&o.FilledQty, &o.Price, &o.Status, &o.Timestamp, &o.UserEmail,
 		)
 		if err != nil {
 			logger.Errorf("Failed to scan recovered order row snapshot: %v", err)

@@ -296,6 +296,19 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 
 	// 2. If the order entity doesn't exist yet (e.g. execution frame caught right at boot), allocate it in cache
 	if existingEntry == nil {
+
+		email := ""
+		for _, entry := range lm.orderBook {
+			if entry.OrderID == o.OrderID && entry.UserEmail != "" {
+				email = entry.UserEmail
+				break
+			}
+		}
+
+		if email == "" {
+			email = "bot.live@gidh.tech"
+		}
+
 		newEntry := models.OrderBookEntry{
 			OrderID:   o.OrderID,
 			Symbol:    strings.ToUpper(o.TradingSymbol),
@@ -306,6 +319,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			Price:     o.Price,
 			Status:    statusUpper,
 			Timestamp: o.OrderTimestamp.Time,
+			UserEmail: email,
 		}
 		if newEntry.Timestamp.IsZero() {
 			newEntry.Timestamp = time.Now()
@@ -634,8 +648,31 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
+	// Track which keys were confirmed by the exchange
+	exchangeKeys := make(map[string]bool)
+
 	for _, pos := range positions.Net {
+		symbolKey := strings.ToUpper(pos.Tradingsymbol)
+		productKey := strings.ToUpper(pos.Product)
+		key := fmt.Sprintf("%s:%s", symbolKey, productKey)
+		exchangeKeys[key] = true
+
+		// If exchange confirms it's flat, explicitly neutralize our local structure
 		if pos.Quantity == 0 {
+			if localPos, exists := lm.activePositions[key]; exists {
+				localPos.NetQuantity = 0
+				localPos.Side = ""
+				localPos.AveragePrice = 0
+				localPos.UnrealizedPnL = 0
+				localPos.TargetPrice = 0
+				localPos.StopLossPrice = 0
+				localPos.LastFillQty = 0
+
+				if lm.dbWriter != nil {
+					lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
+				}
+				lm.broadcastPositionUpdate(localPos)
+			}
 			continue
 		}
 
@@ -646,6 +683,22 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 
 		lm.updatePositionStateFromFill(pos.Tradingsymbol, pos.Product, txType, int(math.Abs(float64(pos.Quantity))), pos.AveragePrice)
 		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d", pos.Tradingsymbol, pos.Quantity)
+	}
+
+	// Optional: Wipe out local ghost entries that do not exist in the broker's portfolio response at all
+	for key, localPos := range lm.activePositions {
+		if !exchangeKeys[key] && localPos.NetQuantity != 0 {
+			localPos.NetQuantity = 0
+			localPos.Side = ""
+			localPos.AveragePrice = 0
+			localPos.TargetPrice = 0
+			localPos.StopLossPrice = 0
+
+			if lm.dbWriter != nil {
+				lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
+			}
+			lm.broadcastPositionUpdate(localPos)
+		}
 	}
 
 	return nil
