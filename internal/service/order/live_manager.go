@@ -57,19 +57,20 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 		Tradingsymbol:   strings.ToUpper(req.Symbol),
 		TransactionType: transactionType,
 		Quantity:        req.Quantity,
-		Product:         kiteconnect.ProductMIS, // Rigidly locked to Equity MIS
+		Product:         kiteconnect.ProductMIS,
 		OrderType:       orderType,
 		Validity:        kiteconnect.ValidityDay,
 	}
 
 	if orderType == kiteconnect.OrderTypeLimit {
-		// Cleanly round the raw UI input price to the required 0.05 or 1.00 steps
-		tickSize := GetTickSizeForSymbol(req.Symbol)
+		// Auto-detect whether this specific order layout needs 0.05, 0.50, or 1.00 rounding bounds
+		tickSize := GetTickSizeForSymbol(req.Symbol, req.Price)
 		params.Price = RoundToTick(req.Price, tickSize)
 	} else if orderType == kiteconnect.OrderTypeMarket {
 		params.MarketProtection = -1
 	}
 
+	// Route order directly to exchange
 	orderResp, err := lm.kiteClient.PlaceOrder(kiteconnect.VarietyRegular, params)
 	if err != nil {
 		logger.Errorf("[Live] Failed to route order for %s: %v", req.Symbol, err)
@@ -92,8 +93,8 @@ func (lm *LiveOrderManager) ModifyOrder(orderID string, newPrice float64, userEm
 	}
 	lm.mu.Unlock()
 
-	// Apply identical cleaning logic to modifications
-	tickSize := GetTickSizeForSymbol(symbol)
+	// Apply identical adaptive logic to modifications
+	tickSize := GetTickSizeForSymbol(symbol, newPrice)
 	roundedPrice := RoundToTick(newPrice, tickSize)
 
 	params := kiteconnect.OrderParams{
@@ -712,14 +713,27 @@ func RoundToTick(price float64, tickSize float64) float64 {
 }
 
 // GetTickSizeForSymbol returns the correct tick size based on NSE Equity conventions
-func GetTickSizeForSymbol(symbol string) float64 {
+func GetTickSizeForSymbol(symbol string, targetPrice float64) float64 {
 	sym := strings.ToUpper(symbol)
 
-	// If you trade Liquid ETFs under Equity MIS, they enforce a 1.00 tick size
+	// 1. Explicitly check for Liquid/Bees ETFs (Always 1.00)
 	if strings.Contains(sym, "LIQUID") || strings.Contains(sym, "CASE") || strings.Contains(sym, "BEES") {
 		return 1.00
 	}
 
-	// Standard baseline for 99% of all NSE Equity MIS stocks
+	// 2. Extract the remaining fractional component of the raw target price
+	_, fraction := math.Modf(targetPrice)
+	fraction = math.Round(fraction*100) / 100 // Clean up tiny float precision errors (e.g., 0.49999)
+
+	// 3. Dynamic Auto-Detection if the UI sent an exact half-rupee or full-rupee decimal
+	if fraction == 0.50 {
+		return 0.50
+	} else if fraction == 0.00 {
+		// If the UI sends a flat round number, we can look for specific keywords or default safely to 0.05.
+		// Since 0.05 fits perfectly into 0.50 and 1.00 mathematically, using 0.05 as a fallback is clean.
+		return 0.05
+	}
+
+	// Standard baseline for 99% of all regular NSE Equity MIS stocks
 	return 0.05
 }
