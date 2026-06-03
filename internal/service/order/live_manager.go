@@ -330,6 +330,9 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		// Update core incremental tracking variables safely via the active map pointer
 		existingEntry.FilledQty = int(o.FilledQuantity)
 		existingEntry.Status = statusUpper
+		if o.Price > 0 {
+			existingEntry.Price = o.Price
+		}
 	}
 
 	// 3. Persist entry audit state directly to the SQL database tables
