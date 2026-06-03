@@ -297,9 +297,16 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
-	statusUpper := strings.ToUpper(o.Status)
-	logger.Infof("[Live Engine] Processing broker update for OrderID: %s, Status: %s (Filled: %d/%d)",
-		o.OrderID, statusUpper, o.FilledQuantity, o.Quantity)
+	rawStatus := strings.ToUpper(o.Status)
+
+	// --- FIX: Apply the UI Status Mapping in the Real-Time Stream ---
+	mappedStatus := rawStatus
+	if rawStatus == "OPEN" || rawStatus == "TRIGGER PENDING" || rawStatus == "UPDATE" || rawStatus == "PUT ORDER REQ RECEIVED" || rawStatus == "VALIDATION PENDING" {
+		mappedStatus = "PENDING"
+	}
+
+	logger.Infof("[Live Engine] Processing broker update for OrderID: %s, Status: %s -> %s (Filled: %d/%d)",
+		o.OrderID, rawStatus, mappedStatus, o.FilledQuantity, o.Quantity)
 
 	var existingEntry *models.OrderBookEntry
 	var previousFilledQty int
@@ -340,7 +347,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			Qty:       int(o.Quantity),
 			FilledQty: int(o.FilledQuantity),
 			Price:     tradePrice,
-			Status:    statusUpper,
+			Status:    mappedStatus, // Uses safely mapped UI status
 			Timestamp: o.OrderTimestamp.Time,
 			UserEmail: email,
 		}
@@ -354,7 +361,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		previousFilledQty = existingEntry.FilledQty
 
 		existingEntry.FilledQty = int(o.FilledQuantity)
-		existingEntry.Status = statusUpper
+		existingEntry.Status = mappedStatus // Uses safely mapped UI status
 
 		// Update to true execution price if we now have it
 		if tradePrice > 0 {
