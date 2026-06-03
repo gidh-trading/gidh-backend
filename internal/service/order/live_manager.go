@@ -391,8 +391,15 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 					pos.Side = "SHORT"
 					pos.NetQuantity = abs(newNetQty)
 				} else {
-					// The position has completely flattened out to 0
+					// Correctly clear out all spatial parameters when the position neutralizes
+					pos.Side = ""
 					pos.NetQuantity = 0
+					pos.AveragePrice = 0
+					pos.TargetPrice = 0
+					pos.StopLossPrice = 0
+					pos.RealizedPnL = 0 // Calculate historical delta if required here
+					pos.UnrealizedPnL = 0
+					pos.LastFillQty = 0
 				}
 			}
 
