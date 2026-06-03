@@ -77,6 +77,23 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 		return "", err
 	}
 
+	lm.mu.Lock()
+	initialEntry := models.OrderBookEntry{
+		OrderID:   orderResp.OrderID,
+		Symbol:    strings.ToUpper(req.Symbol),
+		Side:      string(transactionType),
+		OrderType: string(orderType),
+		Qty:       req.Quantity,
+		Status:    "PENDING",
+		Timestamp: time.Now(),
+		UserEmail: req.UserEmail, // Capture requesting user email
+	}
+	lm.orderBook = append(lm.orderBook, initialEntry)
+	if lm.dbWriter != nil {
+		lm.dbWriter.PersistOrder(initialEntry)
+	}
+	lm.mu.Unlock()
+
 	logger.Infof("[Live] Entry Order Successfully Posted: %s for %s", orderResp.OrderID, req.Symbol)
 	return orderResp.OrderID, nil
 }
@@ -545,6 +562,14 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		status = "PENDING"
 	}
 
+	email := "bot.live@gidh.tech" // Fallback fallback string
+	for _, entry := range lm.orderBook {
+		if entry.OrderID == o.OrderID && entry.UserEmail != "" {
+			email = entry.UserEmail
+			break
+		}
+	}
+
 	return models.OrderBookEntry{
 		OrderID:   o.OrderID,
 		Symbol:    strings.ToUpper(o.TradingSymbol),
@@ -555,7 +580,7 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		Price:     o.Price,
 		Status:    status, // Safely outputs "PENDING" to your web application UI
 		Timestamp: o.OrderTimestamp.Time,
-		UserEmail: "bot.live@gidh.tech",
+		UserEmail: email,
 	}
 }
 
