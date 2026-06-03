@@ -835,24 +835,23 @@ func RoundToTick(price float64, tickSize float64) float64 {
 func GetTickSizeForSymbol(symbol string, targetPrice float64) float64 {
 	sym := strings.ToUpper(symbol)
 
-	// 1. Explicitly check for Liquid/Bees ETFs (Always 1.00)
+	// 1. Explicitly check for Liquid/Bees ETFs
 	if strings.Contains(sym, "LIQUID") || strings.Contains(sym, "CASE") || strings.Contains(sym, "BEES") {
 		return 1.00
 	}
 
-	// 2. Extract the remaining fractional component of the raw target price
-	_, fraction := math.Modf(targetPrice)
-	fraction = math.Round(fraction*100) / 100 // Clean up tiny float precision errors (e.g., 0.49999)
-
-	// 3. Dynamic Auto-Detection if the UI sent an exact half-rupee or full-rupee decimal
-	if fraction == 0.50 {
-		return 0.50
-	} else if fraction == 0.00 {
-		// If the UI sends a flat round number, we can look for specific keywords or default safely to 0.05.
-		// Since 0.05 fits perfectly into 0.50 and 1.00 mathematically, using 0.05 as a fallback is clean.
+	// 2. NSE Tick Size Rules (Implemented April 2025)
+	if targetPrice < 250 {
+		return 0.01
+	} else if targetPrice < 1000 {
 		return 0.05
+	} else if targetPrice < 5000 {
+		return 0.10
+	} else if targetPrice < 10000 {
+		return 0.50
+	} else if targetPrice < 20000 {
+		return 1.00
+	} else {
+		return 5.00
 	}
-
-	// Standard baseline for 99% of all regular NSE Equity MIS stocks
-	return 0.05
 }
