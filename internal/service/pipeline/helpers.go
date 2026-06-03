@@ -29,7 +29,8 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 		Close:           price,
 		VolumeRank:      1,
 		TickRank:        1,
-		PriceRank:       4, // Default to a standard baseline state
+		PriceRank:       4,
+		RangeRank:       4,
 	}
 }
 

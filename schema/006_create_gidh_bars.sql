@@ -26,9 +26,10 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     change_pct       DOUBLE PRECISION NOT NULL DEFAULT 0,
 
     -- Flattened Microstructure Anomaly Heatmap Ranks
-    volume_rank      INTEGER          NOT NULL DEFAULT 4, -- Peak rolling volume rank reached in bar life (1-7)
-    tick_rank        INTEGER          NOT NULL DEFAULT 4, -- Peak rolling tick count rank reached in bar life (1-7)
-    price_rank       INTEGER          NOT NULL DEFAULT 4, -- Instantaneous rolling price velocity rank at bar close (1-7)
+    volume_rank      INTEGER          NOT NULL DEFAULT 4,
+    tick_rank        INTEGER          NOT NULL DEFAULT 4,
+    price_rank       INTEGER          NOT NULL DEFAULT 4,
+    range_rank       INTEGER          NOT NULL DEFAULT 4,
 
     PRIMARY KEY (timestamp, instrument_token, timeframe)
 );
