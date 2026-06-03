@@ -162,23 +162,22 @@ func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 	if a.StreamManager != nil {
 		logger.Info("Stopping stream manager via API request...")
 
-		// 1. Stop the stream reader and workers
+		// 1. First stop the streaming data layers.
+		// This cancels contexts and blocks until ALL workers exit runProcessor().
+		// This guarantees NO background goroutines are accessing the pipeline structures.
 		a.StreamManager.Stop()
 
-		// 2. Clear bar/rolling state in the pipeline
-		if a.Pipeline != nil {
-			a.Pipeline.Reset()
-		}
-
-		// 3. Clear the Position Manager (Orders/Positions/Prices)
+		// 2. Safely clear the position matrix now that concurrent access is terminated.
 		if a.OrderManager != nil {
 			a.OrderManager.ClearPositions()
 		}
 
-		// 4. Clear alert history
-		a.alertMu.Lock()
-		a.alertMu.Unlock()
+		// 3. Reset the pipeline architecture and maps safely without background race conditions.
+		if a.Pipeline != nil {
+			a.Pipeline.Reset()
+		}
 
+		// 4. Detach managers
 		a.StreamManager = nil
 		a.activeManager = nil
 

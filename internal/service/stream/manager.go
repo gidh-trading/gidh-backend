@@ -109,25 +109,36 @@ func (sm *Manager) runProcessor(processorID int) {
 	defer sm.workerPool.Done()
 
 	logger.Infof("Tick processor %d started", processorID)
-
 	var processedCount int
-	for tick := range sm.tickChan {
 
-		sm.updateStatus(tick.Timestamp.Format("2006-01-02"))
+	for {
+		select {
+		case tick, ok := <-sm.tickChan:
+			if !ok {
+				logger.Infof("Tick processor %d stopped after processing %d ticks (channel closed)", processorID, processedCount)
+				return
+			}
 
-		if err := sm.processor.Process(tick); err != nil {
-			logger.Errorf("Processor %d failed to process tick for %s: %v",
-				processorID, tick.StockName, err)
-		}
+			sm.updateStatus(tick.Timestamp.Format("2006-01-02"))
 
-		processedCount++
-		if processedCount%10000 == 0 {
-			logger.Infof("Processor %d processed %d ticks", processorID, processedCount)
+			if err := sm.processor.Process(tick); err != nil {
+				logger.Errorf("Processor %d failed to process tick for %s: %v", processorID, tick.StockName, err)
+			}
+
+			processedCount++
+			if processedCount%10000 == 0 {
+				logger.Infof("Processor %d processed %d ticks", processorID, processedCount)
+			}
+		case <-sm.ctx.Done():
+			// Context canceled via Stop API request!
+			// Drain remaining objects from channel quickly without hanging to unlock sm.workerPool.Wait()
+			for tick := range sm.tickChan {
+				_ = sm.processor.Process(tick)
+			}
+			logger.Infof("Tick processor %d halted via cancellation context flag.", processorID)
+			return
 		}
 	}
-
-	logger.Infof("Tick processor %d stopped after processing %d ticks",
-		processorID, processedCount)
 }
 
 func (sm *Manager) Stop() {

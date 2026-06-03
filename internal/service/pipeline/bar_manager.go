@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"gidh-backend/pkg/logger"
 	"sync"
 	"time"
 
@@ -127,11 +128,14 @@ func (bm *BarManager) updateTimeframe(
 func (bm *BarManager) ClearState() {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
+
 	bm.state1m = make(map[uint32]*candleState)
 	bm.state3m = make(map[uint32]*candleState)
 	bm.state5m = make(map[uint32]*candleState)
 	bm.state10m = make(map[uint32]*candleState)
 	bm.state15m = make(map[uint32]*candleState)
+
+	logger.Info("Bar Manager historical window cache states wiped cleanly.")
 }
 
 func (bm *BarManager) GetActiveBarsSnapshot(token uint32) map[string]*models.Bar {
