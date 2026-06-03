@@ -302,7 +302,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		o.OrderID, statusUpper, o.FilledQuantity, o.Quantity)
 
 	var existingEntry *models.OrderBookEntry
-	var previousFilledQty int // Tracker to stop duplicate WebSocket packets from double-counting
+	var previousFilledQty int
 
 	// 1. Locate the existing entry inside our localized session cache book
 	for i := range lm.orderBook {
@@ -312,7 +312,13 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		}
 	}
 
-	// 2. If the order entity doesn't exist yet (e.g. execution frame caught right at boot), allocate it in cache
+	// Extract accurate trade execution price
+	tradePrice := o.AveragePrice
+	if tradePrice == 0 {
+		tradePrice = o.Price
+	}
+
+	// 2. If the order entity doesn't exist yet allocate it in cache
 	if existingEntry == nil {
 		email := ""
 		for _, entry := range lm.orderBook {
@@ -333,7 +339,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			OrderType: strings.ToUpper(o.OrderType),
 			Qty:       int(o.Quantity),
 			FilledQty: int(o.FilledQuantity),
-			Price:     o.Price,
+			Price:     tradePrice,
 			Status:    statusUpper,
 			Timestamp: o.OrderTimestamp.Time,
 			UserEmail: email,
@@ -344,13 +350,15 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		lm.orderBook = append(lm.orderBook, newEntry)
 		existingEntry = &lm.orderBook[len(lm.orderBook)-1]
 	} else {
-		// --- FIX 2: Capture previous state before updating to calculate perfect deltas ---
+		// Capture previous state before updating to calculate perfect deltas
 		previousFilledQty = existingEntry.FilledQty
 
 		existingEntry.FilledQty = int(o.FilledQuantity)
 		existingEntry.Status = statusUpper
-		if o.Price > 0 {
-			existingEntry.Price = o.Price
+
+		// Update to true execution price if we now have it
+		if tradePrice > 0 {
+			existingEntry.Price = tradePrice
 		}
 	}
 
@@ -386,7 +394,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		if fillDelta > 0 {
 			sideUpper := strings.ToUpper(o.TransactionType)
 
-			// Determine the signed change from this specific update execution frame
 			var tradeChange int
 			if sideUpper == "BUY" {
 				tradeChange = fillDelta
@@ -394,7 +401,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				tradeChange = -fillDelta
 			}
 
-			// --- FIX 3: Convert the localized state into a true signed integer exposure ---
+			// Convert localized state into a true signed integer exposure
 			var currentSignedQty int
 			if pos.Side == "SHORT" {
 				currentSignedQty = -pos.NetQuantity
@@ -408,20 +415,27 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			if netSignedQty > 0 {
 				pos.Side = "LONG"
 				pos.NetQuantity = netSignedQty
-				// Recalculate average price only if expanding execution vectors
+
 				if currentSignedQty >= 0 {
-					totalCost := (float64(currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * o.Price)
+					totalCost := (float64(currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * tradePrice)
 					pos.AveragePrice = totalCost / float64(netSignedQty)
+				} else {
+					// Position flipped from Short to Long. Old average is wiped!
+					pos.AveragePrice = tradePrice
 				}
 			} else if netSignedQty < 0 {
 				pos.Side = "SHORT"
-				pos.NetQuantity = -netSignedQty // Keep NetQuantity absolute
+				pos.NetQuantity = -netSignedQty // Keep absolute
+
 				if currentSignedQty <= 0 {
-					totalCost := (float64(-currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * o.Price)
+					totalCost := (float64(-currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * tradePrice)
 					pos.AveragePrice = totalCost / float64(-netSignedQty)
+				} else {
+					// Position flipped from Long to Short. Old average is wiped!
+					pos.AveragePrice = tradePrice
 				}
 			} else {
-				// Correctly clear out all spatial parameters when the position neutralizes perfectly
+				// Correctly clear out all spatial parameters when position neutralizes perfectly
 				pos.Side = ""
 				pos.NetQuantity = 0
 				pos.AveragePrice = 0
@@ -449,14 +463,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		// 8. Dispatch Event Frame B to immediately refresh client dashboards
 		lm.broadcastPositionUpdate(pos)
 	}
-}
-
-// Simple absolute value helper function for integer calculations
-func abs(v int) int {
-	if v < 0 {
-		return -v
-	}
-	return v
 }
 
 // ============================================================================
@@ -586,6 +592,12 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		}
 	}
 
+	// --- FIX: Capture actual execution price instead of 0 for market orders ---
+	tradePrice := o.AveragePrice
+	if tradePrice == 0 {
+		tradePrice = o.Price
+	}
+
 	return models.OrderBookEntry{
 		OrderID:   o.OrderID,
 		Symbol:    strings.ToUpper(o.TradingSymbol),
@@ -593,7 +605,7 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		OrderType: strings.ToUpper(o.OrderType),
 		Qty:       int(o.Quantity),
 		FilledQty: int(o.FilledQuantity),
-		Price:     o.Price,
+		Price:     tradePrice,
 		Status:    status, // Safely outputs "PENDING" to your web application UI
 		Timestamp: o.OrderTimestamp.Time,
 		UserEmail: email,
@@ -671,7 +683,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			continue
 		}
 
-		// 2. --- NEW OVERWRITE LOGIC: Apply absolute state from Zerodha ---
+		// 2. OVERWRITE LOGIC: Apply absolute state from Zerodha
 		localPos, exists := lm.activePositions[key]
 		if !exists {
 			localPos = &models.Position{
@@ -681,14 +693,18 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			lm.activePositions[key] = localPos
 		}
 
-		// Directly overwrite the local state with Zerodha's absolute truth
+		// Directly overwrite the local quantity with Zerodha's absolute truth
 		localPos.NetQuantity = int(math.Abs(float64(pos.Quantity)))
-		localPos.AveragePrice = pos.AveragePrice
-
 		if pos.Quantity > 0 {
 			localPos.Side = "LONG"
 		} else {
 			localPos.Side = "SHORT"
+		}
+
+		// --- FIX: Stop overwriting accurate open-leg prices with day-averaged prices ---
+		// Only adopt Zerodha's API average price if we don't currently have a local one
+		if localPos.AveragePrice == 0 {
+			localPos.AveragePrice = pos.AveragePrice
 		}
 
 		// Flush the corrected state to the database and broadcast
@@ -697,7 +713,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		}
 		lm.broadcastPositionUpdate(localPos)
 
-		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d at %.2f", pos.Tradingsymbol, pos.Quantity, pos.AveragePrice)
+		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d at %.2f", pos.Tradingsymbol, pos.Quantity, localPos.AveragePrice)
 	}
 
 	// 3. Optional: Wipe out local ghost entries that do not exist in the broker's portfolio response at all
