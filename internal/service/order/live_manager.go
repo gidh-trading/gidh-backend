@@ -311,7 +311,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		mappedStatus = "PENDING"
 	}
 
-	// FIX: Cast kiteconnect float64 quantities to int for the logger to prevent format crashes
 	logger.Infof("[Live Engine] Processing broker update for OrderID: %s, Status: %s -> %s (Filled: %d/%d)",
 		o.OrderID, rawStatus, mappedStatus, int(o.FilledQuantity), int(o.Quantity))
 
@@ -334,7 +333,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			displayPrice = o.Price
 		}
 	} else {
-		displayPrice = o.Price // If working/pending, always track the live target limit
+		displayPrice = o.Price
 	}
 
 	if existingEntry == nil {
@@ -368,26 +367,21 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		lm.orderBook = append(lm.orderBook, newEntry)
 		existingEntry = &lm.orderBook[len(lm.orderBook)-1]
 	} else {
-		// Capture previous state before updating to calculate perfect deltas
 		previousFilledQty = existingEntry.FilledQty
-
-		// --- FIX: Synchronize ALL mutable fields in case modified directly on Zerodha ---
 		existingEntry.FilledQty = int(o.FilledQuantity)
-		existingEntry.Qty = int(o.Quantity)                    // Captures quantity modifications
-		existingEntry.OrderType = strings.ToUpper(o.OrderType) // Captures Limit <-> Market switches
+		existingEntry.Qty = int(o.Quantity)
+		existingEntry.OrderType = strings.ToUpper(o.OrderType)
 		existingEntry.Status = mappedStatus
-		existingEntry.Price = displayPrice // Captures Price modifications instantly
+		existingEntry.Price = displayPrice
 	}
 
-	// Persist entry audit state directly to the SQL database tables
 	if lm.dbWriter != nil {
 		lm.dbWriter.PersistOrder(*existingEntry)
 	}
 
-	// Dispatch Event Frame A to keep frontend execution meters perfectly synchronized
 	lm.broadcastOrderUpdate(*existingEntry)
 
-	// Manage active position mapping tracking if an order has registered fills
+	// Manage active position mapping tracking
 	if o.FilledQuantity > 0 {
 		symbolKey := strings.ToUpper(o.TradingSymbol)
 		productKey := strings.ToUpper(o.Product)
@@ -406,7 +400,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 			lm.activePositions[key] = pos
 		}
 
-		// Calculate matching fills safely using order delta, immune to duplicate socket pings
 		fillDelta := int(o.FilledQuantity) - previousFilledQty
 		if fillDelta > 0 {
 			sideUpper := strings.ToUpper(o.TransactionType)
@@ -425,13 +418,31 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				currentSignedQty = pos.NetQuantity
 			}
 
-			netSignedQty := currentSignedQty + tradeChange
-
-			// ALWAYS use actual execution average for PnL / Position math
 			executionFillPrice := o.AveragePrice
 			if executionFillPrice == 0 {
 				executionFillPrice = o.Price
 			}
+
+			// --- FIX 1: ACCUMULATE REALIZED PNL ON EXITS ---
+			isBuy := sideUpper == "BUY"
+			isReducing := (isBuy && currentSignedQty < 0) || (!isBuy && currentSignedQty > 0)
+
+			if isReducing {
+				closedQty := fillDelta
+				if fillDelta > int(math.Abs(float64(currentSignedQty))) {
+					closedQty = int(math.Abs(float64(currentSignedQty)))
+				}
+
+				var tradePnL float64
+				if pos.Side == "LONG" {
+					tradePnL = (executionFillPrice - pos.AveragePrice) * float64(closedQty)
+				} else if pos.Side == "SHORT" {
+					tradePnL = (pos.AveragePrice - executionFillPrice) * float64(closedQty)
+				}
+				pos.RealizedPnL += tradePnL
+			}
+
+			netSignedQty := currentSignedQty + tradeChange
 
 			if netSignedQty > 0 {
 				pos.Side = "LONG"
@@ -445,7 +456,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				}
 			} else if netSignedQty < 0 {
 				pos.Side = "SHORT"
-				pos.NetQuantity = -netSignedQty // Keep absolute
+				pos.NetQuantity = -netSignedQty
 
 				if currentSignedQty <= 0 {
 					totalCost := (float64(-currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * executionFillPrice)
@@ -461,12 +472,23 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				pos.StopLossPrice = 0
 				pos.UnrealizedPnL = 0
 			}
+
+			// --- FIX 2: INSTANTLY RECALCULATE UNREALIZED PNL ---
+			// Don't wait for the next market tick to update the UI
+			if ltp, hasLtp := lm.lastPrices[symbolKey]; hasLtp && pos.NetQuantity != 0 {
+				if pos.Side == "LONG" {
+					pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
+				} else if pos.Side == "SHORT" {
+					pos.UnrealizedPnL = (pos.AveragePrice - ltp) * float64(pos.NetQuantity)
+				}
+			}
 		}
 
+		// 6. Absolute Squaring Off Cleanup Workflow Verification
 		if pos.NetQuantity == 0 {
 			pos.Side = ""
 			pos.AveragePrice = 0
-			pos.RealizedPnL = 0
+			// pos.RealizedPnL = 0  <--- DELETED: Never wipe out the profit history!
 			pos.UnrealizedPnL = 0
 			pos.TargetPrice = 0
 			pos.StopLossPrice = 0
