@@ -704,6 +704,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 	lm.mu.Lock()
 	defer lm.mu.Unlock()
 
+	// Track which keys were confirmed by the exchange
 	exchangeKeys := make(map[string]bool)
 
 	for _, pos := range positions.Net {
@@ -714,27 +715,38 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 
 		// 1. If exchange confirms it's flat, explicitly neutralize our local structure
 		if pos.Quantity == 0 {
-			if localPos, exists := lm.activePositions[key]; exists {
-				localPos.NetQuantity = 0
-				localPos.Side = ""
-				localPos.AveragePrice = 0
-				localPos.UnrealizedPnL = 0
-				localPos.TargetPrice = 0
-				localPos.StopLossPrice = 0
-				localPos.LastFillQty = 0
+			localPos, exists := lm.activePositions[key]
 
-				// --- FIX: Heal corrupted database values using Zerodha's API truth ---
-				localPos.RealizedPnL = pos.Realised
-
-				if lm.dbWriter != nil {
-					lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
+			// --- FIX: Force instantiate the position even if it was closed ---
+			// This ensures our Healer reaches the database to wipe out old corrupted values
+			if !exists {
+				localPos = &models.Position{
+					Symbol:  symbolKey,
+					Product: productKey,
 				}
-				lm.broadcastPositionUpdate(localPos)
+				lm.activePositions[key] = localPos
 			}
+
+			localPos.NetQuantity = 0
+			localPos.Side = ""
+			localPos.AveragePrice = 0
+			localPos.UnrealizedPnL = 0
+			localPos.TargetPrice = 0
+			localPos.StopLossPrice = 0
+			localPos.LastFillQty = 0
+
+			// THE ULTIMATE HEALER: For closed intraday positions, Zerodha's total Pnl
+			// is the absolute, verified Realized PnL truth.
+			localPos.RealizedPnL = pos.Pnl
+
+			if lm.dbWriter != nil {
+				lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
+			}
+			lm.broadcastPositionUpdate(localPos)
 			continue
 		}
 
-		// 2. OVERWRITE LOGIC: Apply absolute state from Zerodha
+		// 2. OVERWRITE LOGIC: Apply absolute state from Zerodha for Open Positions
 		localPos, exists := lm.activePositions[key]
 		if !exists {
 			localPos = &models.Position{
@@ -744,6 +756,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			lm.activePositions[key] = localPos
 		}
 
+		// Directly overwrite the local quantity with Zerodha's absolute truth
 		localPos.NetQuantity = int(math.Abs(float64(pos.Quantity)))
 		if pos.Quantity > 0 {
 			localPos.Side = "LONG"
@@ -755,15 +768,18 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			localPos.AveragePrice = pos.AveragePrice
 		}
 
-		// --- FIX: Synchronize Realized Profit safely ---
+		// Heal Open Positions' Realized PnL too
 		localPos.RealizedPnL = pos.Realised
 
 		if lm.dbWriter != nil {
 			lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
 		}
 		lm.broadcastPositionUpdate(localPos)
+
+		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d at %.2f", pos.Tradingsymbol, pos.Quantity, localPos.AveragePrice)
 	}
 
+	// 3. Wipe out local ghost entries that do not exist in the broker's portfolio response at all
 	for key, localPos := range lm.activePositions {
 		if !exchangeKeys[key] && localPos.NetQuantity != 0 {
 			localPos.NetQuantity = 0
