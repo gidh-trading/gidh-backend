@@ -537,8 +537,11 @@ func (lm *LiveOrderManager) updatePositionStateFromFill(symbol, product, transac
 // ============================================================================
 
 func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.OrderBookEntry {
-	status := o.Status
-	if status == "OPEN" || status == "TRIGGER PENDING" || status == "UPDATE" || status == "PUT ORDER REQ RECEIVED" || status == "VALIDATION PENDING" {
+	statusUpper := strings.ToUpper(o.Status)
+	status := statusUpper
+
+	// Standardize all broker working execution frames safely to "PENDING" for your UI mapping
+	if statusUpper == "OPEN" || statusUpper == "TRIGGER PENDING" || statusUpper == "UPDATE" || statusUpper == "PUT ORDER REQ RECEIVED" || statusUpper == "VALIDATION PENDING" {
 		status = "PENDING"
 	}
 
@@ -550,7 +553,7 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 		Qty:       int(o.Quantity),
 		FilledQty: int(o.FilledQuantity),
 		Price:     o.Price,
-		Status:    status,
+		Status:    status, // Safely outputs "PENDING" to your web application UI
 		Timestamp: o.OrderTimestamp.Time,
 		UserEmail: "bot.live@gidh.tech",
 	}
