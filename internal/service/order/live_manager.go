@@ -370,54 +370,48 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		if fillDelta > 0 {
 			sideUpper := strings.ToUpper(o.TransactionType)
 
-			// Recalculate average execution rates and current active exposure direction blocks
-			if pos.NetQuantity == 0 {
-				pos.AveragePrice = o.Price
-				if sideUpper == "BUY" {
-					pos.Side = "LONG"
-					pos.NetQuantity = int(fillDelta)
-				} else {
-					pos.Side = "SHORT"
-					pos.NetQuantity = int(-fillDelta)
+			// Determine the signed change from this specific update execution frame
+			var tradeChange int
+			if sideUpper == "BUY" {
+				tradeChange = fillDelta
+			} else {
+				tradeChange = -fillDelta
+			}
+
+			// Convert the existing localized state into a true signed integer exposure
+			var currentSignedQty int
+			if pos.Side == "SHORT" {
+				currentSignedQty = -pos.NetQuantity
+			} else {
+				currentSignedQty = pos.NetQuantity
+			}
+
+			// Compute the accurate net target exposure
+			netSignedQty := currentSignedQty + tradeChange
+
+			if netSignedQty > 0 {
+				pos.Side = "LONG"
+				pos.NetQuantity = netSignedQty
+				// Recalculate average price only if expanding execution vectors
+				if currentSignedQty >= 0 {
+					totalCost := (float64(currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * o.Price)
+					pos.AveragePrice = totalCost / float64(netSignedQty)
+				}
+			} else if netSignedQty < 0 {
+				pos.Side = "SHORT"
+				pos.NetQuantity = -netSignedQty // Keep NetQuantity as an absolute positive value
+				if currentSignedQty <= 0 {
+					totalCost := (float64(-currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * o.Price)
+					pos.AveragePrice = totalCost / float64(-netSignedQty)
 				}
 			} else {
-				// Aggregate calculation for active scaling modifications
-				currentQty := pos.NetQuantity
-				if pos.Side == "SHORT" {
-					currentQty = -pos.NetQuantity
-				}
-
-				tradeQty := fillDelta
-				if sideUpper == "SELL" {
-					tradeQty = -fillDelta
-				}
-
-				newNetQty := currentQty + int(tradeQty)
-
-				// If adding to the position direction, recalculate weighted average execution entry rate
-				if (currentQty > 0 && tradeQty > 0) || (currentQty < 0 && tradeQty < 0) {
-					totalCost := (float64(abs(currentQty)) * pos.AveragePrice) + (float64(abs(tradeQty)) * o.Price)
-					pos.AveragePrice = totalCost / float64(abs(newNetQty))
-				}
-
-				// Assign exposure direction strings
-				if newNetQty > 0 {
-					pos.Side = "LONG"
-					pos.NetQuantity = newNetQty
-				} else if newNetQty < 0 {
-					pos.Side = "SHORT"
-					pos.NetQuantity = abs(newNetQty)
-				} else {
-					// Correctly clear out all spatial parameters when the position neutralizes
-					pos.Side = ""
-					pos.NetQuantity = 0
-					pos.AveragePrice = 0
-					pos.TargetPrice = 0
-					pos.StopLossPrice = 0
-					pos.RealizedPnL = 0 // Calculate historical delta if required here
-					pos.UnrealizedPnL = 0
-					pos.LastFillQty = 0
-				}
+				// Correctly clear out all spatial parameters when the position neutralizes perfectly
+				pos.Side = ""
+				pos.NetQuantity = 0
+				pos.AveragePrice = 0
+				pos.TargetPrice = 0
+				pos.StopLossPrice = 0
+				pos.UnrealizedPnL = 0
 			}
 
 			// Cache historical fill markers to handle consecutive calculation packages smoothly
