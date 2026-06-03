@@ -240,8 +240,13 @@ func (lm *LiveOrderManager) OnPriceUpdate(symbol string, ltp float64, ts time.Ti
 		pos, exists := lm.activePositions[key]
 
 		if exists && pos.NetQuantity != 0 {
-			// Update ongoing open equity metrics for UI broadcasting
-			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
+
+			// --- FIX: Update ongoing open equity metrics dynamically based on direction ---
+			if pos.Side == "LONG" {
+				pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
+			} else if pos.Side == "SHORT" {
+				pos.UnrealizedPnL = (pos.AveragePrice - ltp) * float64(pos.NetQuantity)
+			}
 
 			isTargetHit := (pos.Side == "LONG" && pos.TargetPrice > 0 && ltp >= pos.TargetPrice) ||
 				(pos.Side == "SHORT" && pos.TargetPrice > 0 && ltp <= pos.TargetPrice)
@@ -257,7 +262,8 @@ func (lm *LiveOrderManager) OnPriceUpdate(symbol string, ltp float64, ts time.Ti
 				logger.Infof("[Live] Local %s Risk Breach Detected for %s at %.2f! Executing Market Liquidation.", triggerType, pos.Symbol, ltp)
 
 				// Automatically fire real exchange market orders matching current live net quantity
-				go lm.executeBrokerMarketLiquidation(pos.Symbol, pos.Product, pos.Side, int(math.Abs(float64(pos.NetQuantity))))
+				// Note: math.Abs is completely safe here, but technically optional now since NetQuantity is always positive
+				go lm.executeBrokerMarketLiquidation(pos.Symbol, pos.Product, pos.Side, pos.NetQuantity)
 
 				// Instantly clear boundaries in RAM to block duplicate triggers on rapid successive ticks
 				pos.TargetPrice = 0
@@ -778,10 +784,27 @@ func (lm *LiveOrderManager) GetOrders(symbol string) []models.OrderBookEntry {
 func (lm *LiveOrderManager) GetAllPositions() []models.Position {
 	lm.mu.RLock()
 	defer lm.mu.RUnlock()
+
 	positions := make([]models.Position, 0, len(lm.activePositions))
+
 	for _, pos := range lm.activePositions {
-		positions = append(positions, *pos)
+		// 1. Create a copy so we don't mutate the live memory map during a Read lock
+		posCopy := *pos
+
+		// 2. Check if we have a live price cached for this symbol
+		if ltp, exists := lm.lastPrices[posCopy.Symbol]; exists && posCopy.NetQuantity != 0 {
+
+			// 3. Calculate the absolute real-time PnL for the exact millisecond of the UI request
+			if posCopy.Side == "LONG" {
+				posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
+			} else if posCopy.Side == "SHORT" {
+				posCopy.UnrealizedPnL = (posCopy.AveragePrice - ltp) * float64(posCopy.NetQuantity)
+			}
+		}
+
+		positions = append(positions, posCopy)
 	}
+
 	return positions
 }
 
