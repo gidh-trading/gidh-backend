@@ -449,7 +449,10 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				} else if pos.Side == "SHORT" {
 					tradePnL = (pos.AveragePrice - executionFillPrice) * float64(closedQty)
 				}
+
+				// Calculate and round Realized PnL to 2 decimal places
 				pos.RealizedPnL += tradePnL
+				pos.RealizedPnL = math.Round(pos.RealizedPnL*100) / 100
 			}
 
 			netSignedQty := currentSignedQty + tradeChange
@@ -464,6 +467,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 				} else {
 					pos.AveragePrice = executionFillPrice
 				}
+				pos.AveragePrice = math.Round(pos.AveragePrice*100) / 100
 			} else if netSignedQty < 0 {
 				pos.Side = "SHORT"
 				pos.NetQuantity = -netSignedQty
@@ -576,7 +580,9 @@ func (lm *LiveOrderManager) updatePositionStateFromFill(symbol, product, transac
 		} else {
 			tradePnL = (pos.AveragePrice - averagePrice) * float64(closedQty)
 		}
+
 		pos.RealizedPnL += tradePnL
+		pos.RealizedPnL = math.Round(pos.RealizedPnL*100) / 100
 
 		if isBuy {
 			pos.NetQuantity += qtyDelta

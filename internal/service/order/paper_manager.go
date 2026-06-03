@@ -360,6 +360,7 @@ func (pm *PaperPositionManager) updatePositionState(symbol, product, side string
 			tradePnL = (pos.AveragePrice - fillPrice) * float64(closedQty)
 		}
 		pos.RealizedPnL += tradePnL
+		pos.RealizedPnL = math.Round(pos.RealizedPnL*100) / 100
 
 		if isBuy {
 			pos.NetQuantity += qty
