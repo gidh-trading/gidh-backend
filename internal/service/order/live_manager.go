@@ -531,8 +531,8 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		if pos.Quantity == 0 {
 			localPos, exists := lm.activePositions[key]
 
-			// Force instantiate the position even if it was closed
-			// This ensures our clean state reaches the database to wipe out old values
+			// --- FIX: Force instantiate the position even if it was closed ---
+			// This ensures our Healer reaches the database to wipe out old corrupted values
 			if !exists {
 				localPos = &models.Position{
 					Symbol:  symbolKey,
@@ -549,7 +549,8 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			localPos.StopLossPrice = 0
 			localPos.LastFillQty = 0
 
-			// For closed intraday positions, Zerodha's total PnL is the absolute verified truth
+			// THE ULTIMATE HEALER: For closed intraday positions, Zerodha's total PnL
+			// is the absolute, verified Realized PnL truth. (Notice the capital 'L' here!)
 			localPos.RealizedPnL = pos.PnL
 
 			if lm.dbWriter != nil {
@@ -569,26 +570,17 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			lm.activePositions[key] = localPos
 		}
 
-		// Detect incoming tracking direction from the broker
-		var incomingSide string
+		// Directly overwrite the local quantity with Zerodha's absolute truth
+		localPos.NetQuantity = pos.Quantity
 		if pos.Quantity > 0 {
-			incomingSide = "LONG"
+			localPos.Side = "LONG"
 		} else {
-			incomingSide = "SHORT"
+			localPos.Side = "SHORT"
 		}
 
-		// 🔥 SHIELD FIX: If the position flipped sides or was opened fresh after being flat,
-		// purge previous risk parameters so old targets don't bleed into the new trade lifecycle.
-		if localPos.Side != "" && localPos.Side != incomingSide {
-			localPos.TargetPrice = 0
-			localPos.StopLossPrice = 0
-			localPos.UnrealizedPnL = 0
-		}
-
-		// Directly overwrite parameters with Zerodha's absolute session metrics
-		localPos.NetQuantity = int(math.Abs(float64(pos.Quantity)))
-		localPos.Side = incomingSide
 		localPos.AveragePrice = pos.AveragePrice
+
+		// Heal Open Positions' Realized PnL too
 		localPos.RealizedPnL = pos.Realised
 
 		if lm.dbWriter != nil {
@@ -596,8 +588,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		}
 		lm.broadcastPositionUpdate(localPos)
 
-		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d at %.2f Side %s",
-			pos.Tradingsymbol, pos.Quantity, localPos.AveragePrice, localPos.Side)
+		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d at %.2f", pos.Tradingsymbol, pos.Quantity, localPos.AveragePrice)
 	}
 
 	// 3. Wipe out local ghost entries that do not exist in the broker's portfolio response at all
