@@ -583,9 +583,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			localPos.Side = "SHORT"
 		}
 
-		if localPos.AveragePrice == 0 {
-			localPos.AveragePrice = pos.AveragePrice
-		}
+		localPos.AveragePrice = pos.AveragePrice
 
 		// Heal Open Positions' Realized PnL too
 		localPos.RealizedPnL = pos.Realised
