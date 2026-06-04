@@ -183,7 +183,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub, profilesMap, dnaMap)
 
 	// 6. ALLOCATE HEADQUARTERS SAFELY INSIDE THE FACTORY BLOCK
-	hqEngine := pipeline.NewHeadquarters(a.pool, a.OrderManager, 300)
+	hqEngine := pipeline.NewHeadquarters(a.pool, a.OrderManager, dnaMap, 300)
 
 	barManager.SetHQEngine(hqEngine)
 

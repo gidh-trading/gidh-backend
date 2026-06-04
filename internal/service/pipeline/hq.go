@@ -23,10 +23,11 @@ type Headquarters struct {
 	positionCtx   order.PositionManager
 	stocks        map[uint32]*StockMemory
 	stocksMu      sync.RWMutex
+	dnaMap        map[uint32]*models.MarketDNA // Injected session context mapping
 	lookbackTicks int
 }
 
-func NewHeadquarters(pool *pgxpool.Pool, pm order.PositionManager, lookback int) *Headquarters {
+func NewHeadquarters(pool *pgxpool.Pool, pm order.PositionManager, dnaMap map[uint32]*models.MarketDNA, lookback int) *Headquarters {
 	if lookback <= 0 {
 		lookback = 300 // Tracks continuous tape dynamics across a baseline 300-tick window
 	}
@@ -34,6 +35,7 @@ func NewHeadquarters(pool *pgxpool.Pool, pm order.PositionManager, lookback int)
 		pool:          pool,
 		positionCtx:   pm,
 		stocks:        make(map[uint32]*StockMemory),
+		dnaMap:        dnaMap, // Cached natively on app startup sequences
 		lookbackTicks: lookback,
 	}
 }
@@ -57,6 +59,8 @@ func (h *Headquarters) IngestPipelineTick(ctx context.Context, tick *models.Enri
 		}
 		h.stocks[token] = mem
 	}
+	// Fetch matching DNA matrix block pointer safely
+	dnaProfile := h.dnaMap[token]
 	h.stocksMu.Unlock()
 
 	mem.mu.Lock()
@@ -64,17 +68,18 @@ func (h *Headquarters) IngestPipelineTick(ctx context.Context, tick *models.Enri
 
 	// Append raw tick to session-continuous rolling slice matrix buffer
 	mem.TickBuffer = append(mem.TickBuffer, tick.Raw)
-
 	bufferSize := len(mem.TickBuffer)
-	if bufferSize < h.lookbackTicks {
-		return
+
+	// Isolate lookback window slice bounds dynamically (removes the block when bufferSize < lookbackTicks)
+	var sample []models.TickData
+	if bufferSize <= h.lookbackTicks {
+		sample = mem.TickBuffer // Handle warming state seamlessly using all available elements
+	} else {
+		sample = mem.TickBuffer[bufferSize-h.lookbackTicks : bufferSize]
 	}
 
-	// Isolate lookback window slice bounds
-	sample := mem.TickBuffer[bufferSize-h.lookbackTicks : bufferSize]
-
 	// Delegate continuous mathematical processing to pure routine functions
-	telemetry := analytics.CalculateTapeTelemetry(sample)
+	telemetry := analytics.CalculateHybridTelemetry(sample, h.lookbackTicks, dnaProfile)
 
 	// Persist to internal structural state cache blocks
 	mem.State.FlowMetrics = telemetry
