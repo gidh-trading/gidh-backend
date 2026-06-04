@@ -141,6 +141,7 @@ func CleanupBacktestData(ctx context.Context, dateStr string) error {
 		{"live_ticks", "timestamp"},
 		{"live_order_depth", "timestamp"},
 		{"gidh_bars", "timestamp"},
+		{"gidh_hq_stock_states", "timestamp"},
 		{"gidh_volume_profiles", "trading_date"},
 		{"gidh_orders", "trading_date"},
 		{"gidh_positions", "trading_date"},

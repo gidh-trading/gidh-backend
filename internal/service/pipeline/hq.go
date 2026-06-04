@@ -5,8 +5,10 @@ import (
 	"context"
 	"sync"
 
+	"gidh-backend/internal/service/analytics"
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/order"
+
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
@@ -26,7 +28,7 @@ type Headquarters struct {
 
 func NewHeadquarters(pool *pgxpool.Pool, pm order.PositionManager, lookback int) *Headquarters {
 	if lookback <= 0 {
-		lookback = 300
+		lookback = 300 // Tracks continuous tape dynamics across a baseline 300-tick window
 	}
 	return &Headquarters{
 		pool:          pool,
@@ -46,6 +48,11 @@ func (h *Headquarters) IngestPipelineTick(ctx context.Context, tick *models.Enri
 			TickBuffer: make([]models.TickData, 0, 100000),
 			State: models.HqIntelligencePayload{
 				Direction: "NONE",
+				FlowMetrics: models.TapeTelemetryUnits{
+					BiasScore:  0.0,
+					VwpDelta:   0.0,
+					Efficiency: 0.0,
+				},
 			},
 		}
 		h.stocks[token] = mem
@@ -55,7 +62,7 @@ func (h *Headquarters) IngestPipelineTick(ctx context.Context, tick *models.Enri
 	mem.mu.Lock()
 	defer mem.mu.Unlock()
 
-	// Append raw tick to whole-day memory buffer
+	// Append raw tick to session-continuous rolling slice matrix buffer
 	mem.TickBuffer = append(mem.TickBuffer, tick.Raw)
 
 	bufferSize := len(mem.TickBuffer)
@@ -63,53 +70,26 @@ func (h *Headquarters) IngestPipelineTick(ctx context.Context, tick *models.Enri
 		return
 	}
 
-	// Compute un-spoofable committed metrics
+	// Isolate lookback window slice bounds
 	sample := mem.TickBuffer[bufferSize-h.lookbackTicks : bufferSize]
-	var cumulativeVwpDelta float64 = 0
-	var totalExecutedVolume int64 = 0
-	highestPrice := sample[0].LastPrice
-	lowestPrice := sample[0].LastPrice
 
-	for i := 1; i < len(sample); i++ {
-		prev := sample[i-1]
-		curr := sample[i]
+	// Delegate continuous mathematical processing to pure routine functions
+	telemetry := analytics.CalculateTapeTelemetry(sample)
 
-		priceDelta := curr.LastPrice - prev.LastPrice
-		tickVol := curr.CumulativeVolume - prev.CumulativeVolume
-		if tickVol < 0 {
-			tickVol = curr.LastTradedQuantity
-		}
+	// Persist to internal structural state cache blocks
+	mem.State.FlowMetrics = telemetry
 
-		cumulativeVwpDelta += float64(tickVol) * priceDelta
-		totalExecutedVolume += tickVol
-
-		if curr.LastPrice > highestPrice {
-			highestPrice = curr.LastPrice
-		}
-		if curr.LastPrice < lowestPrice {
-			lowestPrice = curr.LastPrice
-		}
-	}
-
-	// Save immediate metrics directly into the local state snapshot
-	mem.State.LiveMetrics.VwpDelta = cumulativeVwpDelta
-	if cumulativeVwpDelta > 0 {
+	// Quantize categorical descriptive boundaries for backward-compatible terminal pipelines
+	if telemetry.BiasScore >= 0.25 {
 		mem.State.Direction = "BULLISH"
-	} else if cumulativeVwpDelta < 0 {
+	} else if telemetry.BiasScore <= -0.25 {
 		mem.State.Direction = "BEARISH"
 	} else {
 		mem.State.Direction = "NONE"
 	}
-
-	priceSpan := highestPrice - lowestPrice
-	if totalExecutedVolume > 0 {
-		mem.State.LiveMetrics.Efficiency = priceSpan / float64(totalExecutedVolume)
-	} else {
-		mem.State.LiveMetrics.Efficiency = 0
-	}
 }
 
-// GetIntelligenceSnapshot is the high-speed interface for BarManager to read metrics safely
+// GetIntelligenceSnapshot is the high-speed concurrent interface for BarManager mapping
 func (h *Headquarters) GetIntelligenceSnapshot(token uint32) models.HqIntelligencePayload {
 	h.stocksMu.RLock()
 	mem, exists := h.stocks[token]
@@ -124,7 +104,7 @@ func (h *Headquarters) GetIntelligenceSnapshot(token uint32) models.HqIntelligen
 	return mem.State
 }
 
-// ReconstituteHQState handles crash recoveries safely on boot
+// ReconstituteHQState handles crash-recovery parameters safely on backend initialization
 func (h *Headquarters) ReconstituteHQState(ctx context.Context, token uint32, symbol string) {
 	if h.pool == nil {
 		return
@@ -133,28 +113,30 @@ func (h *Headquarters) ReconstituteHQState(ctx context.Context, token uint32, sy
 	defer h.stocksMu.Unlock()
 
 	var dir string
-	var vwp, eff float64
+	var bias, vwp, eff float64
 
-	// Read from the hypertable's latest snapshot json block data field
+	// Pull previous nested snapshot from the TimescaleDB hypertable block
 	query := `
 		SELECT 
 			COALESCE((hq_intelligence->>'direction'), 'NONE'),
-			COALESCE((hq_intelligence->'live_metrics'->>'vwp_delta')::DOUBLE PRECISION, 0.0),
-			COALESCE((hq_intelligence->'live_metrics'->>'efficiency')::DOUBLE PRECISION, 0.0)
+			COALESCE((hq_intelligence->'flow_metrics'->>'bias_score')::DOUBLE PRECISION, 0.0),
+			COALESCE((hq_intelligence->'flow_metrics'->>'vwp_delta')::DOUBLE PRECISION, 0.0),
+			COALESCE((hq_intelligence->'flow_metrics'->>'efficiency')::DOUBLE PRECISION, 0.0)
 		FROM gidh_bars
 		WHERE instrument_token = $1
 		ORDER BY timestamp DESC LIMIT 1;`
 
-	err := h.pool.QueryRow(ctx, query, token).Scan(&dir, &vwp, &eff)
+	err := h.pool.QueryRow(ctx, query, token).Scan(&dir, &bias, &vwp, &eff)
 	if err != nil {
-		return // Fresh startup baseline
+		return // Fresh startup baseline session state
 	}
 
 	h.stocks[token] = &StockMemory{
 		TickBuffer: make([]models.TickData, 0, 100000),
 		State: models.HqIntelligencePayload{
 			Direction: dir,
-			LiveMetrics: models.HqLiveMetricsUnits{
+			FlowMetrics: models.TapeTelemetryUnits{
+				BiasScore:  bias,
 				VwpDelta:   vwp,
 				Efficiency: eff,
 			},
