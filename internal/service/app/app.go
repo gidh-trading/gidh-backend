@@ -182,10 +182,20 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// 5. Initialize the decoupled Bar Manager
 	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub, profilesMap, dnaMap)
 
+	// 6. ALLOCATE HEADQUARTERS SAFELY INSIDE THE FACTORY BLOCK
+	hqEngine := pipeline.NewHeadquarters(a.pool, a.OrderManager, 300)
+
+	// Crash-proof recovery loop: Reconstitute active parameter profiles before ticks enter the system
+	if a.Config.Mode == "live" {
+		for _, inst := range a.instrumentList {
+			hqEngine.ReconstituteHQState(ctx, inst.Token, inst.Name)
+		}
+	}
+
 	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
 
 	// 6. Assemble the streamlined Execution Pipeline Stage
-	a.Pipeline = NewPipeline(vpStage, enrichmentStage, analyticsEngine, barManager, scoutStage, a.DBWriter)
+	a.Pipeline = NewPipeline(vpStage, enrichmentStage, analyticsEngine, barManager, hqEngine, scoutStage, a.DBWriter)
 	a.activePipe = a.Pipeline
 
 	return nil

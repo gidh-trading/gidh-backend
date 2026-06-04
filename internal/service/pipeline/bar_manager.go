@@ -19,6 +19,7 @@ type BarManager struct {
 	state15m map[uint32]*candleState
 	profiles map[uint32]*models.InstrumentProfile
 	dnaMap   map[uint32]*models.MarketDNA
+	hqEngine *Headquarters
 	mu       sync.RWMutex
 	writer   *writer.DBWriter
 	wsHub    *ws.Hub

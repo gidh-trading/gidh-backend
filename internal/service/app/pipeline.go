@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/pipeline"
 	"gidh-backend/internal/service/writer"
@@ -13,6 +14,7 @@ type Pipeline struct {
 	enrichment      *pipeline.EnrichmentStage
 	analytics       *pipeline.AnalyticsEngine
 	barManager      *pipeline.BarManager
+	hqEngine        *pipeline.Headquarters
 	scoutStage      *pipeline.ScoutStage
 	dbWriter        *writer.DBWriter
 	tickIndexMap    map[uint32]int
@@ -26,8 +28,8 @@ func NewPipeline(
 	enrichment *pipeline.EnrichmentStage,
 	analytics *pipeline.AnalyticsEngine,
 	barManager *pipeline.BarManager,
+	hqEngine *pipeline.Headquarters,
 	scoutStage *pipeline.ScoutStage,
-
 	dbWriter *writer.DBWriter,
 ) *Pipeline {
 	return &Pipeline{
@@ -35,6 +37,7 @@ func NewPipeline(
 		enrichment:      enrichment,
 		analytics:       analytics,
 		barManager:      barManager,
+		hqEngine:        hqEngine,
 		scoutStage:      scoutStage,
 		dbWriter:        dbWriter,
 		tickIndexMap:    make(map[uint32]int),
@@ -69,6 +72,10 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		if err := p.vpStage.Process(enrichedTick); err != nil {
 			logger.Errorf("Pipeline Error: Failed to process volume profile: %v", err)
 		}
+	}
+
+	if p.hqEngine != nil {
+		p.hqEngine.IngestPipelineTick(context.Background(), enrichedTick)
 	}
 
 	// 4. ANALYTICS STAGE

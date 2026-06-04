@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     PRIMARY KEY (timestamp, instrument_token, timeframe)
 );
 
+ALTER TABLE gidh_bars ADD COLUMN IF NOT EXISTS hq_intelligence JSONB DEFAULT '{}';
+
 -- Convert to a TimescaleDB hypertable for optimized time-series chunking
 SELECT create_hypertable('gidh_bars', 'timestamp', if_not_exists => TRUE);
 
