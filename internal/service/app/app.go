@@ -49,7 +49,9 @@ func NewApp(cfg *config.Config) (*App, error) {
 		nameToToken: make(map[string]uint32),
 	}
 
-	app.initKiteClient()
+	if cfg.Mode == "live" {
+		app.initKiteClient()
+	}
 
 	if err := app.initDatabase(ctx); err != nil {
 		return nil, err

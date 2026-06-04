@@ -13,15 +13,12 @@ import (
 	"gidh-backend/internal/service/stream"
 	"gidh-backend/internal/service/ws"
 	"gidh-backend/pkg/logger"
-	"math"
 	"net"
 	"net/http"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
-
-	kiteconnect "github.com/zerodha/gokiteconnect/v4"
 )
 
 // initWebServer sets up the WebSocket hub and HTTP routes.
@@ -60,7 +57,6 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/orders/cancel", a.handleOrderCancel)
 	mux.HandleFunc("/api/positions/metadata", a.handleUpdateExits)
 	mux.HandleFunc("/api/positions/exit", a.handlePositionExit)
-	mux.HandleFunc("/api/orders/vcn", a.handleVirtualContractNote)
 
 	mux.HandleFunc("/api/orders/", a.handleGetHistoricalOrders)
 	mux.HandleFunc("/api/positions/history/", a.handleGetHistoricalPositions)
@@ -630,181 +626,6 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 		"status": "success",
 		"data":   finalPositions,
 	})
-}
-
-// handleVirtualContractNote fetches active contract notes for live trades,
-// or calculates them locally when running in simulation states (paper / backtest).
-func (a *App) handleVirtualContractNote(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "Method not allowed. Use GET to fetch the contract note summary.", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// --- 1. HANDLE SIMULATION / BACKTEST / PAPER MODE FALLBACKS ---
-	// If the system is not connected to a live broker session, generate simulation accounting models.
-	if a.kiteClient == nil {
-		a.handleSimulationContractNote(w, r)
-		return
-	}
-
-	// --- 2. LIVE ROUTE EXECUTION (From previous implementation) ---
-	liveTrades, err := a.kiteClient.GetTrades()
-	if err != nil {
-		logger.Errorf("Failed to retrieve live day trades from Zerodha: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to fetch live trades: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	if len(liveTrades) == 0 {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"summary":{"brokerage":0,"stt":0,"stamp_duty":0,"exchange_turnover_charge":0,"sebi_turnover_charge":0,"gst":0,"total_charges":0},"trades":[]}`))
-		return
-	}
-
-	orderParamsList := make([]kiteconnect.OrderChargesParam, len(liveTrades))
-	for i, t := range liveTrades {
-		orderParamsList[i] = kiteconnect.OrderChargesParam{
-			OrderID:         t.OrderID,
-			Exchange:        t.Exchange,
-			Tradingsymbol:   t.TradingSymbol,
-			TransactionType: t.TransactionType,
-			Variety:         "regular",
-			Product:         t.Product,
-			OrderType:       "MARKET",
-			Quantity:        t.Quantity,
-			AveragePrice:    t.AveragePrice,
-		}
-	}
-
-	chargesParamContainer := kiteconnect.GetChargesParams{
-		OrderParams: orderParamsList,
-	}
-
-	chargesResponse, err := a.kiteClient.GetOrderCharges(chargesParamContainer)
-	if err != nil {
-		logger.Errorf("Zerodha Charges Engine pipeline execution crash: %v", err)
-		http.Error(w, fmt.Sprintf("Failed to fetch calculation parameters from broker: %v", err), http.StatusInternalServerError)
-		return
-	}
-
-	var response models.VirtualContractNoteResponse
-	response.Trades = make([]models.EnrichedMockTrade, len(liveTrades))
-
-	for i, chargeDetail := range chargesResponse {
-		response.Summary.Brokerage += chargeDetail.Charges.Brokerage
-		response.Summary.STT += chargeDetail.Charges.TransactionTax
-		response.Summary.StampDuty += chargeDetail.Charges.StampDuty
-		response.Summary.ExchangeTurnoverCharge += chargeDetail.Charges.ExchangeTurnoverCharge
-		response.Summary.SEBITurnoverCharge += chargeDetail.Charges.SEBITurnoverCharge
-		response.Summary.GST += chargeDetail.Charges.GST.Total
-		response.Summary.TotalCharges += chargeDetail.Charges.Total
-
-		response.Trades[i] = models.EnrichedMockTrade{
-			Timestamp:       liveTrades[i].FillTimestamp.Time,
-			Side:            orderParamsList[i].TransactionType,
-			Symbol:          orderParamsList[i].Tradingsymbol,
-			Exchange:        orderParamsList[i].Exchange,
-			Quantity:        int(orderParamsList[i].Quantity),
-			AveragePrice:    orderParamsList[i].AveragePrice,
-			AllocatedCharge: chargeDetail.Charges.Total,
-		}
-	}
-
-	a.writeRoundedJSONResponse(w, response)
-}
-
-// handleSimulationContractNote computes regulatory fees using local mathematics formulas
-// when a broker network interface session is unavailable (Paper / Backtest Environments)
-func (a *App) handleSimulationContractNote(w http.ResponseWriter, r *http.Request) {
-	// 1. Define dummy/mock trades mirroring the shape your UI requested
-	// In a real paper mode tracker, you would replace this array by querying your local db paper table ledger
-	simulatedTrades := []struct {
-		Timestamp time.Time
-		Side      string
-		Symbol    string
-		Exchange  string
-		Quantity  int
-		Price     float64
-	}{
-		{Timestamp: time.Now().Add(-10 * time.Minute).UTC(), Side: "BUY", Symbol: "THANGAMAYL", Exchange: "NSE", Quantity: 10, Price: 5387.44},
-		{Timestamp: time.Now().Add(-5 * time.Minute).UTC(), Side: "SELL", Symbol: "THANGAMAYL", Exchange: "NSE", Quantity: 10, Price: 5416.40},
-	}
-
-	var response models.VirtualContractNoteResponse
-	response.Trades = make([]models.EnrichedMockTrade, len(simulatedTrades))
-
-	// 2. Perform localized structural calculation loop based on Indian Market regulatory parameters (NSE Intraday MIS Rules)
-	for i, t := range simulatedTrades {
-		turnover := float64(t.Quantity) * t.Price
-
-		// Localized Mathematical Approximations of Exchange Friction
-		// Brokerage: 0.03% capped at ₹20 per executed order leg
-		brokerage := turnover * 0.0003
-		if brokerage > 20.0 {
-			brokerage = 20.0
-		}
-
-		// STT (Securities Transaction Tax): 0.025% on Sell Leg only for Intraday Equity
-		stt := 0.0
-		if t.Side == "SELL" {
-			stt = turnover * 0.00025
-		}
-
-		// Exchange Turnover Charge (NSE Equity Intraday): ~0.00322%
-		exchangeTurnover := turnover * 0.0000322
-
-		// SEBI Turnover Charge: 0.0001% (₹10 per Crore)
-		sebiTurnover := turnover * 0.0000001
-
-		// Stamp Duty: 0.003% on Buy Leg only for Intraday Equity
-		stampDuty := 0.0
-		if t.Side == "BUY" {
-			stampDuty = turnover * 0.00003
-		}
-
-		// GST: 18% applied directly over (Brokerage + Exchange Turnover + SEBI Turnover)
-		gst := (brokerage + exchangeTurnover + sebiTurnover) * 0.18
-
-		totalLegCharges := brokerage + stt + exchangeTurnover + sebiTurnover + stampDuty + gst
-
-		// Aggregate Totals
-		response.Summary.Brokerage += brokerage
-		response.Summary.STT += stt
-		response.Summary.StampDuty += stampDuty
-		response.Summary.ExchangeTurnoverCharge += exchangeTurnover
-		response.Summary.SEBITurnoverCharge += sebiTurnover
-		response.Summary.GST += gst
-		response.Summary.TotalCharges += totalLegCharges
-
-		// Format trade item output
-		response.Trades[i] = models.EnrichedMockTrade{
-			Timestamp:       t.Timestamp,
-			Side:            t.Side,
-			Symbol:          t.Symbol,
-			Exchange:        t.Exchange,
-			Quantity:        t.Quantity,
-			AveragePrice:    t.Price,
-			AllocatedCharge: totalLegCharges,
-		}
-	}
-
-	a.writeRoundedJSONResponse(w, response)
-}
-
-// Helper to handle rounding calculations and serialize the response
-func (a *App) writeRoundedJSONResponse(w http.ResponseWriter, response models.VirtualContractNoteResponse) {
-	response.Summary.Brokerage = math.Round(response.Summary.Brokerage*100) / 100
-	response.Summary.STT = math.Round(response.Summary.STT*100) / 100
-	response.Summary.StampDuty = math.Round(response.Summary.StampDuty*100) / 100
-	response.Summary.ExchangeTurnoverCharge = math.Round(response.Summary.ExchangeTurnoverCharge*100) / 100
-	response.Summary.SEBITurnoverCharge = math.Round(response.Summary.SEBITurnoverCharge*100) / 100
-	response.Summary.GST = math.Round(response.Summary.GST*100) / 100
-	response.Summary.TotalCharges = math.Round(response.Summary.TotalCharges*100) / 100
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(response)
 }
 
 type StartBacktestRequest struct {
