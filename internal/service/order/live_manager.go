@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -450,14 +451,14 @@ func (lm *LiveOrderManager) mapKiteOrderToLocal(o kiteconnect.Order) models.Orde
 
 	// Accurate Price Tracking Strategy
 	var displayPrice float64
-	if rawStatus == "COMPLETE" {
+	if rawStatus == "COMPLETE" || o.FilledQuantity > 0 {
 		if o.AveragePrice > 0 {
 			displayPrice = o.AveragePrice
 		} else {
 			displayPrice = o.Price
 		}
 	} else {
-		// If working/pending, track the live requested limit target
+		// If working/pending with no fills yet, track the live requested limit target
 		displayPrice = o.Price
 	}
 
@@ -578,7 +579,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			localPos.Side = "SHORT"
 		}
 
-		localPos.AveragePrice = pos.AveragePrice
+		localPos.AveragePrice = lm.calculateTrueAveragePrice(symbolKey, pos.Quantity)
 
 		// Heal Open Positions' Realized PnL too
 		localPos.RealizedPnL = pos.Realised
@@ -739,4 +740,52 @@ func GetTickSizeForSymbol(symbol string, targetPrice float64) float64 {
 	} else {
 		return 5.00
 	}
+}
+
+// calculateTrueAveragePrice reconstructs the true FIFO entry average of the CURRENT active position.
+// It ignores closed intraday cycles that pollute the broker's daily blended average.
+// Assumes lm.mu is already locked by the caller.
+func (lm *LiveOrderManager) calculateTrueAveragePrice(symbol string, netQuantity int) float64 {
+	if netQuantity == 0 {
+		return 0
+	}
+
+	targetSide := "BUY"
+	if netQuantity < 0 {
+		targetSide = "SELL"
+	}
+
+	absNet := int(math.Abs(float64(netQuantity)))
+	gatheredQty := 0
+	totalValue := 0.0
+
+	var fills []models.OrderBookEntry
+	for _, o := range lm.orderBook {
+		if o.Symbol == symbol && o.Side == targetSide && o.FilledQty > 0 {
+			fills = append(fills, o)
+		}
+	}
+
+	// Sort descending by timestamp (newest fills first)
+	sort.Slice(fills, func(i, j int) bool {
+		return fills[i].Timestamp.After(fills[j].Timestamp)
+	})
+
+	for _, fill := range fills {
+		needed := absNet - gatheredQty
+		if needed <= 0 {
+			break
+		}
+		take := fill.FilledQty
+		if take > needed {
+			take = needed
+		}
+		totalValue += float64(take) * fill.Price
+		gatheredQty += take
+	}
+
+	if gatheredQty == 0 {
+		return 0
+	}
+	return totalValue / float64(gatheredQty)
 }
