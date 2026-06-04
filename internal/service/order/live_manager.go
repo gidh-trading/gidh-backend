@@ -314,8 +314,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		o.OrderID, rawStatus, mappedStatus, int(o.FilledQuantity), int(o.Quantity))
 
 	var existingEntry *models.OrderBookEntry
-	var previousFilledQty int
-
 	for i := range lm.orderBook {
 		if lm.orderBook[i].OrderID == o.OrderID {
 			existingEntry = &lm.orderBook[i]
@@ -334,7 +332,7 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		displayPrice = o.Price
 	}
 
-	// --- Visual Fix: Ensure pending Market Orders show the live price instead of $0 in the UI grid
+	// Visual Fix: Ensure pending Market Orders show the live price instead of $0 in the UI grid
 	if displayPrice <= 0 {
 		if ltp, hasLtp := lm.lastPrices[strings.ToUpper(o.TradingSymbol)]; hasLtp && ltp > 0 {
 			displayPrice = ltp
@@ -371,7 +369,6 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 		lm.orderBook = append(lm.orderBook, newEntry)
 		existingEntry = &lm.orderBook[len(lm.orderBook)-1]
 	} else {
-		previousFilledQty = existingEntry.FilledQty
 		existingEntry.FilledQty = int(o.FilledQuantity)
 		existingEntry.Qty = int(o.Quantity)
 		existingEntry.OrderType = strings.ToUpper(o.OrderType)
@@ -384,130 +381,24 @@ func (lm *LiveOrderManager) HandleOrderUpdate(o kiteconnect.Order) {
 	}
 	lm.broadcastOrderUpdate(*existingEntry)
 
+	// --- FIX: LEVERAGE ZERODHA'S CALCULATION PIPELINE ON EXECUTIONS ---
+	// Whenever an order registers a partial or complete fill, we dispatch a background
+	// synchronization request. This pulls the absolute reality (especially finalized Realized PnL
+	// when a position drops back down to 0) directly from Zerodha's clearing server.
 	if o.FilledQuantity > 0 {
-		symbolKey := strings.ToUpper(o.TradingSymbol)
-		productKey := strings.ToUpper(o.Product)
-		key := fmt.Sprintf("%s:%s", symbolKey, productKey)
+		go func(symbol string) {
+			// Give the API call a healthy network threshold window to execute safely
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
 
-		pos, exists := lm.activePositions[key]
-		if !exists {
-			pos = &models.Position{
-				Symbol:       symbolKey,
-				Product:      productKey,
-				NetQuantity:  0,
-				AveragePrice: 0,
+			logger.Infof("[PnL Sync Engine] Trade execution detected for %s. Synchronizing verified position state...", symbol)
+
+			// This invokes the "Ultimate Healer" block in SyncExchangeState, updating your maps,
+			// writing flawless metrics to your trade database, and pumping clean JSON to your UI stream.
+			if err := lm.SyncExchangeState(ctx); err != nil {
+				logger.Errorf("[PnL Sync Engine] Mid-session recovery sync aborted: %v", err)
 			}
-			lm.activePositions[key] = pos
-		}
-
-		fillDelta := int(o.FilledQuantity) - previousFilledQty
-		if fillDelta > 0 {
-			sideUpper := strings.ToUpper(o.TransactionType)
-
-			var tradeChange int
-			if sideUpper == "BUY" {
-				tradeChange = fillDelta
-			} else {
-				tradeChange = -fillDelta
-			}
-
-			var currentSignedQty int
-			if pos.Side == "SHORT" {
-				currentSignedQty = -pos.NetQuantity
-			} else {
-				currentSignedQty = pos.NetQuantity
-			}
-
-			// --- CRITICAL MATH SAFETY FIX ---
-			executionFillPrice := o.AveragePrice
-			if executionFillPrice <= 0 {
-				executionFillPrice = o.Price
-			}
-
-			// Protect against incomplete Market Order WebSocket frames
-			if executionFillPrice <= 0 {
-				if ltp, hasLtp := lm.lastPrices[symbolKey]; hasLtp && ltp > 0 {
-					executionFillPrice = ltp
-				} else if pos.AveragePrice > 0 {
-					// Absolute worst-case fallback: simulate breakeven so math doesn't crash to -6 Lakhs
-					executionFillPrice = pos.AveragePrice
-				}
-			}
-
-			isBuy := sideUpper == "BUY"
-			isReducing := (isBuy && currentSignedQty < 0) || (!isBuy && currentSignedQty > 0)
-
-			if isReducing {
-				closedQty := fillDelta
-				if fillDelta > int(math.Abs(float64(currentSignedQty))) {
-					closedQty = int(math.Abs(float64(currentSignedQty)))
-				}
-
-				var tradePnL float64
-				if pos.Side == "LONG" {
-					tradePnL = (executionFillPrice - pos.AveragePrice) * float64(closedQty)
-				} else if pos.Side == "SHORT" {
-					tradePnL = (pos.AveragePrice - executionFillPrice) * float64(closedQty)
-				}
-
-				// Calculate and round Realized PnL to 2 decimal places
-				pos.RealizedPnL += tradePnL
-				pos.RealizedPnL = math.Round(pos.RealizedPnL*100) / 100
-			}
-
-			netSignedQty := currentSignedQty + tradeChange
-
-			if netSignedQty > 0 {
-				pos.Side = "LONG"
-				pos.NetQuantity = netSignedQty
-
-				if currentSignedQty >= 0 {
-					totalCost := (float64(currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * executionFillPrice)
-					pos.AveragePrice = totalCost / float64(netSignedQty)
-				} else {
-					pos.AveragePrice = executionFillPrice
-				}
-				pos.AveragePrice = math.Round(pos.AveragePrice*100) / 100
-			} else if netSignedQty < 0 {
-				pos.Side = "SHORT"
-				pos.NetQuantity = -netSignedQty
-
-				if currentSignedQty <= 0 {
-					totalCost := (float64(-currentSignedQty) * pos.AveragePrice) + (float64(fillDelta) * executionFillPrice)
-					pos.AveragePrice = totalCost / float64(-netSignedQty)
-				} else {
-					pos.AveragePrice = executionFillPrice
-				}
-			} else {
-				pos.Side = ""
-				pos.NetQuantity = 0
-				pos.AveragePrice = 0
-				pos.TargetPrice = 0
-				pos.StopLossPrice = 0
-				pos.UnrealizedPnL = 0
-			}
-
-			if ltp, hasLtp := lm.lastPrices[symbolKey]; hasLtp && pos.NetQuantity != 0 {
-				if pos.Side == "LONG" {
-					pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
-				} else if pos.Side == "SHORT" {
-					pos.UnrealizedPnL = (pos.AveragePrice - ltp) * float64(pos.NetQuantity)
-				}
-			}
-		}
-
-		if pos.NetQuantity == 0 {
-			pos.Side = ""
-			pos.AveragePrice = 0
-			pos.UnrealizedPnL = 0
-			pos.TargetPrice = 0
-			pos.StopLossPrice = 0
-		}
-
-		if lm.dbWriter != nil {
-			lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
-		}
-		lm.broadcastPositionUpdate(pos)
+		}(o.TradingSymbol)
 	}
 }
 
@@ -539,84 +430,6 @@ func (lm *LiveOrderManager) UpdatePositionMetadata(symbol string, product string
 	lm.broadcastPositionUpdate(pos)
 
 	return nil
-}
-
-// updatePositionStateFromFill blends executed fills into a singular stock-level exposure container
-func (lm *LiveOrderManager) updatePositionStateFromFill(symbol, product, transactionType string, qtyDelta int, averagePrice float64) {
-	symbolKey := strings.ToUpper(symbol)
-	key := fmt.Sprintf("%s:%s", symbolKey, strings.ToUpper(product))
-	pos, exists := lm.activePositions[key]
-
-	if !exists {
-		pos = &models.Position{
-			Symbol:  symbolKey,
-			Product: strings.ToUpper(product),
-		}
-		lm.activePositions[key] = pos
-	}
-
-	isBuy := transactionType == kiteconnect.TransactionTypeBuy
-	isIncreasing := (isBuy && pos.NetQuantity >= 0) || (!isBuy && pos.NetQuantity <= 0)
-
-	if isIncreasing {
-		currentAbsQty := math.Abs(float64(pos.NetQuantity))
-		totalCost := (pos.AveragePrice * currentAbsQty) + (averagePrice * float64(qtyDelta))
-
-		if isBuy {
-			pos.NetQuantity += qtyDelta
-		} else {
-			pos.NetQuantity -= qtyDelta
-		}
-		pos.AveragePrice = totalCost / math.Abs(float64(pos.NetQuantity))
-	} else {
-		closedQty := qtyDelta
-		if qtyDelta > int(math.Abs(float64(pos.NetQuantity))) {
-			closedQty = int(math.Abs(float64(pos.NetQuantity)))
-		}
-
-		var tradePnL float64
-		if pos.Side == "LONG" {
-			tradePnL = (averagePrice - pos.AveragePrice) * float64(closedQty)
-		} else {
-			tradePnL = (pos.AveragePrice - averagePrice) * float64(closedQty)
-		}
-
-		pos.RealizedPnL += tradePnL
-		pos.RealizedPnL = math.Round(pos.RealizedPnL*100) / 100
-
-		if isBuy {
-			pos.NetQuantity += qtyDelta
-		} else {
-			pos.NetQuantity -= qtyDelta
-		}
-
-		// Reversal clear checking step
-		if (isBuy && pos.NetQuantity > 0) || (!isBuy && pos.NetQuantity < 0) {
-			pos.AveragePrice = averagePrice
-			pos.TargetPrice = 0
-			pos.StopLossPrice = 0
-		} else if pos.NetQuantity == 0 {
-			pos.AveragePrice = 0
-			pos.UnrealizedPnL = 0
-			pos.TargetPrice = 0
-			pos.StopLossPrice = 0
-		}
-	}
-
-	if pos.NetQuantity > 0 {
-		pos.Side = "LONG"
-	} else if pos.NetQuantity < 0 {
-		pos.Side = "SHORT"
-	} else {
-		pos.Side = ""
-		pos.TargetPrice = 0
-		pos.StopLossPrice = 0
-	}
-
-	if lm.dbWriter != nil {
-		lm.dbWriter.PersistPositionSnapshot(pos, time.Now())
-	}
-	lm.broadcastPositionUpdate(pos)
 }
 
 // ============================================================================
