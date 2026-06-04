@@ -78,6 +78,12 @@ func (bm *BarManager) processTickForCandle(
 		cs.bar.TickRank = tick.Enrichment.TickRank
 	}
 
+	if bm.hqEngine != nil {
+		cs.bar.HqIntelligence = bm.hqEngine.GetIntelligenceSnapshot(uint32(cs.bar.InstrumentToken))
+	} else {
+		cs.bar.HqIntelligence = models.HqIntelligencePayload{Direction: "NONE"}
+	}
+
 	// 4. 🔥 ALIGNED LIVE VOLATILITY & BODY SEPARATION
 	if dna, ok := bm.dnaMap[uint32(cs.bar.InstrumentToken)]; ok && dna != nil {
 		if baseline, hasTimeframeBaseline := dna.IntervalPercentiles[timeframe]; hasTimeframeBaseline {

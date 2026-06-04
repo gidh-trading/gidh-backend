@@ -380,6 +380,7 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 			"open", "high", "low", "close", "volume", "tick_count",
 			"vwap", "poc", "vah", "val", "total_buy_qty", "total_sell_qty", "change_pct",
 			"volume_rank", "tick_rank", "price_rank", "range_rank",
+			"hq_intelligence", // 🥥 Added to support nested institutional metrics serialization
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
@@ -390,6 +391,7 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 				b.Open, b.High, b.Low, b.Close, b.Volume, b.TickCount,
 				b.VWAP, b.POC, b.VAH, b.VAL, b.TotalBuyQty, b.TotalSellQty, b.ChangePct,
 				b.VolumeRank, b.TickRank, b.PriceRank, b.RangeRank,
+				b.HqIntelligence, // 🥥 Ingest extracted pull-model state snapshots on batch flushing
 			}, nil
 		}),
 	)

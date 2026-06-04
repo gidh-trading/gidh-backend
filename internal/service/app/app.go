@@ -185,6 +185,8 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// 6. ALLOCATE HEADQUARTERS SAFELY INSIDE THE FACTORY BLOCK
 	hqEngine := pipeline.NewHeadquarters(a.pool, a.OrderManager, 300)
 
+	barManager.SetHQEngine(hqEngine)
+
 	// Crash-proof recovery loop: Reconstitute active parameter profiles before ticks enter the system
 	if a.Config.Mode == "live" {
 		for _, inst := range a.instrumentList {

@@ -126,6 +126,12 @@ func (bm *BarManager) updateTimeframe(
 	bm.processTickForCandle(cs, tick, vol, timeframe)
 }
 
+func (bm *BarManager) SetHQEngine(hq *Headquarters) {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+	bm.hqEngine = hq
+}
+
 func (bm *BarManager) ClearState() {
 	bm.mu.Lock()
 	defer bm.mu.Unlock()
