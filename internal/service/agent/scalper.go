@@ -5,203 +5,266 @@ import (
 	"sync"
 )
 
+// PositionRisk handles the live tracking state, protection boundaries, and milestone scaling
+type PositionRisk struct {
+	IsActive       bool
+	Side           string // "LONG" or "SHORT"
+	EntryPrice     float64
+	TargetP75      float64
+	TargetP90      float64
+	CurrentSL      float64
+	P75SliceTaken  bool
+	ActiveInterval string // Monitored interval, e.g., "1m"
+}
+
 type ScalperAgent struct {
 	mu              sync.RWMutex
-	enrichedBuffers map[string][]*models.EnrichedTick
-	macroHorizons   map[string]map[string]*models.Bar
-	// Memory tracking to prevent rapid-fire execution on the same candle
-	lastTradedBarTime map[string]int64
+	pricePotentials models.TargetMatrix                // Injected map: stock_name -> timeframe -> PricePotential
+	activePositions map[string]*PositionRisk           // Map of live positions tracking risk boundaries per stock name
+	stateWindows    map[string][]models.DirectionState // Memory tracking of consecutive sliding states
+	windowSize      int                                // Length of state lookback buffer (e.g., 5 rolling updates)
 }
 
-func NewScalperAgent() *ScalperAgent {
+// NewScalperAgent instantiates the atomic execution machine with its statistical metrics mapped fully on creation
+func NewScalperAgent(stateWindowSize int, staticMatrix models.TargetMatrix) *ScalperAgent {
 	return &ScalperAgent{
-		enrichedBuffers:   make(map[string][]*models.EnrichedTick),
-		macroHorizons:     make(map[string]map[string]*models.Bar),
-		lastTradedBarTime: make(map[string]int64),
+		pricePotentials: staticMatrix,
+		activePositions: make(map[string]*PositionRisk),
+		stateWindows:    make(map[string][]models.DirectionState),
+		windowSize:      stateWindowSize,
 	}
 }
 
-func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
+// ========================================================================
+// 🏛️ PIPELINE STREAM ENTRY INTERCEPTOR
+// ========================================================================
+
+// AnalyzeMarket evaluates the continuous tick feed against institutional indicators and trailing risk states
+func (sa *ScalperAgent) AnalyzeMarket(tick *models.EnrichedTick) (string, bool) {
 	sa.mu.Lock()
-	defer sa.mu.Unlock()
+	symbol := tick.Raw.StockName
+	direction := tick.Enrichment.Direction
 
-	if sa.macroHorizons[bar.StockName] == nil {
-		sa.macroHorizons[bar.StockName] = make(map[string]*models.Bar)
+	// 1. Ingest the current live state into the moving lookback window buffer
+	sa.stateWindows[symbol] = append(sa.stateWindows[symbol], direction)
+	if len(sa.stateWindows[symbol]) > sa.windowSize {
+		sa.stateWindows[symbol] = sa.stateWindows[symbol][1:]
 	}
-	sa.macroHorizons[bar.StockName][bar.Timeframe] = bar
+
+	// 2. Safely initialize target position structure maps if unallocated
+	if sa.activePositions[symbol] == nil {
+		sa.activePositions[symbol] = &PositionRisk{IsActive: false}
+	}
+	pos := sa.activePositions[symbol]
+	sa.mu.Unlock()
+
+	// 3. Routing Layer: If currently holding risk, run defensive exit scans; else, hunt entries
+	if pos.IsActive {
+		return sa.evaluateStateBasedExits(tick, pos)
+	}
+
+	return sa.evaluateInstitutionalEntries(tick, pos)
 }
 
 // ========================================================================
-// 🏛️ MAIN ORCHESTRATOR
+// 🛠️ INSTANT ENTRY ENGINE (TICK SPEED)
 // ========================================================================
 
-func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positionSide string) (string, bool) {
-	symbol := enrichedTick.Raw.StockName
+func (sa *ScalperAgent) evaluateInstitutionalEntries(tick *models.EnrichedTick, pos *PositionRisk) (string, bool) {
+	// Look for extreme volume urgency matching sharp rolling price velocity
+	isInstitutionalVolume := tick.Enrichment.VolumeRank >= 6
+	isImpactingPrice := tick.Enrichment.PriceRank >= 6
 
-	// 1. Housekeeping: Update sliding window tick memory buffer
-	sa.updateTickBuffer(symbol, enrichedTick)
-
-	// 2. Context Retrieval: Fetch required closed bars and execution memory
-	bar1m, bar5m, lastTradedTime, ok := sa.getMarketContext(symbol)
-	if !ok {
+	if !isInstitutionalVolume || !isImpactingPrice {
 		return "", false
 	}
 
-	// 3. Evaluate Position Exits
-	if positionSide != "FLAT" && positionSide != "" {
-		return sa.evaluateExitLogic(positionSide, bar1m)
-	}
+	symbol := tick.Raw.StockName
+	direction := tick.Enrichment.Direction
 
-	// 4. Evaluate Position Entries (The Modular Pipeline)
-	return sa.evaluateEntryPipeline(enrichedTick, bar1m, bar5m, lastTradedTime)
-}
-
-// ========================================================================
-// 🛠️ SUB-MODULES & PIPELINE STAGES
-// ========================================================================
-
-// evaluateEntryPipeline runs structural setup and filter confirmation layers serially
-func (sa *ScalperAgent) evaluateEntryPipeline(tick *models.EnrichedTick, bar1m *models.Bar, bar5m *models.Bar, lastTradedTime int64) (string, bool) {
-	// Rule 1: Memory Guard (Debounce)
-	if bar1m.Timestamp.UnixMilli() == lastTradedTime {
-		return "", false
-	}
-
-	// Rule 2: Core Timeframe Setup Evaluation
-	intent := sa.evaluateCoreSetup(bar1m)
-	if intent == "" {
-		return "", false
-	}
-
-	// Rule 3: Multi-Timeframe Trend Alignment Check
-	if !sa.isTrendAligned(intent, bar5m) {
-		return "", false
-	}
-
-	// Rule 4: Live Order Flow Confirmation Check
-	if !sa.isLiveOrderFlowConfirmed(intent, tick) {
-		return "", false
-	}
-
-	// Rule 5: Final Price Trigger Verification & Commitment Stamping
-	return sa.executePriceTrigger(intent, bar1m, tick.Raw.LastPrice)
-}
-
-// getMarketContext cleanly extracts data and memory fields under a Read Lock
-func (sa *ScalperAgent) getMarketContext(symbol string) (*models.Bar, *models.Bar, int64, bool) {
+	// Verify our static target memory matrix contains valid profiles before setting trades
 	sa.mu.RLock()
-	defer sa.mu.RUnlock()
-
-	macroMap, exists := sa.macroHorizons[symbol]
-	if !exists || macroMap == nil {
-		return nil, nil, 0, false
+	stockMatrix, hasStock := sa.pricePotentials[symbol]
+	sa.mu.RUnlock()
+	if !hasStock {
+		return "", false
 	}
 
-	bar1m, ok1 := macroMap["1m"]
-	bar5m, _ := macroMap["5m"] // Optional: Can be nil if 5m hasn't formed yet
-
-	if !ok1 || bar1m == nil {
-		return nil, nil, 0, false
+	// Use "1m" as our initial protective validation anchor row
+	stats, hasInterval := stockMatrix["1m"]
+	if !hasInterval {
+		return "", false
 	}
 
-	return bar1m, bar5m, sa.lastTradedBarTime[symbol], true
-}
+	// TRIGGER LONG EXECUTION
+	if direction == models.DirStrongBullish || direction == models.DirBullish {
+		pos.IsActive = true
+		pos.Side = "LONG"
+		pos.EntryPrice = tick.Raw.LastPrice
+		pos.TargetP75 = stats.P75
+		pos.TargetP90 = stats.P90
+		// Defensive Initial Stop Loss: Set tightly to the entry minus a small slice of 1m volatility
+		pos.CurrentSL = tick.Raw.LastPrice - (stats.P75 * 0.25)
+		pos.P75SliceTaken = false
+		pos.ActiveInterval = "1m"
 
-// evaluateExitLogic isolates the technical exit checks based on the 1m bar
-func (sa *ScalperAgent) evaluateExitLogic(positionSide string, bar1m *models.Bar) (string, bool) {
-	if positionSide == "LONG" {
-		if bar1m.Analytics.Direction == models.DirBearishAbsorption ||
-			bar1m.Analytics.Direction == models.DirStrongBearish ||
-			bar1m.Analytics.Direction == models.DirBearish {
-			return "EXIT_LONG", true
-		}
-	} else if positionSide == "SHORT" {
-		if bar1m.Analytics.Direction == models.DirBullishAbsorption ||
-			bar1m.Analytics.Direction == models.DirStrongBullish ||
-			bar1m.Analytics.Direction == models.DirBullish {
-			return "EXIT_SHORT", true
-		}
-	}
-	return "", false
-}
-
-// evaluateCoreSetup analyzes volatility context and returns trading intent
-func (sa *ScalperAgent) evaluateCoreSetup(bar1m *models.Bar) string {
-	isHighVolumeAbnormal := bar1m.Analytics.VolumeRank >= 7
-	isPriceStretching := bar1m.Analytics.PriceRank >= 6
-
-	if !isHighVolumeAbnormal || !isPriceStretching {
-		return ""
-	}
-
-	if bar1m.Analytics.Direction == models.DirStrongBullish || bar1m.Analytics.Direction == models.DirBullish {
-		return "INTENT_LONG"
-	}
-	if bar1m.Analytics.Direction == models.DirStrongBearish || bar1m.Analytics.Direction == models.DirBearish {
-		return "INTENT_SHORT"
-	}
-
-	return ""
-}
-
-// isTrendAligned filters signals that attempt to fight higher timeframe momentum
-func (sa *ScalperAgent) isTrendAligned(intent string, bar5m *models.Bar) bool {
-	if bar5m == nil {
-		return true // Pass through if higher timeframe data isn't ready
-	}
-
-	if intent == "INTENT_LONG" {
-		if bar5m.Analytics.Direction == models.DirStrongBearish || bar5m.Analytics.Direction == models.DirBearish {
-			return false // Veto long if 5m is crashing
-		}
-	}
-	if intent == "INTENT_SHORT" {
-		if bar5m.Analytics.Direction == models.DirStrongBullish || bar5m.Analytics.Direction == models.DirBullish {
-			return false // Veto short if 5m is ripping
-		}
-	}
-	return true
-}
-
-// isLiveOrderFlowConfirmed watches live tick streams for absorption or fading risks
-func (sa *ScalperAgent) isLiveOrderFlowConfirmed(intent string, enrichedTick *models.EnrichedTick) bool {
-	// Since Enrichment is a value type, check if its structural direction is uninitialized
-	if enrichedTick.Enrichment.Direction == "" {
-		return true // Fallback: pass if enrichment telemetry data is empty
-	}
-
-	liveDirection := enrichedTick.Enrichment.Direction
-
-	if intent == "INTENT_LONG" {
-		if liveDirection == models.DirBearishAbsorption || liveDirection == models.DirStrongBearish {
-			return false // Veto if aggressive limit sellers are actively blocking ticks
-		}
-	}
-	if intent == "INTENT_SHORT" {
-		if liveDirection == models.DirBullishAbsorption || liveDirection == models.DirStrongBullish {
-			return false // Veto if aggressive limit buyers are propping up the floor
-		}
-	}
-	return true
-}
-
-// executePriceTrigger ensures confirmation and logs the traded timestamp to memory state
-func (sa *ScalperAgent) executePriceTrigger(intent string, bar1m *models.Bar, lastPrice float64) (string, bool) {
-	symbol := bar1m.StockName
-
-	if intent == "INTENT_LONG" && lastPrice >= bar1m.Close {
-		sa.mu.Lock()
-		sa.lastTradedBarTime[symbol] = bar1m.Timestamp.UnixMilli()
-		sa.mu.Unlock()
 		return "GO_LONG", true
 	}
 
-	if intent == "INTENT_SHORT" && lastPrice <= bar1m.Close {
-		sa.mu.Lock()
-		sa.lastTradedBarTime[symbol] = bar1m.Timestamp.UnixMilli()
-		sa.mu.Unlock()
+	// TRIGGER SHORT EXECUTION
+	if direction == models.DirStrongBearish || direction == models.DirBearish {
+		pos.IsActive = true
+		pos.Side = "SHORT"
+		pos.EntryPrice = tick.Raw.LastPrice
+		pos.TargetP75 = stats.P75
+		pos.TargetP90 = stats.P90
+		pos.CurrentSL = tick.Raw.LastPrice + (stats.P75 * 0.25)
+		pos.P75SliceTaken = false
+		pos.ActiveInterval = "1m"
+
 		return "GO_SHORT", true
 	}
 
 	return "", false
+}
+
+// ========================================================================
+// 🛡️ RISK MONITOR & PULLBACK FILTER
+// ========================================================================
+
+func (sa *ScalperAgent) evaluateStateBasedExits(tick *models.EnrichedTick, pos *PositionRisk) (string, bool) {
+	currentPrice := tick.Raw.LastPrice
+	symbol := tick.Raw.StockName
+
+	// ========================================================================
+	// 🟢 LONG DEFENSIVE EXECUTION
+	// ========================================================================
+	if pos.Side == "LONG" {
+		// Rule A: Immediate Safety SL Triggered (Hard stop or trailing target protection floor)
+		if currentPrice <= pos.CurrentSL {
+			pos.IsActive = false
+			return "LIQUIDATE_ALL_LONG", true
+		}
+
+		// Rule B: Milestone 1 (p75 Met) -> Bank 50% Profit immediately and drag SL to Breakeven
+		if currentPrice >= (pos.EntryPrice+pos.TargetP75) && !pos.P75SliceTaken {
+			pos.P75SliceTaken = true
+			pos.CurrentSL = pos.EntryPrice // Risk eliminated entirely
+			return "SLICE_50_PERCENT_LONG", true
+		}
+
+		// Rule C: Milestone 2 (p90 Met) -> Move trailing SL up to secure Milestone 1 profit level
+		p75PriceLevel := pos.EntryPrice + pos.TargetP75
+		if currentPrice >= (pos.EntryPrice+pos.TargetP90) && pos.CurrentSL < p75PriceLevel {
+			pos.CurrentSL = p75PriceLevel
+		}
+
+		// Rule D: High-Volume Reversal Override (Immediate Institutional Counter-Attack)
+		if tick.Enrichment.Direction == models.DirStrongBearish && tick.Enrichment.VolumeRank >= 6 {
+			pos.IsActive = false
+			return "LIQUIDATE_ALL_LONG", true
+		}
+
+		// Rule E: Continuous State Window Decay (Filters out isolated bar noise)
+		sa.mu.RLock()
+		window := sa.stateWindows[symbol]
+		sa.mu.RUnlock()
+
+		bullishEnergyCount := 0
+		for _, state := range window {
+			if state == models.DirStrongBullish || state == models.DirBullish || state == models.DirBullishAbsorption {
+				bullishEnergyCount++
+			}
+		}
+		// If less than 20% of our recent rolling history contains bullish activity, the momentum has died
+		if len(window) == sa.windowSize && float64(bullishEnergyCount)/float64(sa.windowSize) < 0.20 {
+			pos.IsActive = false
+			return "LIQUIDATE_ALL_LONG", true
+		}
+	}
+
+	// ========================================================================
+	// 🔴 SHORT DEFENSIVE EXECUTION
+	// ========================================================================
+	if pos.Side == "SHORT" {
+		// Rule A: Immediate Safety SL Triggered
+		if currentPrice >= pos.CurrentSL {
+			pos.IsActive = false
+			return "LIQUIDATE_ALL_SHORT", true
+		}
+
+		// Rule B: Milestone 1 (p75 Met) -> Bank 50% Profit and drag SL to Breakeven
+		if currentPrice <= (pos.EntryPrice-pos.TargetP75) && !pos.P75SliceTaken {
+			pos.P75SliceTaken = true
+			pos.CurrentSL = pos.EntryPrice
+			return "SLICE_50_PERCENT_SHORT", true
+		}
+
+		// Rule C: Milestone 2 (p90 Met) -> Move trailing SL down to secure Milestone 1 short level
+		p75PriceLevel := pos.EntryPrice - pos.TargetP75
+		if currentPrice <= (pos.EntryPrice-pos.TargetP90) && pos.CurrentSL > p75PriceLevel {
+			pos.CurrentSL = p75PriceLevel
+		}
+
+		// Rule D: High-Volume Reversal Override
+		if tick.Enrichment.Direction == models.DirStrongBullish && tick.Enrichment.VolumeRank >= 6 {
+			pos.IsActive = false
+			return "LIQUIDATE_ALL_SHORT", true
+		}
+
+		// Rule E: Continuous State Window Decay
+		sa.mu.RLock()
+		window := sa.stateWindows[symbol]
+		sa.mu.RUnlock()
+
+		bearishEnergyCount := 0
+		for _, state := range window {
+			if state == models.DirStrongBearish || state == models.DirBearish || state == models.DirBearishAbsorption {
+				bearishEnergyCount++
+			}
+		}
+		if len(window) == sa.windowSize && float64(bearishEnergyCount)/float64(sa.windowSize) < 0.20 {
+			pos.IsActive = false
+			return "LIQUIDATE_ALL_SHORT", true
+		}
+	}
+
+	return "", false
+}
+
+// UpgradeActiveTargets transitions an open position's targets to wider timeframes (Expansion Unlock)
+func (sa *ScalperAgent) UpgradeActiveTargets(stock string, targetTimeframe string) bool {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+
+	pos, hasPos := sa.activePositions[stock]
+	if !hasPos || !pos.IsActive {
+		return false
+	}
+
+	stockMatrix, hasStock := sa.pricePotentials[stock]
+	if !hasStock {
+		return false
+	}
+
+	stats, hasInterval := stockMatrix[targetTimeframe]
+	if !hasInterval {
+		return false // Timeframe parameter not present in current lookups
+	}
+
+	// Atomically switch active target parameters to the wider historical profile
+	pos.TargetP75 = stats.P75
+	pos.TargetP90 = stats.P90
+	pos.ActiveInterval = targetTimeframe
+
+	return true
+}
+
+// ResetPositionState allows the outside execution coordinator to clear out tracking markers manually
+func (sa *ScalperAgent) ResetPositionState(stock string) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+	if sa.activePositions[stock] != nil {
+		sa.activePositions[stock].IsActive = false
+	}
 }

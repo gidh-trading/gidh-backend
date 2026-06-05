@@ -11,27 +11,35 @@ type InstrumentReader struct {
 	pool *pgxpool.Pool
 }
 
+// PricePotentialRecord holds a single row representing an asset profile trajectory
+type PricePotentialRecord struct {
+	StockName string
+	Timeframe string
+	P75       float64
+	P90       float64
+}
+
 func NewInstrumentReader(pool *pgxpool.Pool) *InstrumentReader {
 	return &InstrumentReader{pool: pool}
 }
 
 // UpdateBacktestSelection updates the backtest flag.
-func (r *InstrumentReader) UpdateBacktestSelection(ctx context.Context, stockNames []string) error {
+func (ir *InstrumentReader) UpdateBacktestSelection(ctx context.Context, stockNames []string) error {
 	// 1. Reset all backtest flags
-	_, err := r.pool.Exec(ctx, "UPDATE instrument_configs SET is_backtest = FALSE")
+	_, err := ir.pool.Exec(ctx, "UPDATE instrument_configs SET is_backtest = FALSE")
 	if err != nil {
 		return err
 	}
 
 	// 2. Set flag for selected stocks
-	_, err = r.pool.Exec(ctx, "UPDATE instrument_configs SET is_backtest = TRUE WHERE stock_name = ANY($1)", stockNames)
+	_, err = ir.pool.Exec(ctx, "UPDATE instrument_configs SET is_backtest = TRUE WHERE stock_name = ANY($1)", stockNames)
 	return err
 }
 
 // FetchActiveConfigs retrieves all instruments
 // Note: Removed 'WHERE is_active = TRUE' since 'is_active' is no longer in the schema.
-func (r *InstrumentReader) FetchActiveConfigs(ctx context.Context) ([]models.InstrumentConfig, error) {
-	rows, err := r.pool.Query(ctx, `
+func (ir *InstrumentReader) FetchActiveConfigs(ctx context.Context) ([]models.InstrumentConfig, error) {
+	rows, err := ir.pool.Query(ctx, `
         SELECT instrument_token, stock_name, is_backtest
         FROM instrument_configs`)
 	if err != nil {
@@ -54,8 +62,8 @@ func (r *InstrumentReader) FetchActiveConfigs(ctx context.Context) ([]models.Ins
 }
 
 // FetchBacktestConfigs retrieves only instruments marked for backtesting
-func (r *InstrumentReader) FetchBacktestConfigs(ctx context.Context) ([]models.InstrumentConfig, error) {
-	rows, err := r.pool.Query(ctx, `
+func (ir *InstrumentReader) FetchBacktestConfigs(ctx context.Context) ([]models.InstrumentConfig, error) {
+	rows, err := ir.pool.Query(ctx, `
         SELECT instrument_token, stock_name, is_backtest
         FROM instrument_configs 
         WHERE is_backtest = TRUE`)
@@ -78,8 +86,8 @@ func (r *InstrumentReader) FetchBacktestConfigs(ctx context.Context) ([]models.I
 	return configs, nil
 }
 
-func (r *InstrumentReader) FetchConfigsByStockNames(ctx context.Context, stockNames []string) ([]models.InstrumentConfig, error) {
-	rows, err := r.pool.Query(ctx, `
+func (ir *InstrumentReader) FetchConfigsByStockNames(ctx context.Context, stockNames []string) ([]models.InstrumentConfig, error) {
+	rows, err := ir.pool.Query(ctx, `
         SELECT instrument_token, stock_name, is_backtest
         FROM instrument_configs 
         WHERE stock_name = ANY($1)`, stockNames)
@@ -102,14 +110,14 @@ func (r *InstrumentReader) FetchConfigsByStockNames(ctx context.Context, stockNa
 }
 
 // FetchInstrumentProfiles retrieves complete parameter maps directly from the profile properties data table.
-func (r *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[uint32]*models.InstrumentProfile, error) {
+func (ir *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[uint32]*models.InstrumentProfile, error) {
 	profilesMap := make(map[uint32]*models.InstrumentProfile)
 
 	query := `
 		SELECT instrument_token, bucket_size, atr_14, adr_pct, adv_30d, adv_val_30d 
 		FROM public.instrument_profile`
 
-	rows, err := r.pool.Query(ctx, query)
+	rows, err := ir.pool.Query(ctx, query)
 	if err != nil {
 		return nil, err
 	}
@@ -123,4 +131,45 @@ func (r *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[uin
 		profilesMap[p.InstrumentToken] = &p
 	}
 	return profilesMap, nil
+}
+
+// FetchAllPricePotentials reads the full mathematical percentiles from the database table.
+func (ir *InstrumentReader) FetchAllPricePotentials(ctx context.Context) (models.TargetMatrix, error) {
+	matrix := make(models.TargetMatrix)
+
+	query := `
+       SELECT stock_name, timeframe, p75, p90 
+       FROM public.gidh_bars_price_potential`
+
+	rows, err := ir.pool.Query(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var stockName string
+		var timeframe string
+		var p75, p90 float64
+
+		if err := rows.Scan(&stockName, &timeframe, &p75, &p90); err != nil {
+			return nil, err
+		}
+
+		// Allocate nested map structure dynamically on the fly
+		if matrix[stockName] == nil {
+			matrix[stockName] = make(map[string]models.PricePotential)
+		}
+
+		matrix[stockName][timeframe] = models.PricePotential{
+			P75: p75,
+			P90: p90,
+		}
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return matrix, nil
 }

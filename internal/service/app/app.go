@@ -65,7 +65,7 @@ func NewApp(cfg *config.Config) (*App, error) {
 
 	if cfg.Mode == "live" {
 		app.initLiveState(ctx)
-		dnaMap, advMap := app.loadMarketData(ctx, time.Now())
+		dnaMap, advMap, potentialsMatrix := app.loadMarketData(ctx, time.Now())
 		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
 			return nil, err
 		}
@@ -115,10 +115,14 @@ func (a *App) initOrderManager() {
 	}
 }
 
-// loadMarketData fetches instrument definitions, DNA baselines, and execution profiles for a target date.
-func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]*models.InstrumentProfile) {
+// loadMarketData fetches instrument definitions, DNA baselines, Price Potential and execution profiles for a target date.
+func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (
+	map[uint32]*models.MarketDNA,
+	map[uint32]*models.InstrumentProfile,
+	models.TargetMatrix,
+) {
 	if a.pool == nil {
-		return make(map[uint32]*models.MarketDNA), make(map[uint32]*models.InstrumentProfile)
+		return make(map[uint32]*models.MarketDNA), make(map[uint32]*models.InstrumentProfile), make(models.TargetMatrix)
 	}
 
 	// 1. Load DNA Baselines
@@ -136,11 +140,18 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 		a.instrumentList, _ = instReader.FetchBacktestConfigs(ctx)
 	}
 
-	// 3. 🔥 Fetch full instrument profile parameters (bucket_size, adv_30d) from DB
+	// 3. Fetch full instrument profile parameters (bucket_size, adv_30d) from DB
 	profilesMap, err := instReader.FetchInstrumentProfiles(ctx)
 	if err != nil {
 		logger.Errorf("FAILED TO LOAD INSTRUMENT PROFILES: %v", err)
 		profilesMap = make(map[uint32]*models.InstrumentProfile)
+	}
+
+	// 4. 🔥 Natively retrieve the complete historical price potential matrix maps
+	potentialsMatrix, err := instReader.FetchAllPricePotentials(ctx)
+	if err != nil {
+		logger.Errorf("FAILED TO LOAD PRICE POTENTIAL MATRIX MAP: %v", err)
+		potentialsMatrix = make(models.TargetMatrix)
 	}
 
 	// Rebuild fast token internal lookups
@@ -151,7 +162,7 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 		a.nameToToken[c.Name] = c.Token
 	}
 
-	return dnaMap, profilesMap
+	return dnaMap, profilesMap, potentialsMatrix
 }
 
 func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, profilesMap map[uint32]*models.InstrumentProfile) error {
@@ -196,7 +207,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		a.Pipeline.BacktestAgent = backtestMoneyManager
 		barManager.MacroListener = backtestMoneyManager
 		a.RiskManager = backtestMoneyManager
-		
+
 	} else {
 		logger.Infof("[System Initialization] Operating in %s mode. Algorithmic Agent deactivated.", a.Config.Mode)
 	}
