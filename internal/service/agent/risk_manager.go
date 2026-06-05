@@ -17,38 +17,28 @@ type RiskManager struct {
 	orderManager   order.PositionManager
 	scalper        *ScalperAgent
 	agentPositions map[string]*models.Position
-	dailyRealized  float64
 	circuitBroken  bool
+	lastExitTime   map[string]time.Time
 
-	// 🔥 Simulated Cooldown: Tracks the historical timestamp of the last liquidation
-	lastExitTime map[string]time.Time
-
-	// Money Management metrics for performance auditing
+	// Metrics & UI Ledger
+	dailyRealized    float64
 	dailyChargesPaid float64
 	globalSummary    models.ItemizedCharges
 	executedTrades   []models.BacktestExecutedTrade
 }
 
-type UIContractNotePayload struct {
-	Summary models.ItemizedCharges         `json:"summary"`
-	Trades  []models.BacktestExecutedTrade `json:"trades"`
-}
-
 func NewRiskManager(om order.PositionManager, sa *ScalperAgent) *RiskManager {
 	return &RiskManager{
-		orderManager:     om,
-		scalper:          sa,
-		agentPositions:   make(map[string]*models.Position),
-		lastExitTime:     make(map[string]time.Time),
-		dailyRealized:    0.0,
-		dailyChargesPaid: 0.0,
-		circuitBroken:    false,
-		executedTrades:   make([]models.BacktestExecutedTrade, 0),
+		orderManager:   om,
+		scalper:        sa,
+		agentPositions: make(map[string]*models.Position),
+		lastExitTime:   make(map[string]time.Time),
+		executedTrades: make([]models.BacktestExecutedTrade, 0),
 	}
 }
 
 // ========================================================================
-// 🏛️ MAIN PIPELINE INTERCEPTOR (HISTORICAL TICK TIME SPEED)
+// 🏛️ MAIN PIPELINE INTERCEPTOR
 // ========================================================================
 
 func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) {
@@ -68,49 +58,43 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		rm.agentPositions[key] = pos
 	}
 
-	// 1. 🛡️ Simulated Front Gateway Cooldown: Uses backtest tick time context
-	// If the net quantity is flat, check if 10 simulated seconds have passed since the last square-off.
+	// 1. Cooldown Period (10 seconds)
 	if pos.NetQuantity == 0 {
-		if exitTimestamp, ok := rm.lastExitTime[symbol]; ok {
-			if rawTick.Timestamp.Sub(exitTimestamp) < 10*time.Second {
-				rm.mu.Unlock()
-				return
-			}
+		if exitTime, ok := rm.lastExitTime[symbol]; ok && rawTick.Timestamp.Sub(exitTime) < 10*time.Second {
+			rm.mu.Unlock()
+			return
 		}
 	}
 
-	// 2. Dynamic Intraday Session Accounting & Force Liquidations
+	// 2. Global Safety Nets
 	if pos.NetQuantity != 0 {
 		multiplier := 1.0
 		if pos.Side == "SHORT" {
 			multiplier = -1.0
 		}
-		// Asymmetric PnL tracking
 		pos.UnrealizedPnL = (rawTick.LastPrice - pos.AveragePrice) * float64(pos.NetQuantity) * multiplier
+		totalNetPnL := rm.dailyRealized + pos.UnrealizedPnL - rm.dailyChargesPaid
 
-		totalNetSessionPnL := rm.dailyRealized + pos.UnrealizedPnL - rm.dailyChargesPaid
-
-		// Max Drawdown Hard Stop
-		if totalNetSessionPnL <= -MaxDailyLossAllowed {
-			logger.Errorf("[Money Manager] True Capital Drawdown Breached (₹%.2f). Freezing Agent.", totalNetSessionPnL)
+		// Circuit Breaker
+		if totalNetPnL <= -MaxDailyLossAllowed {
 			rm.circuitBroken = true
-			rm.executeFullLiquidationBrokerOrder(symbol, pos, "Net Session Risk Floor Breach", rawTick.Timestamp, rawTick.LastPrice)
+			rm.executeFullLiquidation(symbol, pos, "Daily Drawdown Breached", rawTick)
 			rm.mu.Unlock()
 			return
 		}
 
-		// Intraday Time Limit Square-off (Calculated against historical location context)
+		// Intraday Cut-off Time (15:15)
 		loc, _ := time.LoadLocation("Asia/Kolkata")
-		simulatedTimeInKolkata := rawTick.Timestamp.In(loc)
-		if simulatedTimeInKolkata.Hour() == 15 && simulatedTimeInKolkata.Minute() >= 15 {
-			rm.executeFullLiquidationBrokerOrder(symbol, pos, "Intraday 15:15 Force Square-off", rawTick.Timestamp, rawTick.LastPrice)
+		simTime := rawTick.Timestamp.In(loc)
+		if simTime.Hour() == 15 && simTime.Minute() >= 15 {
+			rm.executeFullLiquidation(symbol, pos, "EOD Force Square-off", rawTick)
 			rm.mu.Unlock()
 			return
 		}
 	}
-	rm.mu.Unlock() // Unlock cleanly before passing data downstream
+	rm.mu.Unlock()
 
-	// 3. Dispatch tick to the autonomous state-window engine
+	// 3. Ask the Scalper
 	decision, triggered := rm.scalper.AnalyzeMarket(enrichedTick)
 	if !triggered {
 		return
@@ -119,227 +103,115 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	// 4. Process Advanced Synchronized Directives
+	// 4. Execution & Fee Gatekeeper
 	switch decision {
-
-	// ==========================================
-	// 🛫 LONG SPREAD LIFECYCLE MANAGEMENT
-	// ==========================================
-	case "GO_LONG":
+	case "GO_LONG", "GO_SHORT":
 		if pos.NetQuantity == 0 {
 			allowedQty := int(math.Floor((InitialCapital * MaxLeverage) / rawTick.LastPrice))
 			if allowedQty <= 0 {
+				rm.scalper.ResetPositionState(symbol)
 				return
 			}
 
-			predictedFees := PredictRoundTripCharges(allowedQty, rawTick.LastPrice)
-			projectedNetSessionPnL := rm.dailyRealized - (rm.dailyChargesPaid + predictedFees)
-			if projectedNetSessionPnL <= -MaxDailyLossAllowed {
-				logger.Warnf("[Money Manager] Vetoed Long Setup for %s. Tax drag breaches risk limits.", symbol)
+			// --- THE FEE GATEKEEPER ---
+			predictedCharges := computeItemizedCharges(allowedQty, rawTick.LastPrice)
+			predictedFees := predictedCharges.TotalCharges
+			scalperPlan := rm.scalper.GetPositionState(symbol)
+
+			expectedProfitPerShare := math.Abs(scalperPlan.Target - rawTick.LastPrice)
+			totalExpectedGross := expectedProfitPerShare * float64(allowedQty)
+
+			// VETO: If expected profit isn't at least 3x the tax drag, reject it.
+			if totalExpectedGross < (3.0 * predictedFees) {
+				logger.Warnf("Trade Vetoed [%s]: Gross (₹%.2f) does not justify tax drag (₹%.2f)", symbol, totalExpectedGross, predictedFees)
+				rm.scalper.ResetPositionState(symbol)
 				return
+			}
+			// --------------------------
+
+			side := "BUY"
+			if decision == "GO_SHORT" {
+				side = "SELL"
 			}
 
 			orderReq := models.OrderRequest{
-				Symbol:          symbol,
-				Product:         "MIS",
-				TransactionType: "BUY",
-				OrderType:       "MARKET",
-				Quantity:        allowedQty,
-				UserEmail:       AgentEmail,
+				Symbol: symbol, Product: "MIS", TransactionType: side, OrderType: "MARKET", Quantity: allowedQty,
 			}
+			_, _ = rm.orderManager.PlaceOrder(context.Background(), orderReq)
 
-			logger.Infof("[Money Manager] Approved Long Setup. Executing BUY for %s", symbol)
-
-			charges := computeItemizedCharges(allowedQty, rawTick.LastPrice)
-			rm.accumulateAuditCharges(charges)
-
-			rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
-				Timestamp:       rawTick.Timestamp,
-				Side:            "BUY",
-				Symbol:          symbol,
-				Exchange:        "NSE",
-				Quantity:        allowedQty,
-				AveragePrice:    rawTick.LastPrice,
-				AllocatedCharge: charges.TotalCharges,
-			})
-
-			rm.dailyChargesPaid += charges.TotalCharges
+			// Update Position
 			pos.NetQuantity = allowedQty
 			pos.Side = "LONG"
+			if side == "SELL" {
+				pos.Side = "SHORT"
+			}
 			pos.AveragePrice = rawTick.LastPrice
-			pos.UnrealizedPnL = 0.0
 
-			_, _ = rm.orderManager.PlaceOrder(context.Background(), orderReq)
-		}
-
-	case "SLICE_50_PERCENT_LONG":
-		if pos.NetQuantity > 0 && pos.Side == "LONG" {
-			sliceQty := pos.NetQuantity / 2
-			if sliceQty > 0 {
-				logger.Warnf("[Money Manager] Milestone 1 (P75) Reached for %s. Slicing 50%% long position (%d shares) to lock in profit.", symbol, sliceQty)
-				rm.executePartialSliceBrokerOrder(symbol, pos, "SELL", sliceQty, rawTick.Timestamp, rawTick.LastPrice, "Scalper Milestone 1 Partial Profit Take")
-			}
-		}
-
-	case "LIQUIDATE_ALL_LONG":
-		if pos.NetQuantity > 0 && pos.Side == "LONG" {
-			rm.executeFullLiquidationBrokerOrder(symbol, pos, "Scalper Long Full Exit", rawTick.Timestamp, rawTick.LastPrice)
-		}
-
-	// ==========================================
-	// 🛬 SHORT SPREAD LIFECYCLE MANAGEMENT
-	// ==========================================
-	case "GO_SHORT":
-		if pos.NetQuantity == 0 {
-			allowedQty := int(math.Floor((InitialCapital * MaxLeverage) / rawTick.LastPrice))
-			if allowedQty <= 0 {
-				return
-			}
-
-			predictedFees := PredictRoundTripCharges(allowedQty, rawTick.LastPrice)
-			projectedNetSessionPnL := rm.dailyRealized - (rm.dailyChargesPaid + predictedFees)
-			if projectedNetSessionPnL <= -MaxDailyLossAllowed {
-				logger.Warnf("[Money Manager] Vetoed Short Setup for %s. Tax drag breaches risk limits.", symbol)
-				return
-			}
-
-			orderReq := models.OrderRequest{
-				Symbol:          symbol,
-				Product:         "MIS",
-				TransactionType: "SELL",
-				OrderType:       "MARKET",
-				Quantity:        allowedQty,
-				UserEmail:       AgentEmail,
-			}
-
-			logger.Infof("[Money Manager] Approved Short Setup. Executing SELL for %s", symbol)
-
-			charges := computeItemizedCharges(allowedQty, rawTick.LastPrice)
-			rm.accumulateAuditCharges(charges)
-
+			// Record Ledger
+			rm.accumulateAuditCharges(predictedCharges)
+			rm.dailyChargesPaid += predictedFees
 			rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
 				Timestamp:       rawTick.Timestamp,
-				Side:            "SELL",
+				Side:            side,
 				Symbol:          symbol,
 				Exchange:        "NSE",
 				Quantity:        allowedQty,
 				AveragePrice:    rawTick.LastPrice,
-				AllocatedCharge: charges.TotalCharges,
+				AllocatedCharge: predictedFees,
 			})
-
-			rm.dailyChargesPaid += charges.TotalCharges
-			pos.NetQuantity = allowedQty
-			pos.Side = "SHORT"
-			pos.AveragePrice = rawTick.LastPrice
-			pos.UnrealizedPnL = 0.0
-
-			_, _ = rm.orderManager.PlaceOrder(context.Background(), orderReq)
 		}
 
-	case "SLICE_50_PERCENT_SHORT":
-		if pos.NetQuantity > 0 && pos.Side == "SHORT" {
-			sliceQty := pos.NetQuantity / 2
-			if sliceQty > 0 {
-				logger.Warnf("[Money Manager] Milestone 1 (P75) Reached for short %s. Slicing 50%% position (%d shares) to cover.", symbol, sliceQty)
-				rm.executePartialSliceBrokerOrder(symbol, pos, "BUY", sliceQty, rawTick.Timestamp, rawTick.LastPrice, "Scalper Milestone 1 Partial Short Cover")
-			}
-		}
-
-	case "LIQUIDATE_ALL_SHORT":
-		if pos.NetQuantity > 0 && pos.Side == "SHORT" {
-			rm.executeFullLiquidationBrokerOrder(symbol, pos, "Scalper Short Full Exit", rawTick.Timestamp, rawTick.LastPrice)
+	case "EXIT_LONG", "EXIT_SHORT":
+		if pos.NetQuantity > 0 {
+			rm.executeFullLiquidation(symbol, pos, "Scalper Target/SL Hit", rawTick)
 		}
 	}
 }
 
 // ========================================================================
-// 🛠️ SUB-SYSTEM INTERFACE EXECUTION CORES
+// 🛠️ EXECUTION CORES
 // ========================================================================
 
-func (rm *RiskManager) executePartialSliceBrokerOrder(symbol string, pos *models.Position, exitSide string, qty int, timestamp time.Time, executionPrice float64, reason string) {
-	orderReq := models.OrderRequest{
-		Symbol:          symbol,
-		Product:         "MIS",
-		TransactionType: exitSide,
-		OrderType:       "MARKET",
-		Quantity:        qty,
-		UserEmail:       AgentEmail,
-	}
-
-	_, _ = rm.orderManager.PlaceOrder(context.Background(), orderReq)
-
-	multiplier := 1.0
-	if pos.Side == "SHORT" {
-		multiplier = -1.0
-	}
-	realizedSlicePnL := (executionPrice - pos.AveragePrice) * float64(qty) * multiplier
-	rm.dailyRealized += realizedSlicePnL
-
-	pos.NetQuantity -= qty
-
-	charges := computeItemizedCharges(qty, executionPrice)
-	rm.accumulateAuditCharges(charges)
-	rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
-		Timestamp:       timestamp,
-		Side:            exitSide,
-		Symbol:          symbol,
-		Exchange:        "NSE",
-		Quantity:        qty,
-		AveragePrice:    executionPrice,
-		AllocatedCharge: charges.TotalCharges,
-	})
-	rm.dailyChargesPaid += charges.TotalCharges
-}
-
-func (rm *RiskManager) executeFullLiquidationBrokerOrder(symbol string, pos *models.Position, reason string, timestamp time.Time, executionPrice float64) {
-	if pos.NetQuantity == 0 {
-		return
-	}
-
+func (rm *RiskManager) executeFullLiquidation(symbol string, pos *models.Position, reason string, tick models.TickData) {
 	exitSide := "SELL"
 	if pos.Side == "SHORT" {
 		exitSide = "BUY"
 	}
 
-	exitReq := models.OrderRequest{
-		Symbol:          symbol,
-		Product:         "MIS",
-		TransactionType: exitSide,
-		OrderType:       "MARKET",
-		Quantity:        pos.NetQuantity,
-		UserEmail:       AgentEmail,
+	req := models.OrderRequest{
+		Symbol: symbol, Product: "MIS", TransactionType: exitSide, OrderType: "MARKET", Quantity: pos.NetQuantity,
 	}
+	_, _ = rm.orderManager.PlaceOrder(context.Background(), req)
 
-	logger.Warnf("[Money Manager] Executing Full Square-Off for %s (%s). Reason: %s", symbol, pos.Side, reason)
-	_, _ = rm.orderManager.PlaceOrder(context.Background(), exitReq)
-
+	// Calculate PnL
 	multiplier := 1.0
 	if pos.Side == "SHORT" {
 		multiplier = -1.0
 	}
-	pos.UnrealizedPnL = (executionPrice - pos.AveragePrice) * float64(pos.NetQuantity) * multiplier
-	rm.dailyRealized += pos.UnrealizedPnL
+	realizedPnL := (tick.LastPrice - pos.AveragePrice) * float64(pos.NetQuantity) * multiplier
+	rm.dailyRealized += realizedPnL
 
-	charges := computeItemizedCharges(pos.NetQuantity, executionPrice)
+	// Record Ledger
+	charges := computeItemizedCharges(pos.NetQuantity, tick.LastPrice)
 	rm.accumulateAuditCharges(charges)
+	rm.dailyChargesPaid += charges.TotalCharges
+
 	rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
-		Timestamp:       timestamp,
+		Timestamp:       tick.Timestamp,
 		Side:            exitSide,
 		Symbol:          symbol,
 		Exchange:        "NSE",
 		Quantity:        pos.NetQuantity,
-		AveragePrice:    executionPrice,
+		AveragePrice:    tick.LastPrice,
 		AllocatedCharge: charges.TotalCharges,
 	})
-	rm.dailyChargesPaid += charges.TotalCharges
 
-	// 🔥 Core Fix: Save the historical timestamp parsed from the data file!
-	rm.lastExitTime[symbol] = timestamp
+	rm.lastExitTime[symbol] = tick.Timestamp
 
+	// Reset State
 	pos.NetQuantity = 0
 	pos.Side = "FLAT"
 	pos.AveragePrice = 0.0
-	pos.UnrealizedPnL = 0.0
 
 	rm.scalper.ResetPositionState(symbol)
 }

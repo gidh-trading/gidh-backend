@@ -206,7 +206,7 @@ func (a *App) initPipeline(
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
 
 		// 🔥 Instantiate Scalper with window size lookback of 5 + pass our ready-to-use memory matrix map
-		scalperAgent := agent.NewScalperAgent(5, potentialsMatrix)
+		scalperAgent := agent.NewScalperAgent(potentialsMatrix)
 		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)
 
 		// Map structural pipelines straight into the synchronous referee loops
