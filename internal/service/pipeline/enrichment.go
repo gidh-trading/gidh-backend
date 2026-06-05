@@ -52,15 +52,15 @@ func NewEnrichmentStage(pm order.PositionManager, rawDnaMap map[uint32]*models.M
 	}
 }
 
-func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
+	es.mu.Lock()
+	defer es.mu.Unlock()
 
 	token := tick.Raw.InstrumentToken
 	price := tick.Raw.LastPrice
-	ts := tick.Raw.Timestamp.In(s.loc)
+	ts := tick.Raw.Timestamp.In(es.loc)
 
-	ctx, exists := s.instruments[token]
+	ctx, exists := es.instruments[token]
 	if !exists {
 		ctx = &InstrumentContext{
 			Buffer:              NewTokenRollingBuffer(),
@@ -69,7 +69,7 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			LastVolume:          0,
 			LastPrice:           price,
 		}
-		s.instruments[token] = ctx
+		es.instruments[token] = ctx
 	}
 
 	curr := tick.Raw.CumulativeVolume
@@ -87,12 +87,10 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		return nil
 	}
 
-	if price != ctx.LastPrice && s.positionManager != nil {
-		// Triggers real-time evaluation rules safely
-		s.positionManager.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice, tick.Raw.Timestamp)
+	if price != ctx.LastPrice && es.positionManager != nil {
+		es.positionManager.OnPriceUpdate(tick.Raw.StockName, tick.Raw.LastPrice, tick.Raw.Timestamp)
 	}
 
-	// Update the cache context AFTER the position manager checks its constraints
 	ctx.LastPrice = price
 
 	// Push current trade details onto the sliding 60-second matrix
@@ -108,7 +106,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	priceRank := 4
 	rangeRank := 4
 
-	// Evaluate participation ranks via circadian baseline time frames
 	if baseline, ok := ctx.DNA[minuteIndex]; ok {
 		switch {
 		case liveVolume >= baseline.VolumeP97:
@@ -146,16 +143,13 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 	}
 
-	// 🔥 FIXED: Dynamic Baseline-Driven Price Rank Normalization using 1m interval percentiles
+	// Extract total peak-to-trough boundary range variables for ranking
+	_, _, rHigh, rLow, _ := ctx.Buffer.GetProductionStructure()
+	liveRollingRange := rHigh - rLow
+
 	if baseline1m, has1mBaseline := ctx.IntervalPercentiles["1m"]; has1mBaseline {
-		// Calculate structural body move magnitude
 		absDisplacement := math.Abs(liveDisplacement)
 
-		// Calculate total peak-to-trough boundary range
-		_, _, rHigh, rLow, _ := ctx.Buffer.GetProductionStructure()
-		liveRollingRange := rHigh - rLow
-
-		// Track 1: Body Displacement Ranking (Compares against price_pXX)
 		switch {
 		case absDisplacement >= baseline1m.PriceP97:
 			priceRank = 7
@@ -173,7 +167,6 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			priceRank = 1
 		}
 
-		// Track 2: Total Volatility Boundary Ranking (Compares against range_pXX)
 		switch {
 		case liveRollingRange >= baseline1m.RangeP97:
 			rangeRank = 7
@@ -192,24 +185,76 @@ func (s *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 	}
 
-	tick.Enrichment = models.SimplifiedEnrichment{
+	// ========================================================================
+	// 🔥 CALCULATE TRUE MICROSTRUCTURAL DIRECTION (ADDED HERE)
+	// ========================================================================
+	// Since liveDisplacement = wClose - wOpen, we know that wOpen = wClose - liveDisplacement
+	wOpen := price - liveDisplacement
+	wClose := price
+	wHigh := rHigh
+	wLow := rLow
+
+	trueDirection := es.calculateDirection(wOpen, wHigh, wLow, wClose)
+
+	// Ingest directional classification seamlessly straight onto the structured output sub-object
+	tick.Enrichment = models.TickEnrichment{
 		Timestamp:   ts,
 		MinuteIndex: minuteIndex,
 		VolumeRank:  volRank,
 		TickRank:    tickRank,
 		PriceRank:   priceRank,
 		RangeRank:   rangeRank,
+		Direction:   trueDirection, // Matches your updated TickEnrichment structural properties layout
 	}
 
 	return nil
 }
 
-func (s *EnrichmentStage) GetInstrumentProfile(token uint32) (*models.InstrumentProfile, bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	ctx, exists := s.instruments[token]
+func (es *EnrichmentStage) GetInstrumentProfile(token uint32) (*models.InstrumentProfile, bool) {
+	es.mu.Lock()
+	defer es.mu.Unlock()
+	ctx, exists := es.instruments[token]
 	if !exists || ctx == nil {
 		return nil, false
 	}
 	return ctx.Profile, true
+}
+
+// calculateDirection applies pure mathematical range positioning to determine aggression state
+func (es *EnrichmentStage) calculateDirection(wOpen, wHigh, wLow, wClose float64) models.DirectionState {
+	windowRange := wHigh - wLow
+
+	// Safety check for fresh tokens or perfectly illiquid static markets
+	if windowRange <= 0 {
+		return models.DirSideways
+	}
+
+	// Calculate where the current close price sits inside the 1-minute range as a percentage (0.0 to 1.0)
+	positionRatio := (wClose - wLow) / windowRange
+
+	// Evaluate displacement relative to the window open
+	isHigherThanOpen := wClose > wOpen
+	isLowerThanOpen := wClose < wOpen
+
+	switch {
+	// Top 15% of the range + upward displacement = Severe Buying Urgency
+	case positionRatio >= 0.85 && isHigherThanOpen:
+		return models.DirStrongBullish
+
+	// Upper half of the range + upward displacement = Steady Accumulation
+	case positionRatio > 0.55 && isHigherThanOpen:
+		return models.DirBullish
+
+	// Bottom 15% of the range + downward displacement = Severe Liquidating Pressure
+	case positionRatio <= 0.15 && isLowerThanOpen:
+		return models.DirStrongBearish
+
+	// Lower half of the range + downward displacement = Steady Distribution
+	case positionRatio < 0.45 && isLowerThanOpen:
+		return models.DirBearish
+
+	// Everything else is caught in the middle 30% rotational zone = Rotational Churn / Absorption
+	default:
+		return models.DirSideways
+	}
 }

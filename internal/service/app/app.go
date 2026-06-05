@@ -175,17 +175,13 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// 3. Initialize the Enrichment Stage mapping positional metrics
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, dnaMap, profilesMap)
 
-	// 4. THE SELF-CONTAINED INJECTION: Pass both DBWriter and wsHub right into the AnalyticsEngine
-	// This enables the engine to handle its own asset-scoped streaming and async TimescaleDB hypertable persistence.
-	analyticsEngine := pipeline.NewAnalyticsEngine(dnaMap, profilesMap, a.DBWriter, a.wsHub)
-
-	// 5. Initialize the decoupled Bar Manager
+	// 4. Initialize the decoupled Bar Manager
 	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub, profilesMap, dnaMap)
 
 	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
 
 	// 6. Assemble the streamlined Execution Pipeline Stage
-	a.Pipeline = NewPipeline(vpStage, enrichmentStage, analyticsEngine, barManager, scoutStage, a.DBWriter)
+	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barManager, scoutStage, a.DBWriter)
 	a.activePipe = a.Pipeline
 
 	return nil

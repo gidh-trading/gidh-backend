@@ -25,6 +25,10 @@ type BarManager struct {
 	analyticsEngine *BarAnalyticsEngine
 }
 
+type candleState struct {
+	bar *models.Bar
+}
+
 func NewBarManager(w *writer.DBWriter, hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile, rawDnaMap map[uint32]*models.MarketDNA) *BarManager {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 	return &BarManager{
@@ -94,6 +98,111 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	return nil
 }
 
+func (bm *BarManager) GetActiveBarsSnapshot(token uint32) map[string]*models.Bar {
+	bm.mu.RLock()
+	defer bm.mu.RUnlock()
+
+	snapshot := make(map[string]*models.Bar)
+	if cs, ok := bm.state1m[token]; ok && cs != nil {
+		snapshot["1m"] = cs.bar
+	}
+	if cs, ok := bm.state3m[token]; ok && cs != nil {
+		snapshot["3m"] = cs.bar
+	}
+	if cs, ok := bm.state5m[token]; ok && cs != nil {
+		snapshot["5m"] = cs.bar
+	}
+	if cs, ok := bm.state10m[token]; ok && cs != nil {
+		snapshot["10m"] = cs.bar
+	}
+	if cs, ok := bm.state15m[token]; ok && cs != nil {
+		snapshot["15m"] = cs.bar
+	}
+
+	return snapshot
+}
+
+func (bm *BarManager) ClearState() {
+	bm.mu.Lock()
+	defer bm.mu.Unlock()
+
+	bm.state1m = make(map[uint32]*candleState)
+	bm.state3m = make(map[uint32]*candleState)
+	bm.state5m = make(map[uint32]*candleState)
+	bm.state10m = make(map[uint32]*candleState)
+	bm.state15m = make(map[uint32]*candleState)
+
+	logger.Info("Bar Manager historical window cache states wiped cleanly.")
+}
+
+func newCandleState(ts time.Time, price float64, token uint32, name, timeframe string) *candleState {
+	return &candleState{
+		bar: newBar(ts, price, token, name, timeframe),
+	}
+}
+
+func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *models.Bar {
+	return &models.Bar{
+		Timestamp:       ts,
+		InstrumentToken: int32(token),
+		StockName:       name,
+		Timeframe:       timeframe,
+		Open:            price,
+		High:            price,
+		Low:             price,
+		Close:           price,
+		Analytics: models.BarAnalytics{
+			VolumeRank: 0,
+			TickRank:   0,
+			PriceRank:  0,
+			RangeRank:  0,
+			Direction:  "",
+		},
+	}
+}
+
+// processTickForCandle strictly updates core physical transactions on the candle state
+func (bm *BarManager) processTickForCandle(
+	cs *candleState,
+	tick *models.EnrichedTick,
+	vol float64,
+	timeframe string,
+) {
+	price := tick.Raw.LastPrice
+
+	// 1. Structural Candlestick Boundary Extensions
+	if price > cs.bar.High {
+		cs.bar.High = price
+	}
+	if price < cs.bar.Low {
+		cs.bar.Low = price
+	}
+	cs.bar.Close = price
+
+	// 2. Accumulate Totals
+	cs.bar.Volume += vol
+	cs.bar.TickCount++
+
+	cs.bar.TotalBuyQty = float64(tick.Raw.TotalBuyQuantity)
+	cs.bar.TotalSellQty = float64(tick.Raw.TotalSellQuantity)
+	cs.bar.VWAP = tick.Raw.AverageTradedPrice
+
+	prevClose := tick.Raw.LastPrice - tick.Raw.Change
+	if prevClose > 0 {
+		cs.bar.ChangePct = (tick.Raw.Change / prevClose) * 100
+	}
+
+	if tick.VolProfile != nil {
+		cs.bar.POC = tick.VolProfile.POC
+		cs.bar.VAH = tick.VolProfile.VAH
+		cs.bar.VAL = tick.VolProfile.VAL
+	}
+
+	if timeframe == "1m" {
+		cs.bar.Ticks = append(cs.bar.Ticks, tick.Raw)
+	}
+}
+
 func (bm *BarManager) updateTimeframe(
 	stateMap map[uint32]*candleState,
 	token uint32,
@@ -128,41 +237,4 @@ func (bm *BarManager) updateTimeframe(
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)
 	bm.analyticsEngine.AnalyzeTick(cs.bar, tick)
-}
-
-func (bm *BarManager) ClearState() {
-	bm.mu.Lock()
-	defer bm.mu.Unlock()
-
-	bm.state1m = make(map[uint32]*candleState)
-	bm.state3m = make(map[uint32]*candleState)
-	bm.state5m = make(map[uint32]*candleState)
-	bm.state10m = make(map[uint32]*candleState)
-	bm.state15m = make(map[uint32]*candleState)
-
-	logger.Info("Bar Manager historical window cache states wiped cleanly.")
-}
-
-func (bm *BarManager) GetActiveBarsSnapshot(token uint32) map[string]*models.Bar {
-	bm.mu.RLock()
-	defer bm.mu.RUnlock()
-
-	snapshot := make(map[string]*models.Bar)
-	if cs, ok := bm.state1m[token]; ok && cs != nil {
-		snapshot["1m"] = cs.bar
-	}
-	if cs, ok := bm.state3m[token]; ok && cs != nil {
-		snapshot["3m"] = cs.bar
-	}
-	if cs, ok := bm.state5m[token]; ok && cs != nil {
-		snapshot["5m"] = cs.bar
-	}
-	if cs, ok := bm.state10m[token]; ok && cs != nil {
-		snapshot["10m"] = cs.bar
-	}
-	if cs, ok := bm.state15m[token]; ok && cs != nil {
-		snapshot["15m"] = cs.bar
-	}
-
-	return snapshot
 }

@@ -3,7 +3,11 @@ package models
 import "time"
 
 type BarAnalytics struct {
-	Direction int `json:"is_absorption"`
+	VolumeRank int            `json:"volume_rank"`
+	TickRank   int            `json:"tick_rank"`
+	PriceRank  int            `json:"price_rank"`
+	RangeRank  int            `json:"range_rank"`
+	Direction  DirectionState `json:"direction"`
 }
 
 type Bar struct {
@@ -32,11 +36,8 @@ type Bar struct {
 	TotalSellQty float64 `json:"total_sell_qty"`
 	ChangePct    float64 `json:"change_pct"`
 
-	VolumeRank int          `json:"volume_rank"`
-	TickRank   int          `json:"tick_rank"`
-	PriceRank  int          `json:"price_rank"`
-	RangeRank  int          `json:"range_rank"`
-	Analytics  BarAnalytics `json:"analytics"`
+	// Analytical Metadata Container
+	Analytics BarAnalytics `json:"analytics"`
 
 	Ticks []TickData `json:"-"`
 }

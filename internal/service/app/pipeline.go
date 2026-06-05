@@ -11,7 +11,6 @@ import (
 type Pipeline struct {
 	vpStage         *pipeline.VolumeProfileStage
 	enrichment      *pipeline.EnrichmentStage
-	analytics       *pipeline.AnalyticsEngine
 	barManager      *pipeline.BarManager
 	scoutStage      *pipeline.ScoutStage
 	dbWriter        *writer.DBWriter
@@ -24,7 +23,6 @@ type Pipeline struct {
 func NewPipeline(
 	vpStage *pipeline.VolumeProfileStage,
 	enrichment *pipeline.EnrichmentStage,
-	analytics *pipeline.AnalyticsEngine,
 	barManager *pipeline.BarManager,
 	scoutStage *pipeline.ScoutStage,
 	dbWriter *writer.DBWriter,
@@ -32,7 +30,6 @@ func NewPipeline(
 	return &Pipeline{
 		vpStage:         vpStage,
 		enrichment:      enrichment,
-		analytics:       analytics,
 		barManager:      barManager,
 		scoutStage:      scoutStage,
 		dbWriter:        dbWriter,
