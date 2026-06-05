@@ -42,7 +42,7 @@ func NewBarManager(w *writer.DBWriter, hub *ws.Hub, profiles map[uint32]*models.
 		dnaMap:          rawDnaMap,
 		writer:          w,
 		wsHub:           hub,
-		analyticsEngine: NewBarAnalyticsEngine(),
+		analyticsEngine: NewBarAnalyticsEngine(rawDnaMap),
 	}
 }
 
@@ -156,7 +156,7 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 			TickRank:   0,
 			PriceRank:  0,
 			RangeRank:  0,
-			Direction:  "",
+			Direction:  models.DirSideways,
 		},
 	}
 }
