@@ -13,9 +13,15 @@ import (
 )
 
 type StockMemory struct {
-	mu         sync.RWMutex
-	State      models.HqIntelligencePayload
 	TickBuffer []models.TickData
+	State      models.HqIntelligencePayload
+
+	// mu MUST be changed to RWMutex to unlock RLock() and RUnlock() capability
+	mu sync.RWMutex
+
+	// ---- Structural Canvas Trackers ----
+	ActiveBarMinuteIndex int                     // Tracking interval boundary
+	DiscoveredWalls      []models.AbsorptionWall // Remembers every anomaly hit inside the current bar
 }
 
 type Headquarters struct {
@@ -51,61 +57,120 @@ func (h *Headquarters) IngestPipelineTick(ctx context.Context, tick *models.Enri
 			State: models.HqIntelligencePayload{
 				Direction: "NONE",
 				FlowMetrics: models.TapeTelemetryUnits{
-					BiasScore:  0.0,
-					VwpDelta:   0.0,
-					Efficiency: 0.0,
+					IsAbsorption: false,
+					ActiveWalls:  []models.AbsorptionWall{},
 				},
 			},
+			ActiveBarMinuteIndex: -1,
+			DiscoveredWalls:      []models.AbsorptionWall{},
 		}
 		h.stocks[token] = mem
 	}
-	// Fetch matching DNA matrix block pointer safely
 	dnaProfile := h.dnaMap[token]
 	h.stocksMu.Unlock()
 
 	mem.mu.Lock()
 	defer mem.mu.Unlock()
 
-	// Append raw tick to session-continuous rolling slice matrix buffer
+	// 1. Structural Boundary Check: Reset memory when a brand new bar interval forms
+	if mem.ActiveBarMinuteIndex != tick.MinuteIndex {
+		mem.ActiveBarMinuteIndex = tick.MinuteIndex
+		mem.DiscoveredWalls = []models.AbsorptionWall{} // Wipe old walls for the new bar window
+	}
+
+	// Append raw data to sample window
 	mem.TickBuffer = append(mem.TickBuffer, tick.Raw)
 	bufferSize := len(mem.TickBuffer)
 
-	// Isolate lookback window slice bounds dynamically (removes the block when bufferSize < lookbackTicks)
 	var sample []models.TickData
 	if bufferSize <= h.lookbackTicks {
-		sample = mem.TickBuffer // Handle warming state seamlessly using all available elements
+		sample = mem.TickBuffer
 	} else {
 		sample = mem.TickBuffer[bufferSize-h.lookbackTicks : bufferSize]
 	}
 
-	// Delegate continuous mathematical processing to pure routine functions
 	telemetry := analytics.CalculateHybridTelemetry(sample, h.lookbackTicks, dnaProfile)
 
-	// Persist to internal structural state cache blocks
-	mem.State.FlowMetrics = telemetry
+	// Extract sliding ranks from the 1m enrichment container
+	volRank := tick.Enrichment.VolumeRank
+	priceRank := tick.Enrichment.PriceRank
 
-	// Quantize categorical descriptive boundaries for backward-compatible terminal pipelines
-	if telemetry.BiasScore >= 0.25 {
-		mem.State.Direction = "BULLISH"
-	} else if telemetry.BiasScore <= -0.25 {
-		mem.State.Direction = "BEARISH"
+	const lowEfficiencyLimit = 0.05
+	currentPrice := tick.Raw.LastPrice
+
+	// 2. Real-Time Multi-Tier Matrix Evaluation
+	if volRank >= 6 && priceRank <= 3 && telemetry.Efficiency <= lowEfficiencyLimit {
+
+		if telemetry.BiasScore >= 0.50 {
+			// Aggressive buying hit short wall
+			h.registerUniqueWall(&mem.DiscoveredWalls, "ABSORPTION_SHORT", currentPrice)
+			mem.State.Direction = "ABSORPTION_SHORT"
+
+		} else if telemetry.BiasScore <= -0.50 {
+			// Aggressive selling hit buy floor
+			h.registerUniqueWall(&mem.DiscoveredWalls, "ABSORPTION_LONG", currentPrice)
+			mem.State.Direction = "ABSORPTION_LONG"
+		}
 	} else {
-		mem.State.Direction = "NONE"
+		// Use standard trend tracking if no fresh anomaly is overwhelming the current tick
+		if telemetry.BiasScore >= 0.25 {
+			mem.State.Direction = "BULLISH"
+		} else if telemetry.BiasScore <= -0.25 {
+			mem.State.Direction = "BEARISH"
+		} else {
+			mem.State.Direction = "NONE"
+		}
 	}
+
+	// 3. Keep the payload populated with ALL discovered walls for the current bar
+	if len(mem.DiscoveredWalls) > 0 {
+		mem.State.FlowMetrics.IsAbsorption = true
+		mem.State.FlowMetrics.ActiveWalls = mem.DiscoveredWalls
+	} else {
+		mem.State.FlowMetrics.IsAbsorption = false
+		mem.State.FlowMetrics.ActiveWalls = []models.AbsorptionWall{}
+	}
+
+	mem.State.FlowMetrics.BiasScore = telemetry.BiasScore
+	mem.State.FlowMetrics.VwpDelta = telemetry.VwpDelta
+	mem.State.FlowMetrics.Efficiency = telemetry.Efficiency
 }
 
-// GetIntelligenceSnapshot is the high-speed concurrent interface for BarManager mapping
+// Helper routine to append a wall coordinate only if it hasn't been cached already
+func (h *Headquarters) registerUniqueWall(walls *[]models.AbsorptionWall, direction string, price float64) {
+	for _, w := range *walls {
+		// Avoid duplicating bubbles at the exact same coordinate layer
+		if w.Direction == direction && w.AbsorptionPrice == price {
+			return
+		}
+	}
+	*walls = append(*walls, models.AbsorptionWall{
+		Direction:       direction,
+		AbsorptionPrice: price,
+	})
+}
+
+// GetIntelligenceSnapshot performs a thread-safe, non-blocking read operation
+// to serve live structural intelligence snapshots to the downstream BarManager.
 func (h *Headquarters) GetIntelligenceSnapshot(token uint32) models.HqIntelligencePayload {
 	h.stocksMu.RLock()
 	mem, exists := h.stocks[token]
 	h.stocksMu.RUnlock()
 
 	if !exists || mem == nil {
-		return models.HqIntelligencePayload{Direction: "NONE"}
+		return models.HqIntelligencePayload{
+			Direction: "NONE",
+			FlowMetrics: models.TapeTelemetryUnits{
+				IsAbsorption: false,
+				ActiveWalls:  []models.AbsorptionWall{},
+			},
+		}
 	}
 
+	// Read-lock individual stock memory safely without blocking other concurrent readers
 	mem.mu.RLock()
 	defer mem.mu.RUnlock()
+
 	return mem.State
 }
 
@@ -147,4 +212,62 @@ func (h *Headquarters) ReconstituteHQState(ctx context.Context, token uint32, sy
 			},
 		},
 	}
+}
+
+// ProcessClosedBar runs our absorption validation matrix on a finalized, completed bar instance.
+// This prevents real-time tick flickering and guarantees the bubbles stay locked forever on bar close.
+func (h *Headquarters) ProcessClosedBar(bar *models.Bar, telemetry models.TapeTelemetryUnits) models.HqIntelligencePayload {
+	payload := models.HqIntelligencePayload{
+		Direction: "NONE",
+		FlowMetrics: models.TapeTelemetryUnits{
+			BiasScore:    telemetry.BiasScore,
+			VwpDelta:     telemetry.VwpDelta,
+			Efficiency:   telemetry.Efficiency,
+			IsAbsorption: false,
+			ActiveWalls:  []models.AbsorptionWall{},
+		},
+	}
+
+	// 1. Extract finalized baseline percentile ranks computed inside this bar
+	volRank := bar.VolumeRank
+	priceRank := bar.PriceRank
+
+	// 2. Define our Two-Tier Reliability Rules
+	const lowEfficiencyLimit = 0.05
+
+	// Condition: High volume deployment met with suppressed spatial progress
+	if volRank >= 6 && priceRank <= 3 && telemetry.Efficiency <= lowEfficiencyLimit {
+
+		if telemetry.BiasScore >= 0.50 {
+			// Aggressive buyers lifting offers were completely absorbed by an institutional ceiling
+			payload.Direction = "ABSORPTION_SHORT"
+			payload.FlowMetrics.IsAbsorption = true
+			payload.FlowMetrics.ActiveWalls = append(payload.FlowMetrics.ActiveWalls, models.AbsorptionWall{
+				Direction:       "ABSORPTION_SHORT",
+				AbsorptionPrice: bar.High, // Pin bubble to the top wick barrier of the bar
+			})
+
+		} else if telemetry.BiasScore <= -0.50 {
+			// Aggressive sellers slamming bids were completely absorbed by an institutional floor
+			payload.Direction = "ABSORPTION_LONG"
+			payload.FlowMetrics.IsAbsorption = true
+			payload.FlowMetrics.ActiveWalls = append(payload.FlowMetrics.ActiveWalls, models.AbsorptionWall{
+				Direction:       "ABSORPTION_LONG",
+				AbsorptionPrice: bar.Low, // Pin bubble to the bottom wick floor of the bar
+			})
+		}
+	}
+
+	// 3. Fallback to standard trends if no institutional wall was identified
+	if !payload.FlowMetrics.IsAbsorption {
+		if telemetry.BiasScore >= 0.25 {
+			payload.Direction = "BULLISH"
+		} else if telemetry.BiasScore <= -0.25 {
+			payload.Direction = "BEARISH"
+		} else {
+			payload.Direction = "NONE"
+		}
+	}
+
+	return payload
 }

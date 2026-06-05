@@ -1,25 +1,19 @@
 package models
 
-// HqIntelligencePayload is the standardized JSON object nested directly
-// inside your gidh_bars database table and WebSocket payloads.
-type HqIntelligencePayload struct {
-	// Direction labels the core structural state: "BULLISH", "BEARISH", or "NONE"
-	Direction string `json:"direction"`
+type AbsorptionWall struct {
+	Direction       string  `json:"direction"`        // "ABSORPTION_SHORT" or "ABSORPTION_LONG"
+	AbsorptionPrice float64 `json:"absorption_price"` // Exact execution coordinate of the iceberg wall
+}
 
-	// FlowMetrics acts as a flexible data vault for current continuous tape vectors.
+type HqIntelligencePayload struct {
+	Direction   string             `json:"direction"` // "BULLISH", "BEARISH", "NONE", "ABSORPTION_SHORT", "ABSORPTION_LONG"
 	FlowMetrics TapeTelemetryUnits `json:"flow_metrics"`
 }
 
-// TapeTelemetryUnits houses clean, un-spoofable mathematical variables.
 type TapeTelemetryUnits struct {
-	// BiasScore normalizes immediate order-flow consensus between -1.0 and +1.0.
-	// -1.0 = 100% Aggressive Selling Volume (Slamming Bids)
-	// +1.0 = 100% Aggressive Buying Volume (Lifting Offers)
-	BiasScore float64 `json:"bias_score"`
-
-	// VwpDelta tracks the absolute raw Volume-Weighted Price progress over the window.
-	VwpDelta float64 `json:"vwp_delta"`
-
-	// Efficiency evaluates spatial price progress achieved per unit of volume spent.
-	Efficiency float64 `json:"efficiency"`
+	BiasScore    float64          `json:"bias_score"`
+	VwpDelta     float64          `json:"vwp_delta"`
+	Efficiency   float64          `json:"efficiency"`
+	IsAbsorption bool             `json:"is_absorption"`
+	ActiveWalls  []AbsorptionWall `json:"active_walls"` // Fixed canvas bubble storage array
 }
