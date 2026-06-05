@@ -9,33 +9,9 @@ import (
 // 📊 UI METRICS & REPORTING
 // ========================================================================
 
-type VCNGlobalMetrics struct {
-	TotalChargesPaid float64  `json:"total_charges_paid"`
-	TotalRealizedPnL float64  `json:"total_realized_pnl"`
-	ActiveSymbols    []string `json:"active_symbols"`
-	PositionsCount   int      `json:"positions_count"`
-}
-
 type UIContractNotePayload struct {
 	Summary models.ItemizedCharges         `json:"summary"`
 	Trades  []models.BacktestExecutedTrade `json:"trades"`
-}
-
-func (rm *RiskManager) GetGlobalVCNMetrics() VCNGlobalMetrics {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-
-	symbols := make([]string, 0, len(rm.agentPositions))
-	for sym := range rm.agentPositions {
-		symbols = append(symbols, sym)
-	}
-
-	return VCNGlobalMetrics{
-		TotalChargesPaid: rm.dailyChargesPaid, // Accumulated via PredictRoundTripCharges[cite: 6]
-		TotalRealizedPnL: rm.dailyRealized,    // Tracked across all automated actions[cite: 6]
-		ActiveSymbols:    symbols,
-		PositionsCount:   len(symbols),
-	}
 }
 
 func (rm *RiskManager) GetUIContractNote() UIContractNotePayload {

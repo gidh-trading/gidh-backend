@@ -222,6 +222,10 @@ func (bm *BarManager) updateTimeframe(
 
 		bm.analyticsEngine.AnalyzeClose(closedBar)
 
+		if bm.MacroListener != nil {
+			bm.MacroListener.IngestClosedBar(closedBar)
+		}
+
 		if bm.wsHub != nil {
 			bm.wsHub.BroadcastJSON(tick.Raw.StockName+":"+timeframe, map[string]any{
 				"type": "bar",

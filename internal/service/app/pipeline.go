@@ -15,11 +15,12 @@ type Pipeline struct {
 	scoutStage      *pipeline.ScoutStage
 	dbWriter        *writer.DBWriter
 	tickIndexMap    map[uint32]int
-	lastVolRankMap  map[uint32]int // ⚡ Added for velocity tracking
-	lastTickRankMap map[uint32]int // ⚡ Added for velocity tracking
+	lastVolRankMap  map[uint32]int
+	lastTickRankMap map[uint32]int
 	indexMu         sync.Mutex
 	BacktestAgent   interface {
 		ProcessSequentialTick(enrichedTick *models.EnrichedTick)
+		IngestClosedBar(bar *models.Bar)
 	}
 }
 

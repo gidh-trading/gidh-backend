@@ -14,105 +14,78 @@ type PositionRisk struct {
 type ScalperAgent struct {
 	mu              sync.RWMutex
 	activePositions map[string]*PositionRisk
-	latest3mDir     map[string]models.DirectionState // Stores the latest 3-minute bar direction
 }
 
 func NewScalperAgent() *ScalperAgent {
 	return &ScalperAgent{
 		activePositions: make(map[string]*PositionRisk),
-		latest3mDir:     make(map[string]models.DirectionState),
 	}
 }
 
-// ========================================================================
-// 1. TICK ANALYZER (Hunts for Entries)
-// ========================================================================
-func (sa *ScalperAgent) AnalyzeTickForEntry(tick *models.EnrichedTick) (string, bool) {
+// ProcessRollingBar handles closed bar intervals pushed from the pipeline
+func (sa *ScalperAgent) ProcessRollingBar(symbol string, timeframe string, analytics models.BarAnalytics, currentPrice float64) (string, bool) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
-
-	symbol := tick.Raw.StockName
 
 	if sa.activePositions[symbol] == nil {
 		sa.activePositions[symbol] = &PositionRisk{IsActive: false}
 	}
 	pos := sa.activePositions[symbol]
 
-	// If we are already in a trade, ignore ticks. We use 3m bars for exits now.
-	if pos.IsActive {
+	// ------------------------------------------------------------------------
+	// 🛫 ENTRY LOGIC: Evaluated strictly on the 1-Minute Rolling Bar Close
+	// ------------------------------------------------------------------------
+	if !pos.IsActive && timeframe == "1m" {
+		if analytics.VolumeRank >= 6 && analytics.PriceRank >= 6 { // Institutional footprint confirmed[cite: 5]
+			direction := analytics.Direction
+
+			if direction == models.DirStrongBullish || direction == models.DirBullish {
+				pos.IsActive = true
+				pos.Side = "LONG"
+				pos.EntryPrice = currentPrice
+				return "GO_LONG", true
+			}
+
+			if direction == models.DirStrongBearish || direction == models.DirBearish {
+				pos.IsActive = true
+				pos.Side = "SHORT"
+				pos.EntryPrice = currentPrice
+				return "GO_SHORT", true
+			}
+		}
 		return "", false
 	}
 
-	// ENTRY RULE: Institutional footprint detected on 1m rolling window
-	if tick.Enrichment.VolumeRank >= 6 && tick.Enrichment.PriceRank >= 6 {
-		direction := tick.Enrichment.Direction
+	// ------------------------------------------------------------------------
+	// 🛬 STOP LOSS LOGIC: Evaluated strictly on the 3-Minute Rolling Bar Close
+	// ------------------------------------------------------------------------
+	if pos.IsActive && timeframe == "3m" {
+		direction := analytics.Direction
 
-		if direction == models.DirStrongBullish || direction == models.DirBullish {
-			pos.IsActive = true
-			pos.Side = "LONG"
-			pos.EntryPrice = tick.Raw.LastPrice
-			return "GO_LONG", true
+		if pos.Side == "LONG" {
+			// Structural Stop Loss: Trend invalidation on 3m bar
+			if direction == models.DirBearish || direction == models.DirStrongBearish || direction == models.DirBearishAbsorption {
+				pos.IsActive = false
+				return "EXIT_LONG", true
+			}
 		}
 
-		if direction == models.DirStrongBearish || direction == models.DirBearish {
-			pos.IsActive = true
-			pos.Side = "SHORT"
-			pos.EntryPrice = tick.Raw.LastPrice
-			return "GO_SHORT", true
+		if pos.Side == "SHORT" {
+			// Structural Stop Loss: Trend invalidation on 3m bar
+			if direction == models.DirBullish || direction == models.DirStrongBullish || direction == models.DirBullishAbsorption {
+				pos.IsActive = false
+				return "EXIT_SHORT", true
+			}
 		}
 	}
 
 	return "", false
 }
 
-// ========================================================================
-// 2. BAR ANALYZER (Hunts for Exits)
-// ========================================================================
-func (sa *ScalperAgent) UpdateBarDirectionAndCheckExit(symbol string, timeframe string, direction models.DirectionState) (string, bool) {
+func (sa *ScalperAgent) ResetPositionState(symbol string) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
-
-	// We only care about 3-minute bars for trade management
-	if timeframe != "3m" {
-		return "", false
-	}
-
-	// Store the latest 3m direction
-	sa.latest3mDir[symbol] = direction
-
-	pos := sa.activePositions[symbol]
-	if pos == nil || !pos.IsActive {
-		return "", false
-	}
-
-	// EXIT RULE: The 3-minute trend turns against our position
-	if pos.Side == "LONG" {
-		if direction == models.DirStrongBearish || direction == models.DirBearish {
-			pos.IsActive = false
-			return "EXIT_LONG", true
-		}
-	}
-
-	if pos.Side == "SHORT" {
-		if direction == models.DirStrongBullish || direction == models.DirBullish {
-			pos.IsActive = false
-			return "EXIT_SHORT", true
-		}
-	}
-
-	return "", false
-}
-
-func (sa *ScalperAgent) GetPositionState(stock string) *PositionRisk {
-	sa.mu.RLock()
-	defer sa.mu.RUnlock()
-	return sa.activePositions[stock]
-}
-
-func (sa *ScalperAgent) ResetPositionState(stock string) {
-	sa.mu.Lock()
-	defer sa.mu.Unlock()
-	if sa.activePositions[stock] != nil {
-		sa.activePositions[stock].IsActive = false
+	if sa.activePositions[symbol] != nil {
+		sa.activePositions[symbol].IsActive = false
 	}
 }

@@ -169,7 +169,7 @@ func (a *App) initPipeline(
 	ctx context.Context,
 	dnaMap map[uint32]*models.MarketDNA,
 	profilesMap map[uint32]*models.InstrumentProfile,
-	potentialsMatrix models.TargetMatrix, // 🔥 Accept the statistical target profiles
+	potentialsMatrix models.TargetMatrix,
 ) error {
 
 	// 1. Build the fast structural maps for historical parameters
@@ -205,11 +205,14 @@ func (a *App) initPipeline(
 	if a.Config.Mode != "live" {
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
 
-		// 🔥 Instantiate Scalper with window size lookback of 5 + pass our ready-to-use memory matrix map
-		scalperAgent := agent.NewScalperAgent(potentialsMatrix)
+		// Instantiate the simplified rolling bar Scalper Agent
+		scalperAgent := agent.NewScalperAgent()
 		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)
 
-		// Map structural pipelines straight into the synchronous referee loops
+		// 🔗 CONNECT BAR STREAM: Wire the Bar Manager macro outputs to the Bar Processor
+		barManager.MacroListener = backtestMoneyManager
+
+		// 🔗 CONNECT TICK STREAM: Map high-speed ticks for live targets & drawdown tracking
 		a.Pipeline.BacktestAgent = backtestMoneyManager
 		a.RiskManager = backtestMoneyManager
 
