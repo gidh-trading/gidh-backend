@@ -194,7 +194,7 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	wHigh := rHigh
 	wLow := rLow
 
-	trueDirection := es.calculateDirection(wOpen, wHigh, wLow, wClose)
+	trueDirection := es.calculateDirection(wOpen, wHigh, wLow, wClose, volRank, priceRank)
 
 	// Ingest directional classification seamlessly straight onto the structured output sub-object
 	tick.Enrichment = models.TickEnrichment{
@@ -220,8 +220,8 @@ func (es *EnrichmentStage) GetInstrumentProfile(token uint32) (*models.Instrumen
 	return ctx.Profile, true
 }
 
-// calculateDirection applies pure mathematical range positioning to determine aggression state
-func (es *EnrichmentStage) calculateDirection(wOpen, wHigh, wLow, wClose float64) models.DirectionState {
+// calculateDirection applies pure mathematical range positioning and volume blockage checks to determine state
+func (es *EnrichmentStage) calculateDirection(wOpen, wHigh, wLow, wClose float64, volRank, priceRank int) models.DirectionState {
 	windowRange := wHigh - wLow
 
 	// Safety check for fresh tokens or perfectly illiquid static markets
@@ -235,6 +235,22 @@ func (es *EnrichmentStage) calculateDirection(wOpen, wHigh, wLow, wClose float64
 	// Evaluate displacement relative to the window open
 	isHigherThanOpen := wClose > wOpen
 	isLowerThanOpen := wClose < wOpen
+
+	// ========================================================================
+	// 🔥 MICROSTRUCTURAL RE-CLASSIFICATION: DETECT MICRO-ABSORPTION
+	// ========================================================================
+	// If participation volume is at abnormal institutional intensity (P90+)
+	// but price velocity/displacement remains completely capped (PriceRank <= 4)
+	if volRank >= 6 && priceRank <= 4 {
+		// High close position ratio within the rolling matrix = Passive limit buying absorption wall
+		if positionRatio >= 0.50 {
+			return models.DirBullishAbsorption
+		}
+		// Low close position ratio within the rolling matrix = Passive limit selling absorption ceiling
+		if positionRatio < 0.50 {
+			return models.DirBearishAbsorption
+		}
+	}
 
 	switch {
 	// Top 15% of the range + upward displacement = Severe Buying Urgency
@@ -253,7 +269,7 @@ func (es *EnrichmentStage) calculateDirection(wOpen, wHigh, wLow, wClose float64
 	case positionRatio < 0.45 && isLowerThanOpen:
 		return models.DirBearish
 
-	// Everything else is caught in the middle 30% rotational zone = Rotational Churn / Absorption
+	// Normal rotational low-volume balance churn zone
 	default:
 		return models.DirSideways
 	}

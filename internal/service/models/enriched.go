@@ -5,11 +5,13 @@ import "time"
 type DirectionState string
 
 const (
-	DirStrongBullish DirectionState = "STRONG_BULLISH"
-	DirBullish       DirectionState = "BULLISH"
-	DirSideways      DirectionState = "SIDEWAYS"
-	DirBearish       DirectionState = "BEARISH"
-	DirStrongBearish DirectionState = "STRONG_BEARISH"
+	DirStrongBullish     DirectionState = "STRONG_BULLISH"
+	DirBullish           DirectionState = "BULLISH"
+	DirSideways          DirectionState = "SIDEWAYS"
+	DirBearish           DirectionState = "BEARISH"
+	DirStrongBearish     DirectionState = "STRONG_BEARISH"
+	DirBullishAbsorption DirectionState = "BULLISH_ABSORPTION"
+	DirBearishAbsorption DirectionState = "BEARISH_ABSORPTION"
 )
 
 type TickEnrichment struct {

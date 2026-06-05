@@ -1,4 +1,3 @@
-// internal/service/pipeline/bar_analytics.go
 package pipeline
 
 import (
@@ -16,7 +15,7 @@ func NewBarAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA) *BarAnalyticsEng
 	}
 }
 
-// AnalyzeTick now ONLY aggregates continuous volume and tick peak ranks
+// AnalyzeTick updates the candle analytics layer on every single tick update
 func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.EnrichedTick) {
 	// 1. Accumulate PEAK Intensities for cumulative transaction metrics
 	if tick.Enrichment.VolumeRank > bar.Analytics.VolumeRank {
@@ -26,30 +25,22 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 		bar.Analytics.TickRank = tick.Enrichment.TickRank
 	}
 
-	// 2. Overwrite Direction State from the rolling 60s micro-trigger
-	bar.Analytics.Direction = tick.Enrichment.Direction
-
-	// 3. 🔥 LIVE STATE OVERWRITE: Compute macro ranks relative to this specific bar's timeframe DNA
-	bae.computeTimeframeRanks(bar)
+	// 2. Recalculate ranks and macro direction continuously
+	bae.computeMacroTimeframeRanksAndDirection(bar)
 }
 
-// AnalyzeClose applies final safety guards right before archiving the bar segment
 func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
-	if bar.Analytics.Direction == "" {
-		bar.Analytics.Direction = models.DirSideways
-	}
-	// Re-verify calculations one last time to ensure database integrity
-	bae.computeTimeframeRanks(bar)
+	// Final validation right before database writing
+	bae.computeMacroTimeframeRanksAndDirection(bar)
 }
 
-// Private helper to isolate the mathematical DNA interval lookup matrix
-func (bae *BarAnalyticsEngine) computeTimeframeRanks(bar *models.Bar) {
+func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *models.Bar) {
 	token := uint32(bar.InstrumentToken)
 	dna, exists := bae.dnaMap[token]
 	if !exists || dna == nil || dna.IntervalPercentiles == nil {
-		// If baseline DNA is not ready for this stock, default to the neutral median index
 		bar.Analytics.PriceRank = 4
 		bar.Analytics.RangeRank = 4
+		bar.Analytics.Direction = models.DirSideways
 		return
 	}
 
@@ -57,11 +48,15 @@ func (bae *BarAnalyticsEngine) computeTimeframeRanks(bar *models.Bar) {
 	if !hasTimeframeBaseline {
 		bar.Analytics.PriceRank = 4
 		bar.Analytics.RangeRank = 4
+		bar.Analytics.Direction = models.DirSideways
 		return
 	}
 
-	// Track 1: Live Candlestick Absolute Body Displacement (Net Directional Force)
+	// Calculate macro bar boundaries
 	candleBody := math.Abs(bar.Close - bar.Open)
+	candleRange := bar.High - bar.Low
+
+	// Compute Price Rank
 	switch {
 	case candleBody >= baseline.PriceP97:
 		bar.Analytics.PriceRank = 7
@@ -79,8 +74,7 @@ func (bae *BarAnalyticsEngine) computeTimeframeRanks(bar *models.Bar) {
 		bar.Analytics.PriceRank = 1
 	}
 
-	// Track 2: Live Candlestick Total High-to-Low Range (Total Volatility Boundary)
-	candleRange := bar.High - bar.Low
+	// Compute Range Rank
 	switch {
 	case candleRange >= baseline.RangeP97:
 		bar.Analytics.RangeRank = 7
@@ -96,5 +90,42 @@ func (bae *BarAnalyticsEngine) computeTimeframeRanks(bar *models.Bar) {
 		bar.Analytics.RangeRank = 2
 	default:
 		bar.Analytics.RangeRank = 1
+	}
+
+	// ========================================================================
+	// 🔥 MACRO BAR ABSORPTION RESOLUTION ENGINE
+	// ========================================================================
+	if candleRange <= 0 {
+		bar.Analytics.Direction = models.DirSideways
+		return
+	}
+
+	positionRatio := (bar.Close - bar.Low) / candleRange
+	isHigherThanOpen := bar.Close > bar.Open
+	isLowerThanOpen := bar.Close < bar.Open
+
+	// Look at the accumulated peak volume intensity over the course of this bar's life
+	if bar.Analytics.VolumeRank >= 6 && bar.Analytics.PriceRank <= 4 {
+		if positionRatio >= 0.50 {
+			bar.Analytics.Direction = models.DirBullishAbsorption
+			return
+		} else {
+			bar.Analytics.Direction = models.DirBearishAbsorption
+			return
+		}
+	}
+
+	// Normal non-absorption layout routing fallback
+	switch {
+	case positionRatio >= 0.85 && isHigherThanOpen:
+		bar.Analytics.Direction = models.DirStrongBullish
+	case positionRatio > 0.55 && isHigherThanOpen:
+		bar.Analytics.Direction = models.DirBullish
+	case positionRatio <= 0.15 && isLowerThanOpen:
+		bar.Analytics.Direction = models.DirStrongBearish
+	case positionRatio < 0.45 && isLowerThanOpen:
+		bar.Analytics.Direction = models.DirBearish
+	default:
+		bar.Analytics.Direction = models.DirSideways
 	}
 }
