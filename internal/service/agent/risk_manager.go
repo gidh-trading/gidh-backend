@@ -3,13 +3,13 @@ package agent
 import (
 	"context"
 	"fmt"
+	"gidh-backend/pkg/logger"
 	"math"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/order"
-	"gidh-backend/pkg/logger"
 )
 
 type RiskManager struct {
@@ -45,48 +45,6 @@ func NewRiskManager(om order.PositionManager, sa *ScalperAgent) *RiskManager {
 	}
 }
 
-func (rm *RiskManager) GetUIContractNote() UIContractNotePayload {
-	rm.mu.RUnlock() // Safety guard toggle
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-
-	trades := rm.executedTrades
-	if trades == nil {
-		trades = []models.BacktestExecutedTrade{}
-	}
-
-	return UIContractNotePayload{
-		Summary: rm.globalSummary,
-		Trades:  trades,
-	}
-}
-
-func computeItemizedCharges(quantity int, price float64) models.ItemizedCharges {
-	turnoverSingleLeg := float64(quantity) * price
-	totalTurnoverRoundTrip := turnoverSingleLeg * 2.0
-
-	buyBrokerage := math.Min(turnoverSingleLeg*0.0003, 20.0)
-	sellBrokerage := math.Min(turnoverSingleLeg*0.0003, 20.0)
-	totalBrokerage := buyBrokerage + sellBrokerage
-
-	stt := turnoverSingleLeg * 0.00025
-	exchangeFees := totalTurnoverRoundTrip * 0.0000322
-	sebiFees := totalTurnoverRoundTrip * 0.0000001
-	stampDuty := turnoverSingleLeg * 0.00003
-	gst := (totalBrokerage + exchangeFees + sebiFees) * 0.18
-	total := totalBrokerage + stt + exchangeFees + sebiFees + stampDuty + gst
-
-	return models.ItemizedCharges{
-		Brokerage:              buyBrokerage + sellBrokerage,
-		STT:                    stt,
-		StampDuty:              stampDuty,
-		ExchangeTurnoverCharge: exchangeFees,
-		SebiTurnoverCharge:     sebiFees,
-		GST:                    gst,
-		TotalCharges:           total,
-	}
-}
-
 func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) {
 	rm.mu.Lock()
 	if rm.circuitBroken {
@@ -109,6 +67,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		if pos.Side == "SHORT" {
 			multiplier = -1.0
 		}
+		// Asymmetric PnL parsing for SHORT positions: (EntryPrice - CurrentPrice)
 		pos.UnrealizedPnL = (rawTick.LastPrice - pos.AveragePrice) * float64(pos.NetQuantity) * multiplier
 
 		totalNetSessionPnL := rm.dailyRealized + pos.UnrealizedPnL - rm.dailyChargesPaid
@@ -116,14 +75,14 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		if totalNetSessionPnL <= -MaxDailyLossAllowed {
 			logger.Errorf("[Money Manager] True Capital Drawdown Breached (₹%.2f). Freezing Agent.", totalNetSessionPnL)
 			rm.circuitBroken = true
-			rm.executeBrokerOrder(symbol, pos, "Net Session Risk Floor Breach", rawTick.Timestamp)
+			rm.executeBrokerOrder(symbol, pos, "Net Session Risk Floor Breach", rawTick.Timestamp, rawTick.LastPrice)
 			rm.mu.Unlock()
 			return
 		}
 
 		loc, _ := time.LoadLocation("Asia/Kolkata")
 		if rawTick.Timestamp.In(loc).Hour() == 15 && rawTick.Timestamp.In(loc).Minute() >= 15 {
-			rm.executeBrokerOrder(symbol, pos, "Intraday 15:15 Force Square-off", rawTick.Timestamp)
+			rm.executeBrokerOrder(symbol, pos, "Intraday 15:15 Force Square-off", rawTick.Timestamp, rawTick.LastPrice)
 			rm.mu.Unlock()
 			return
 		}
@@ -140,6 +99,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
+	// --- 1. LONG SPREAD LIFECYCLE ---
 	if decision == "GO_LONG" && pos.NetQuantity == 0 {
 		if exitTime, ok := rm.lastExitTime[symbol]; ok {
 			if rawTick.Timestamp.Sub(exitTime) < 5*time.Second {
@@ -155,7 +115,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		predictedFees := PredictRoundTripCharges(allowedQty, rawTick.LastPrice)
 		projectedNetSessionPnL := rm.dailyRealized - (rm.dailyChargesPaid + predictedFees)
 		if projectedNetSessionPnL <= -MaxDailyLossAllowed {
-			logger.Warnf("[Money Manager] Vetoed Scalper Signal for %s. Predicted tax drag (₹%.2f) breaches remaining daily risk wallet.", symbol, predictedFees)
+			logger.Warnf("[Money Manager] Vetoed Long Setup for %s. Tax drag breaches risk limits.", symbol)
 			return
 		}
 
@@ -168,9 +128,8 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			UserEmail:       AgentEmail,
 		}
 
-		logger.Infof("[Money Manager] Approved Setup. Predicted tax buffer: ₹%.2f. Executing BUY for %s", predictedFees, symbol)
+		logger.Infof("[Money Manager] Approved Long Setup. Executing BUY for %s", symbol)
 
-		// ⚡ Itemized Accounting Ledger Updates
 		charges := computeItemizedCharges(allowedQty, rawTick.LastPrice)
 		rm.globalSummary.Brokerage += charges.Brokerage
 		rm.globalSummary.STT += charges.STT
@@ -191,7 +150,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		})
 
 		rm.dailyChargesPaid += predictedFees
-
 		pos.NetQuantity = allowedQty
 		pos.Side = "LONG"
 		pos.AveragePrice = rawTick.LastPrice
@@ -199,19 +157,80 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 		_, _ = rm.orderManager.PlaceOrder(context.Background(), orderReq)
 
-	} else if decision == "EXIT_LONG" && pos.NetQuantity != 0 {
-		rm.executeBrokerOrder(symbol, pos, "Scalper Signal Exit", rawTick.Timestamp)
+	} else if decision == "EXIT_LONG" && pos.NetQuantity != 0 && pos.Side == "LONG" {
+		rm.executeBrokerOrder(symbol, pos, "Scalper Signal Long Exit", rawTick.Timestamp, rawTick.LastPrice)
+
+		// --- 2. SHORT SPREAD LIFECYCLE ---
+	} else if decision == "GO_SHORT" && pos.NetQuantity == 0 {
+		if exitTime, ok := rm.lastExitTime[symbol]; ok {
+			if rawTick.Timestamp.Sub(exitTime) < 5*time.Second {
+				return
+			}
+		}
+
+		allowedQty := int(math.Floor((InitialCapital * MaxLeverage) / rawTick.LastPrice))
+		if allowedQty <= 0 {
+			return
+		}
+
+		predictedFees := PredictRoundTripCharges(allowedQty, rawTick.LastPrice)
+		projectedNetSessionPnL := rm.dailyRealized - (rm.dailyChargesPaid + predictedFees)
+		if projectedNetSessionPnL <= -MaxDailyLossAllowed {
+			logger.Warnf("[Money Manager] Vetoed Short Setup for %s. Tax drag breaches risk limits.", symbol)
+			return
+		}
+
+		orderReq := models.OrderRequest{
+			Symbol:          symbol,
+			Product:         "MIS",
+			TransactionType: "SELL", // Entry execution for short positions is a SELL action
+			OrderType:       "MARKET",
+			Quantity:        allowedQty,
+			UserEmail:       AgentEmail,
+		}
+
+		logger.Infof("[Money Manager] Approved Short Setup. Executing SELL for %s", symbol)
+
+		charges := computeItemizedCharges(allowedQty, rawTick.LastPrice)
+		rm.globalSummary.Brokerage += charges.Brokerage
+		rm.globalSummary.STT += charges.STT
+		rm.globalSummary.StampDuty += charges.StampDuty
+		rm.globalSummary.ExchangeTurnoverCharge += charges.ExchangeTurnoverCharge
+		rm.globalSummary.SebiTurnoverCharge += charges.SebiTurnoverCharge
+		rm.globalSummary.GST += charges.GST
+		rm.globalSummary.TotalCharges += charges.TotalCharges
+
+		rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
+			Timestamp:       rawTick.Timestamp,
+			Side:            "SELL",
+			Symbol:          symbol,
+			Exchange:        "NSE",
+			Quantity:        allowedQty,
+			AveragePrice:    rawTick.LastPrice,
+			AllocatedCharge: charges.TotalCharges,
+		})
+
+		rm.dailyChargesPaid += predictedFees
+		pos.NetQuantity = allowedQty
+		pos.Side = "SHORT"
+		pos.AveragePrice = rawTick.LastPrice
+		pos.UnrealizedPnL = 0.0
+
+		_, _ = rm.orderManager.PlaceOrder(context.Background(), orderReq)
+
+	} else if decision == "EXIT_SHORT" && pos.NetQuantity != 0 && pos.Side == "SHORT" {
+		rm.executeBrokerOrder(symbol, pos, "Scalper Signal Short Exit", rawTick.Timestamp, rawTick.LastPrice)
 	}
 }
 
-func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, reason string, timestamp time.Time) {
+func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, reason string, timestamp time.Time, executionPrice float64) {
 	if pos.NetQuantity == 0 {
 		return
 	}
 
 	exitSide := "SELL"
 	if pos.Side == "SHORT" {
-		exitSide = "BUY"
+		exitSide = "BUY" // Covering a short trade requires executing a BUY order
 	}
 
 	exitReq := models.OrderRequest{
@@ -223,17 +242,16 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 		UserEmail:       AgentEmail,
 	}
 
-	logger.Warnf("[Money Manager] Executing Square-Off for %s. Reason: %s", symbol, reason)
+	logger.Warnf("[Money Manager] Executing Square-Off for %s (%s). Reason: %s", symbol, pos.Side, reason)
 
-	// ⚡ Record Sell/Exit Side itemized fees into our historical logging structure
-	charges := computeItemizedCharges(pos.NetQuantity, pos.AveragePrice)
+	charges := computeItemizedCharges(pos.NetQuantity, executionPrice)
 	rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
 		Timestamp:       timestamp,
 		Side:            exitSide,
 		Symbol:          symbol,
 		Exchange:        "NSE",
 		Quantity:        pos.NetQuantity,
-		AveragePrice:    pos.AveragePrice, // Captures entry-basis baseline calculation context
+		AveragePrice:    executionPrice,
 		AllocatedCharge: charges.TotalCharges,
 	})
 

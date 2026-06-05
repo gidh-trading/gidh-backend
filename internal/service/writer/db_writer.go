@@ -152,9 +152,6 @@ func (w *DBWriter) AddBar(bar models.Bar) {
 }
 
 func (w *DBWriter) PersistOrder(order models.OrderBookEntry) {
-	if w.config.SkipDatabaseInsert {
-		return
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -193,9 +190,6 @@ func (w *DBWriter) PersistOrder(order models.OrderBookEntry) {
 }
 
 func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime time.Time) {
-	if w.config.SkipDatabaseInsert {
-		return
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -296,9 +290,6 @@ func (w *DBWriter) insertDepthBatch(batch []DepthRecord) {
 }
 
 func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
-	if w.config.SkipDatabaseInsert {
-		return
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
