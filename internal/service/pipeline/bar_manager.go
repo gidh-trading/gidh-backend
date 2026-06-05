@@ -11,32 +11,34 @@ import (
 )
 
 type BarManager struct {
-	loc      *time.Location
-	state1m  map[uint32]*candleState
-	state3m  map[uint32]*candleState
-	state5m  map[uint32]*candleState
-	state10m map[uint32]*candleState
-	state15m map[uint32]*candleState
-	profiles map[uint32]*models.InstrumentProfile
-	dnaMap   map[uint32]*models.MarketDNA
-	mu       sync.RWMutex
-	writer   *writer.DBWriter
-	wsHub    *ws.Hub
+	loc             *time.Location
+	state1m         map[uint32]*candleState
+	state3m         map[uint32]*candleState
+	state5m         map[uint32]*candleState
+	state10m        map[uint32]*candleState
+	state15m        map[uint32]*candleState
+	profiles        map[uint32]*models.InstrumentProfile
+	dnaMap          map[uint32]*models.MarketDNA
+	mu              sync.RWMutex
+	writer          *writer.DBWriter
+	wsHub           *ws.Hub
+	analyticsEngine *BarAnalyticsEngine
 }
 
 func NewBarManager(w *writer.DBWriter, hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile, rawDnaMap map[uint32]*models.MarketDNA) *BarManager {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 	return &BarManager{
-		loc:      loc,
-		state1m:  make(map[uint32]*candleState),
-		state3m:  make(map[uint32]*candleState),
-		state5m:  make(map[uint32]*candleState),
-		state10m: make(map[uint32]*candleState),
-		state15m: make(map[uint32]*candleState),
-		profiles: profiles,
-		dnaMap:   rawDnaMap,
-		writer:   w,
-		wsHub:    hub,
+		loc:             loc,
+		state1m:         make(map[uint32]*candleState),
+		state3m:         make(map[uint32]*candleState),
+		state5m:         make(map[uint32]*candleState),
+		state10m:        make(map[uint32]*candleState),
+		state15m:        make(map[uint32]*candleState),
+		profiles:        profiles,
+		dnaMap:          rawDnaMap,
+		writer:          w,
+		wsHub:           hub,
+		analyticsEngine: NewBarAnalyticsEngine(),
 	}
 }
 
@@ -108,6 +110,8 @@ func (bm *BarManager) updateTimeframe(
 	if cs.bar.Timestamp.Before(candleStart) {
 		closedBar := cs.bar
 
+		bm.analyticsEngine.AnalyzeClose(closedBar)
+
 		if bm.wsHub != nil {
 			bm.wsHub.BroadcastJSON(tick.Raw.StockName+":"+timeframe, map[string]any{
 				"type": "bar",
@@ -123,6 +127,7 @@ func (bm *BarManager) updateTimeframe(
 	}
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)
+	bm.analyticsEngine.AnalyzeTick(cs.bar, tick)
 }
 
 func (bm *BarManager) ClearState() {
