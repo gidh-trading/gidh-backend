@@ -34,9 +34,6 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     PRIMARY KEY (timestamp, instrument_token, timeframe)
 );
 
-ALTER TABLE gidh_bars ADD COLUMN IF NOT EXISTS hq_intelligence JSONB DEFAULT '{}';
-
-
 
 -- Convert to a TimescaleDB hypertable for optimized time-series chunking
 SELECT create_hypertable('gidh_bars', 'timestamp', if_not_exists => TRUE);
@@ -47,9 +44,6 @@ CREATE INDEX IF NOT EXISTS idx_gidh_bars_token_time
 
 CREATE INDEX IF NOT EXISTS idx_gidh_bars_timeframe
     ON gidh_bars (timeframe, timestamp DESC);
-
-CREATE INDEX IF NOT EXISTS idx_gidh_bars_heatmap_mass
-    ON gidh_bars (((hq_intelligence->>'continuous_score')::DOUBLE PRECISION), timestamp DESC);
 
 -- Performance Index: High-speed anomaly lookup for filtering bars with P90+ Volume Bursts
 CREATE INDEX IF NOT EXISTS idx_gidh_bars_peak_vol

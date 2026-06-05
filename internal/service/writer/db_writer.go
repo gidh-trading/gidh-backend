@@ -14,12 +14,11 @@ import (
 )
 
 type DBWriter struct {
-	pool         *pgxpool.Pool
-	config       *DBWriterConfig
-	tickBatch    []models.TickData
-	depthBatch   []DepthRecord
-	barBatch     []models.Bar
-	featureBatch []FeatureRecord
+	pool       *pgxpool.Pool
+	config     *DBWriterConfig
+	tickBatch  []models.TickData
+	depthBatch []DepthRecord
+	barBatch   []models.Bar
 
 	batchSize     int
 	flushInterval time.Duration
@@ -71,7 +70,6 @@ func NewDBWriter(cfg *DBWriterConfig) *DBWriter {
 		tickBatch:     make([]models.TickData, 0, cfg.BatchSize),
 		depthBatch:    make([]DepthRecord, 0, cfg.BatchSize),
 		barBatch:      make([]models.Bar, 0, cfg.BatchSize),
-		featureBatch:  make([]FeatureRecord, 0, cfg.BatchSize),
 		batchSize:     cfg.BatchSize,
 		flushInterval: cfg.FlushInterval,
 		ctx:           ctx,
@@ -153,8 +151,6 @@ func (w *DBWriter) AddBar(bar models.Bar) {
 	}
 }
 
-// PersistOrder commits an entry tracking attempt lifecycle log directly to storage.
-// It is fully decoupled from trailing stop-loss or take-profit threshold modifications.
 func (w *DBWriter) PersistOrder(order models.OrderBookEntry) {
 	if w.config.SkipDatabaseInsert {
 		return
@@ -196,8 +192,6 @@ func (w *DBWriter) PersistOrder(order models.OrderBookEntry) {
 	}
 }
 
-// PersistPositionSnapshot commits manual or market-triggered risk boundary limits to persistent records.
-// This completely updates coordinates, safely archiving 0.00 clear values on absolute liquidations.
 func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime time.Time) {
 	if w.config.SkipDatabaseInsert {
 		return
@@ -233,69 +227,6 @@ func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime tim
 
 	if err != nil {
 		logger.Errorf("DB Error persisting risk boundary snapshot for token %s: %v", pos.Symbol, err)
-	}
-}
-
-func (w *DBWriter) AddHistoricalFeature(rec FeatureRecord) {
-	w.mu.Lock()
-	w.featureBatch = append(w.featureBatch, rec)
-
-	if len(w.featureBatch) >= w.batchSize {
-		batch := w.featureBatch
-		w.featureBatch = make([]FeatureRecord, 0, w.batchSize)
-		w.mu.Unlock()
-
-		w.wg.Add(1)
-		go func() {
-			defer w.wg.Done()
-			w.insertFeaturesBatch(batch)
-		}()
-	} else {
-		w.mu.Unlock()
-	}
-}
-
-func (w *DBWriter) flushTimer() {
-	defer w.wg.Done()
-	ticker := time.NewTicker(w.flushInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ticker.C:
-			w.mu.Lock()
-			tBatch := w.tickBatch
-			dBatch := w.depthBatch
-			bBatch := w.barBatch
-			fBatch := w.featureBatch
-
-			w.tickBatch = make([]models.TickData, 0, w.batchSize)
-			w.depthBatch = make([]DepthRecord, 0, w.batchSize)
-			w.barBatch = make([]models.Bar, 0, w.batchSize)
-			w.featureBatch = make([]FeatureRecord, 0, w.batchSize)
-			w.mu.Unlock()
-
-			if len(tBatch) > 0 {
-				w.wg.Add(1)
-				go func() { defer w.wg.Done(); w.insertTicksBatch(tBatch) }()
-			}
-			if len(dBatch) > 0 {
-				w.wg.Add(1)
-				go func() { defer w.wg.Done(); w.insertDepthBatch(dBatch) }()
-			}
-			if len(bBatch) > 0 {
-				w.wg.Add(1)
-				go func() { defer w.wg.Done(); w.insertBarsBatch(bBatch) }()
-			}
-
-			if len(fBatch) > 0 {
-				w.wg.Add(1)
-				go func() { defer w.wg.Done(); w.insertFeaturesBatch(fBatch) }()
-			}
-
-		case <-w.ctx.Done():
-			return
-		}
 	}
 }
 
@@ -380,7 +311,6 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 			"open", "high", "low", "close", "volume", "tick_count",
 			"vwap", "poc", "vah", "val", "total_buy_qty", "total_sell_qty", "change_pct",
 			"volume_rank", "tick_rank", "price_rank", "range_rank",
-			"hq_intelligence", // 🥥 Added to support nested institutional metrics serialization
 		},
 		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
 			b := batch[i]
@@ -391,7 +321,6 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 				b.Open, b.High, b.Low, b.Close, b.Volume, b.TickCount,
 				b.VWAP, b.POC, b.VAH, b.VAL, b.TotalBuyQty, b.TotalSellQty, b.ChangePct,
 				b.VolumeRank, b.TickRank, b.PriceRank, b.RangeRank,
-				b.HqIntelligence, // 🥥 Ingest extracted pull-model state snapshots on batch flushing
 			}, nil
 		}),
 	)
@@ -403,31 +332,6 @@ func (w *DBWriter) insertBarsBatch(batch []models.Bar) {
 	}
 }
 
-func (w *DBWriter) insertFeaturesBatch(batch []FeatureRecord) {
-	if w.config.SkipDatabaseInsert {
-		return
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	copyCount, err := w.pool.CopyFrom(
-		ctx,
-		pgx.Identifier{"gidh_ml_core", "historical_features"},
-		[]string{"timestamp", "stock_name", "tick_index", "last_price", "atr_14", "observation_vector"},
-		pgx.CopyFromSlice(len(batch), func(i int) ([]any, error) {
-			r := batch[i]
-			return []any{r.Timestamp, r.StockName, r.TickIndex, r.LastPrice, r.ATR14, r.Vector}, nil
-		}),
-	)
-
-	if err != nil {
-		logger.Errorf("Failed to mass insert machine learning feature batch: %v", err)
-	} else {
-		logger.Debugf("Successfully inserted %d compressed ML vector records (background)", copyCount)
-	}
-}
-
 func (w *DBWriter) Close() {
 	logger.Info("Closing DB writer, flushing remaining data...")
 	w.cancel()
@@ -436,7 +340,6 @@ func (w *DBWriter) Close() {
 	tBatch := w.tickBatch
 	dBatch := w.depthBatch
 	bBatch := w.barBatch
-	fBatch := w.featureBatch
 	w.mu.Unlock()
 
 	if len(tBatch) > 0 {
@@ -449,10 +352,43 @@ func (w *DBWriter) Close() {
 		w.insertBarsBatch(bBatch)
 	}
 
-	if len(fBatch) > 0 {
-		w.insertFeaturesBatch(fBatch)
-	}
-
 	w.wg.Wait()
 	logger.Info("DB writer closed")
+}
+
+func (w *DBWriter) flushTimer() {
+	defer w.wg.Done()
+	ticker := time.NewTicker(w.flushInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			w.mu.Lock()
+			tBatch := w.tickBatch
+			dBatch := w.depthBatch
+			bBatch := w.barBatch
+
+			w.tickBatch = make([]models.TickData, 0, w.batchSize)
+			w.depthBatch = make([]DepthRecord, 0, w.batchSize)
+			w.barBatch = make([]models.Bar, 0, w.batchSize)
+			w.mu.Unlock()
+
+			if len(tBatch) > 0 {
+				w.wg.Add(1)
+				go func() { defer w.wg.Done(); w.insertTicksBatch(tBatch) }()
+			}
+			if len(dBatch) > 0 {
+				w.wg.Add(1)
+				go func() { defer w.wg.Done(); w.insertDepthBatch(dBatch) }()
+			}
+			if len(bBatch) > 0 {
+				w.wg.Add(1)
+				go func() { defer w.wg.Done(); w.insertBarsBatch(bBatch) }()
+			}
+
+		case <-w.ctx.Done():
+			return
+		}
+	}
 }

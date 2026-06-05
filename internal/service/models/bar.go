@@ -33,7 +33,5 @@ type Bar struct {
 	PriceRank  int `json:"price_rank"`
 	RangeRank  int `json:"range_rank"`
 
-	HqIntelligence interface{} `json:"hq_intelligence"`
-
 	Ticks []TickData `json:"-"`
 }

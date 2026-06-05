@@ -19,7 +19,6 @@ type BarManager struct {
 	state15m map[uint32]*candleState
 	profiles map[uint32]*models.InstrumentProfile
 	dnaMap   map[uint32]*models.MarketDNA
-	hqEngine *Headquarters
 	mu       sync.RWMutex
 	writer   *writer.DBWriter
 	wsHub    *ws.Hub
@@ -124,12 +123,6 @@ func (bm *BarManager) updateTimeframe(
 	}
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)
-}
-
-func (bm *BarManager) SetHQEngine(hq *Headquarters) {
-	bm.mu.Lock()
-	defer bm.mu.Unlock()
-	bm.hqEngine = hq
 }
 
 func (bm *BarManager) ClearState() {

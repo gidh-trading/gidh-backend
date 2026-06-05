@@ -64,6 +64,7 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	price := tick.Raw.LastPrice
 	volRank := tick.Enrichment.VolumeRank
 	tickRank := tick.Enrichment.TickRank
+	priceRank := tick.Enrichment.PriceRank // Extraction of normalized price velocity
 
 	// 🟢 RULE 1: FILTER PACKET CHATTER NOISE
 	if volRank == 0 && tickRank == 0 {
@@ -83,6 +84,13 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	}
 	cached, hasCached := s.profileCache[token]
 	s.mu.Unlock()
+
+	// ==========================================================
+	// ⚡ THE SPARK GATEKEEPER CONDITION
+	// ==========================================================
+	// Only validate and process triggers if price movement is actively crossing
+	// or exceeding the P50 median threshold context.
+	hasSubstantialPriceMove := priceRank >= 4
 
 	now := time.Now()
 	var currentTrigger string
@@ -108,15 +116,15 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	// ==========================================================
 	if hasActiveAlert {
 		if state.TriggerType == "VOLUME_SPIKE" {
-			if volRank >= 6 || tickRank >= 6 {
+			if (volRank >= 6 || tickRank >= 6) && hasSubstantialPriceMove {
 				currentTrigger = "VOLUME_SPIKE"
 			}
 		} else if state.TriggerType == "VAH_BREACH" {
-			if hasCached && price >= cached.VAH {
+			if hasCached && price >= cached.VAH && hasSubstantialPriceMove {
 				currentTrigger = "VAH_BREACH"
 			}
 		} else if state.TriggerType == "VAL_BREACH" {
-			if hasCached && price <= cached.VAL {
+			if hasCached && price <= cached.VAL && hasSubstantialPriceMove {
 				currentTrigger = "VAL_BREACH"
 			}
 		}
@@ -125,7 +133,7 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	// ==========================================================
 	// 2. FRESH ANOMALY SENSING (Only processed if currently idle)
 	// ==========================================================
-	if currentTrigger == "" && !hasActiveAlert {
+	if currentTrigger == "" && !hasActiveAlert && hasSubstantialPriceMove {
 		if volRank >= 6 || tickRank >= 6 { // Syncs to P97 linear scale boundary
 			currentTrigger = "VOLUME_SPIKE"
 		} else if isProfileMature && hasCached {
@@ -186,7 +194,6 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	return nil
 }
 
-// 🟢 THE FIX: Aggregates history logs to deliver EXACTLY ONE matrix row per stock on load
 func (s *ScoutStage) GetAllAlertHistory() []ScoutHistoricalSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -197,7 +204,6 @@ func (s *ScoutStage) GetAllAlertHistory() []ScoutHistoricalSnapshot {
 		if len(snapshots) == 0 {
 			continue
 		}
-		// Pull only the single latest chronological state marker row for this instrument
 		dynamicMatrix = append(dynamicMatrix, snapshots[len(snapshots)-1])
 	}
 
