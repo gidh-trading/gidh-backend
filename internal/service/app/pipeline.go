@@ -18,6 +18,9 @@ type Pipeline struct {
 	lastVolRankMap  map[uint32]int // ⚡ Added for velocity tracking
 	lastTickRankMap map[uint32]int // ⚡ Added for velocity tracking
 	indexMu         sync.Mutex
+	BacktestAgent   interface {
+		ProcessSequentialTick(enrichedTick *models.EnrichedTick)
+	}
 }
 
 func NewPipeline(
@@ -78,6 +81,11 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		if err := p.scoutStage.Process(enrichedTick); err != nil {
 			logger.Errorf("Pipeline Error: Scout observer engine stage failure: %v", err)
 		}
+	}
+
+	// 6. Synchronous Agent Execution
+	if p.BacktestAgent != nil {
+		p.BacktestAgent.ProcessSequentialTick(enrichedTick)
 	}
 
 	return nil

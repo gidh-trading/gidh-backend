@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"gidh-backend/internal/service/agent"
 	"gidh-backend/internal/service/order"
 	"net/http"
 	"sync"
@@ -182,6 +183,21 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 
 	// 6. Assemble the streamlined Execution Pipeline Stage
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barManager, scoutStage, a.DBWriter)
+
+	// ⚡ INTEGRATION BOUNDARY: Guard agent execution to operate STRICTLY in backtesting
+	if a.Config.Mode != "live" {
+		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
+
+		scalperAgent := agent.NewScalperAgent()
+		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)
+
+		// Map structural pipelines straight into the synchronous referee loops
+		a.Pipeline.BacktestAgent = backtestMoneyManager
+		barManager.MacroListener = backtestMoneyManager
+	} else {
+		logger.Infof("[System Initialization] Operating in %s mode. Algorithmic Agent deactivated.", a.Config.Mode)
+	}
+
 	a.activePipe = a.Pipeline
 
 	return nil
