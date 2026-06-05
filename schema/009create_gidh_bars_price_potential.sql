@@ -3,7 +3,7 @@ DROP TABLE IF EXISTS public.gidh_bars_price_potential CASCADE;
 CREATE TABLE public.gidh_bars_price_potential
 (
     stock_name TEXT             NOT NULL,
-    timeframe  TEXT             NOT NULL, -- 🎯 Replaced 'interval' with 'timeframe' to fix SQL keyword conflict
+    timeframe  TEXT             NOT NULL,
     p97        DOUBLE PRECISION NOT NULL DEFAULT 0,
     p90        DOUBLE PRECISION NOT NULL DEFAULT 0,
     p75        DOUBLE PRECISION NOT NULL DEFAULT 0,
@@ -27,7 +27,7 @@ BEGIN
     INSERT INTO public.gidh_bars_price_potential (stock_name, timeframe, p97, p90, p75, p50, p25, updated_at)
     WITH last_15_days_data AS (SELECT stock_name,
                                       timeframe,
-                                      CASE price_rank
+                                      CASE (analytics ->> 'price_rank')::integer -- 🛠️ Fixed: Querying price_rank from analytics JSONB
                                           WHEN 7 THEN 'p97'
                                           WHEN 6 THEN 'p90'
                                           WHEN 5 THEN 'p75'
