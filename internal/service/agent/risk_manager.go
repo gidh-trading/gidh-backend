@@ -200,3 +200,9 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 
 	_, _ = rm.orderManager.PlaceOrder(context.Background(), exitReq)
 }
+
+func (rm *RiskManager) IngestClosedBar(bar *models.Bar) {
+	if rm.scalper != nil {
+		rm.scalper.IngestClosedBar(bar)
+	}
+}

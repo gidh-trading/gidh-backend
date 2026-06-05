@@ -71,7 +71,7 @@ func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positio
 	if positionSide == "FLAT" || positionSide == "" {
 
 		// ⚡ Setup Check: Did the last closed 1m candle print high institutional volume?
-		isHighVolumeAbnormal := bar1m.Analytics.VolumeRank >= 7
+		isHighVolumeAbnormal := bar1m.Analytics.VolumeRank >= 6
 
 		// ⚡ Setup Check: Is the candle body length showing strong directional velocity expansion?
 		isPriceStretching := bar1m.Analytics.PriceRank >= 6
