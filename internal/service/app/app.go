@@ -65,8 +65,8 @@ func NewApp(cfg *config.Config) (*App, error) {
 
 	if cfg.Mode == "live" {
 		app.initLiveState(ctx)
-		dnaMap, profilesMap, potentialsMatrix := app.loadMarketData(ctx, time.Now())
-		if err := app.initPipeline(ctx, dnaMap, profilesMap, potentialsMatrix); err != nil {
+		dnaMap, advMap := app.loadMarketData(ctx, time.Now())
+		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
 			return nil, err
 		}
 		if err := app.initStreamManager(); err != nil {
@@ -115,14 +115,10 @@ func (a *App) initOrderManager() {
 	}
 }
 
-// loadMarketData fetches instrument definitions, DNA baselines, Price Potential and execution profiles for a target date.
-func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (
-	map[uint32]*models.MarketDNA,
-	map[uint32]*models.InstrumentProfile,
-	models.TargetMatrix, // 🔥 Added matrix map signature
-) {
+// loadMarketData fetches instrument definitions, DNA baselines, and execution profiles for a target date.
+func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]*models.InstrumentProfile) {
 	if a.pool == nil {
-		return make(map[uint32]*models.MarketDNA), make(map[uint32]*models.InstrumentProfile), make(models.TargetMatrix)
+		return make(map[uint32]*models.MarketDNA), make(map[uint32]*models.InstrumentProfile)
 	}
 
 	// 1. Load DNA Baselines
@@ -140,18 +136,10 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (
 		a.instrumentList, _ = instReader.FetchBacktestConfigs(ctx)
 	}
 
-	// 3. Fetch full instrument profile parameters (bucket_size, adv_30d) from DB
 	profilesMap, err := instReader.FetchInstrumentProfiles(ctx)
 	if err != nil {
 		logger.Errorf("FAILED TO LOAD INSTRUMENT PROFILES: %v", err)
 		profilesMap = make(map[uint32]*models.InstrumentProfile)
-	}
-
-	// 4. 🔥 Fetch the complete historical price potential matrix map
-	potentialsMatrix, err := instReader.FetchAllPricePotentials(ctx)
-	if err != nil {
-		logger.Errorf("FAILED TO LOAD PRICE POTENTIAL MATRIX MAP: %v", err)
-		potentialsMatrix = make(models.TargetMatrix)
 	}
 
 	// Rebuild fast token internal lookups
@@ -162,15 +150,10 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (
 		a.nameToToken[c.Name] = c.Token
 	}
 
-	return dnaMap, profilesMap, potentialsMatrix
+	return dnaMap, profilesMap
 }
 
-func (a *App) initPipeline(
-	ctx context.Context,
-	dnaMap map[uint32]*models.MarketDNA,
-	profilesMap map[uint32]*models.InstrumentProfile,
-	potentialsMatrix models.TargetMatrix,
-) error {
+func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, profilesMap map[uint32]*models.InstrumentProfile) error {
 
 	// 1. Build the fast structural maps for historical parameters
 	advMap := make(map[uint32]float64)
@@ -181,7 +164,7 @@ func (a *App) initPipeline(
 		bucketSizeMap[token] = prof.BucketSize
 	}
 
-	// 2. Initialize the Volume Profile Stage
+	// 2. Initialize the Volume Profile Stage (it maps wsHub internally for its independent broadcasts)
 	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, bucketSizeMap, a.pool, a.wsHub)
 
 	if a.Config.Mode == "live" {
@@ -205,15 +188,12 @@ func (a *App) initPipeline(
 	if a.Config.Mode != "live" {
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
 
-		// Instantiate the simplified rolling bar Scalper Agent
 		scalperAgent := agent.NewScalperAgent()
 		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)
 
-		// 🔗 CONNECT BAR STREAM: Wire the Bar Manager macro outputs to the Bar Processor
-		barManager.MacroListener = backtestMoneyManager
-
-		// 🔗 CONNECT TICK STREAM: Map high-speed ticks for live targets & drawdown tracking
+		// Map structural pipelines straight into the synchronous referee loops
 		a.Pipeline.BacktestAgent = backtestMoneyManager
+		barManager.MacroListener = backtestMoneyManager
 		a.RiskManager = backtestMoneyManager
 
 	} else {

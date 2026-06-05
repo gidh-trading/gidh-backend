@@ -222,10 +222,6 @@ func (bm *BarManager) updateTimeframe(
 
 		bm.analyticsEngine.AnalyzeClose(closedBar)
 
-		if bm.MacroListener != nil {
-			bm.MacroListener.IngestClosedBar(closedBar)
-		}
-
 		if bm.wsHub != nil {
 			bm.wsHub.BroadcastJSON(tick.Raw.StockName+":"+timeframe, map[string]any{
 				"type": "bar",
@@ -235,6 +231,10 @@ func (bm *BarManager) updateTimeframe(
 
 		if bm.writer != nil {
 			bm.writer.AddBar(*closedBar)
+		}
+
+		if bm.MacroListener != nil {
+			bm.MacroListener.IngestClosedBar(closedBar)
 		}
 
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)

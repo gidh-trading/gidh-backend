@@ -1,91 +1,114 @@
 package agent
 
 import (
-	"gidh-backend/internal/service/models"
 	"sync"
-)
+	"time"
 
-type PositionRisk struct {
-	IsActive   bool
-	Side       string // "LONG" or "SHORT"
-	EntryPrice float64
-}
+	"gidh-backend/internal/service/models"
+)
 
 type ScalperAgent struct {
 	mu              sync.RWMutex
-	activePositions map[string]*PositionRisk
+	enrichedBuffers map[string][]*models.EnrichedTick
+	macroHorizons   map[string]map[string]*models.Bar
 }
 
 func NewScalperAgent() *ScalperAgent {
 	return &ScalperAgent{
-		activePositions: make(map[string]*PositionRisk),
+		enrichedBuffers: make(map[string][]*models.EnrichedTick),
+		macroHorizons:   make(map[string]map[string]*models.Bar),
 	}
 }
 
-// ProcessRollingBar handles closed bar intervals pushed from the pipeline
-func (sa *ScalperAgent) ProcessRollingBar(symbol string, timeframe string, analytics models.BarAnalytics, currentPrice float64) (string, bool) {
+func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
 
-	if sa.activePositions[symbol] == nil {
-		sa.activePositions[symbol] = &PositionRisk{IsActive: false}
+	if sa.macroHorizons[bar.StockName] == nil {
+		sa.macroHorizons[bar.StockName] = make(map[string]*models.Bar)
 	}
-	pos := sa.activePositions[symbol]
+	sa.macroHorizons[bar.StockName][bar.Timeframe] = bar
+}
 
-	// ------------------------------------------------------------------------
-	// 🛫 ENTRY LOGIC: Evaluated strictly on the 1-Minute Rolling Bar Close
-	// ------------------------------------------------------------------------
-	if !pos.IsActive && timeframe == "1m" {
-		if analytics.VolumeRank >= 6 && analytics.PriceRank >= 6 { // Institutional footprint confirmed[cite: 5]
-			direction := analytics.Direction
+func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positionSide string) (string, bool) {
+	raw := enrichedTick.Raw
+	symbol := raw.StockName
 
-			if direction == models.DirStrongBullish || direction == models.DirBullish {
-				pos.IsActive = true
-				pos.Side = "LONG"
-				pos.EntryPrice = currentPrice
-				return "GO_LONG", true
-			}
+	sa.mu.Lock()
+	// 1. Engineering: Maintain sliding rolling history of enriched ticks
+	buffer := sa.enrichedBuffers[symbol]
+	cutoff := raw.Timestamp.Add(-60 * time.Second)
 
-			if direction == models.DirStrongBearish || direction == models.DirBearish {
-				pos.IsActive = true
-				pos.Side = "SHORT"
-				pos.EntryPrice = currentPrice
-				return "GO_SHORT", true
-			}
+	validIdx := 0
+	for i, t := range buffer {
+		if t.Raw.Timestamp.After(cutoff) {
+			validIdx = i
+			break
 		}
+	}
+	if len(buffer) > 0 && buffer[validIdx].Raw.Timestamp.After(cutoff) {
+		buffer = buffer[validIdx:]
+	} else if len(buffer) > 0 {
+		buffer = []*models.EnrichedTick{}
+	}
+	buffer = append(buffer, enrichedTick)
+	sa.enrichedBuffers[symbol] = buffer
+
+	// 2. Analytics: Access closed multi-timeframe horizons
+	macroMap, exists := sa.macroHorizons[symbol]
+	if !exists || macroMap == nil {
+		sa.mu.Unlock()
 		return "", false
 	}
+	bar1m, ok := macroMap["1m"]
+	if !ok || bar1m == nil {
+		sa.mu.Unlock()
+		return "", false
+	}
+	sa.mu.Unlock()
 
-	// ------------------------------------------------------------------------
-	// 🛬 STOP LOSS LOGIC: Evaluated strictly on the 3-Minute Rolling Bar Close
-	// ------------------------------------------------------------------------
-	if pos.IsActive && timeframe == "3m" {
-		direction := analytics.Direction
+	// 3. Strategy Analytics: Synchronized Twin Percentile Ribbon Tracking
+	if positionSide == "FLAT" || positionSide == "" {
 
-		if pos.Side == "LONG" {
-			// Structural Stop Loss: Trend invalidation on 3m bar
-			if direction == models.DirBearish || direction == models.DirStrongBearish || direction == models.DirBearishAbsorption {
-				pos.IsActive = false
-				return "EXIT_LONG", true
+		// ⚡ Setup Check: Did the last closed 1m candle print high institutional volume?
+		isHighVolumeAbnormal := bar1m.Analytics.VolumeRank >= 7
+
+		// ⚡ Setup Check: Is the candle body length showing strong directional velocity expansion?
+		isPriceStretching := bar1m.Analytics.PriceRank >= 6
+
+		if isHighVolumeAbnormal && isPriceStretching {
+
+			// --- EVALUATE LONG BREAKOUT SETUP ---
+			isBullishConviction := bar1m.Analytics.Direction == models.DirStrongBullish || bar1m.Analytics.Direction == models.DirBullish
+			if isBullishConviction {
+				// Immediate Micro Check: Price is stable/rising above the breakout zone close
+				if raw.LastPrice >= bar1m.Close {
+					return "GO_LONG", true
+				}
+			}
+
+			// --- EVALUATE SHORT BREAKDOWN SETUP ---
+			isBearishConviction := bar1m.Analytics.Direction == models.DirStrongBearish || bar1m.Analytics.Direction == models.DirBearish
+			if isBearishConviction {
+				// Immediate Micro Check: Price is stable/falling below the breakdown zone close
+				if raw.LastPrice <= bar1m.Close {
+					return "GO_SHORT", true
+				}
 			}
 		}
 
-		if pos.Side == "SHORT" {
-			// Structural Stop Loss: Trend invalidation on 3m bar
-			if direction == models.DirBullish || direction == models.DirStrongBullish || direction == models.DirBullishAbsorption {
-				pos.IsActive = false
-				return "EXIT_SHORT", true
-			}
+	} else if positionSide == "LONG" {
+		// Technical Exit for Long: Closed bar signals upside structural fatigue, wall block, or deep sell reversal
+		if bar1m.Analytics.Direction == models.DirBearishAbsorption || bar1m.Analytics.Direction == models.DirStrongBearish || bar1m.Analytics.Direction == models.DirBearish {
+			return "EXIT_LONG", true
+		}
+
+	} else if positionSide == "SHORT" {
+		// Technical Exit for Short: Closed bar signals downside floor absorption, or aggressive buy reversal
+		if bar1m.Analytics.Direction == models.DirBullishAbsorption || bar1m.Analytics.Direction == models.DirStrongBullish || bar1m.Analytics.Direction == models.DirBullish {
+			return "EXIT_SHORT", true
 		}
 	}
 
 	return "", false
-}
-
-func (sa *ScalperAgent) ResetPositionState(symbol string) {
-	sa.mu.Lock()
-	defer sa.mu.Unlock()
-	if sa.activePositions[symbol] != nil {
-		sa.activePositions[symbol].IsActive = false
-	}
 }
