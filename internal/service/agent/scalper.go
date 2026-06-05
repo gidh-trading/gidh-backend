@@ -8,7 +8,7 @@ import (
 )
 
 type ScalperAgent struct {
-	mu              sync.RWMutex // ⚡ Added: Protect buffers from cross-talk between stock workers
+	mu              sync.RWMutex
 	enrichedBuffers map[string][]*models.EnrichedTick
 	macroHorizons   map[string]map[string]*models.Bar
 }
@@ -20,7 +20,6 @@ func NewScalperAgent() *ScalperAgent {
 	}
 }
 
-// IngestClosedBar caches timeframe intervals when a candle finishes compiling
 func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
@@ -31,13 +30,12 @@ func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
 	sa.macroHorizons[bar.StockName][bar.Timeframe] = bar
 }
 
-// AnalyzeMarket evaluates the 60s micro ENRICHED tick window and macro bars to return strategic directions
 func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positionSide string) (string, bool) {
 	raw := enrichedTick.Raw
 	symbol := raw.StockName
 
-	sa.mu.Lock() // ⚡ Lock writing state modifications exclusively
-	// 1. Engineering: Maintain sliding 60-second rolling buffer of ENRICHED ticks
+	sa.mu.Lock()
+	// 1. Engineering: Maintain sliding rolling history of enriched ticks
 	buffer := sa.enrichedBuffers[symbol]
 	cutoff := raw.Timestamp.Add(-60 * time.Second)
 
@@ -56,7 +54,7 @@ func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positio
 	buffer = append(buffer, enrichedTick)
 	sa.enrichedBuffers[symbol] = buffer
 
-	// 2. Analytics: Load finalized macro bar boundaries for context
+	// 2. Analytics: Access closed multi-timeframe horizons
 	macroMap, exists := sa.macroHorizons[symbol]
 	if !exists || macroMap == nil {
 		sa.mu.Unlock()
@@ -67,16 +65,48 @@ func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positio
 		sa.mu.Unlock()
 		return "", false
 	}
-	sa.mu.Unlock() // ⚡ Unlock state variables so other workers can execute
+	sa.mu.Unlock()
 
-	// 3. Strategy Logic: Analyze micro indicators vs macro structure
+	// 3. Strategy Analytics: Synchronized Twin Percentile Ribbon Tracking
 	if positionSide == "FLAT" || positionSide == "" {
-		if bar1m.Analytics.VolumeRank >= 6 && len(buffer) > 15 {
-			return "GO_LONG", true
+
+		// ⚡ Setup Check: Did the last closed 1m candle print high institutional volume?
+		isHighVolumeAbnormal := bar1m.Analytics.VolumeRank >= 7
+
+		// ⚡ Setup Check: Is the candle body length showing strong directional velocity expansion?
+		isPriceStretching := bar1m.Analytics.PriceRank >= 6
+
+		if isHighVolumeAbnormal && isPriceStretching {
+
+			// --- EVALUATE LONG BREAKOUT SETUP ---
+			isBullishConviction := bar1m.Analytics.Direction == models.DirStrongBullish || bar1m.Analytics.Direction == models.DirBullish
+			if isBullishConviction {
+				// Immediate Micro Check: Price is stable/rising above the breakout zone close
+				if raw.LastPrice >= bar1m.Close {
+					return "GO_LONG", true
+				}
+			}
+
+			// --- EVALUATE SHORT BREAKDOWN SETUP ---
+			isBearishConviction := bar1m.Analytics.Direction == models.DirStrongBearish || bar1m.Analytics.Direction == models.DirBearish
+			if isBearishConviction {
+				// Immediate Micro Check: Price is stable/falling below the breakdown zone close
+				if raw.LastPrice <= bar1m.Close {
+					return "GO_SHORT", true
+				}
+			}
 		}
+
 	} else if positionSide == "LONG" {
-		if bar1m.Analytics.Direction == models.DirBearishAbsorption {
+		// Technical Exit for Long: Closed bar signals upside structural fatigue, wall block, or deep sell reversal
+		if bar1m.Analytics.Direction == models.DirBearishAbsorption || bar1m.Analytics.Direction == models.DirStrongBearish || bar1m.Analytics.Direction == models.DirBearish {
 			return "EXIT_LONG", true
+		}
+
+	} else if positionSide == "SHORT" {
+		// Technical Exit for Short: Closed bar signals downside floor absorption, or aggressive buy reversal
+		if bar1m.Analytics.Direction == models.DirBullishAbsorption || bar1m.Analytics.Direction == models.DirStrongBullish || bar1m.Analytics.Direction == models.DirBullish {
+			return "EXIT_SHORT", true
 		}
 	}
 
