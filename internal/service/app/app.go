@@ -28,6 +28,7 @@ type App struct {
 	Pipeline       *Pipeline
 	DBWriter       *writer.DBWriter
 	OrderManager   order.PositionManager
+	RiskManager    *agent.RiskManager
 	kiteClient     *kiteconnect.Client
 	server         *http.Server
 	wsHub          *ws.Hub
@@ -194,6 +195,8 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		// Map structural pipelines straight into the synchronous referee loops
 		a.Pipeline.BacktestAgent = backtestMoneyManager
 		barManager.MacroListener = backtestMoneyManager
+		a.RiskManager = backtestMoneyManager
+		
 	} else {
 		logger.Infof("[System Initialization] Operating in %s mode. Algorithmic Agent deactivated.", a.Config.Mode)
 	}

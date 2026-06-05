@@ -95,3 +95,25 @@ type EnrichedMockTrade struct {
 	AveragePrice    float64   `json:"average_price"`
 	AllocatedCharge float64   `json:"allocated_charge"` // Total transactional friction for this leg
 }
+
+// ItemizedCharges tracks the complete fee breakdown calculated by your fee_calculator
+type ItemizedCharges struct {
+	Brokerage              float64 `json:"brokerage"`
+	STT                    float64 `json:"stt"`
+	StampDuty              float64 `json:"stamp_duty"`
+	ExchangeTurnoverCharge float64 `json:"exchange_turnover_charge"`
+	SebiTurnoverCharge     float64 `json:"sebi_turnover_charge"`
+	GST                    float64 `json:"gst"`
+	TotalCharges           float64 `json:"total_charges"`
+}
+
+// BacktestExecutedTrade maps directly to the UI's trades Array contract
+type BacktestExecutedTrade struct {
+	Timestamp       time.Time `json:"timestamp"`
+	Side            string    `json:"side"` // "BUY" or "SELL"
+	Symbol          string    `json:"symbol"`
+	Exchange        string    `json:"exchange"`
+	Quantity        int       `json:"quantity"`
+	AveragePrice    float64   `json:"average_price"`
+	AllocatedCharge float64   `json:"allocated_charge"` // Total fee contribution for this specific trade leg
+}

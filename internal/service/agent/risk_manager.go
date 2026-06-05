@@ -23,6 +23,13 @@ type RiskManager struct {
 
 	// ⚡ Money Management Team additions: Track explicit fee overheads
 	dailyChargesPaid float64
+	globalSummary    models.ItemizedCharges
+	executedTrades   []models.BacktestExecutedTrade
+}
+
+type UIContractNotePayload struct {
+	Summary models.ItemizedCharges         `json:"summary"`
+	Trades  []models.BacktestExecutedTrade `json:"trades"`
 }
 
 func NewRiskManager(om order.PositionManager, sa *ScalperAgent) *RiskManager {
@@ -32,8 +39,51 @@ func NewRiskManager(om order.PositionManager, sa *ScalperAgent) *RiskManager {
 		agentPositions:   make(map[string]*models.Position),
 		lastExitTime:     make(map[string]time.Time),
 		dailyRealized:    0.0,
-		dailyChargesPaid: 0.0, // Start day with clean metrics ledger
+		dailyChargesPaid: 0.0,
 		circuitBroken:    false,
+		executedTrades:   make([]models.BacktestExecutedTrade, 0),
+	}
+}
+
+func (rm *RiskManager) GetUIContractNote() UIContractNotePayload {
+	rm.mu.RUnlock() // Safety guard toggle
+	rm.mu.RLock()
+	defer rm.mu.RUnlock()
+
+	trades := rm.executedTrades
+	if trades == nil {
+		trades = []models.BacktestExecutedTrade{}
+	}
+
+	return UIContractNotePayload{
+		Summary: rm.globalSummary,
+		Trades:  trades,
+	}
+}
+
+func computeItemizedCharges(quantity int, price float64) models.ItemizedCharges {
+	turnoverSingleLeg := float64(quantity) * price
+	totalTurnoverRoundTrip := turnoverSingleLeg * 2.0
+
+	buyBrokerage := math.Min(turnoverSingleLeg*0.0003, 20.0)
+	sellBrokerage := math.Min(turnoverSingleLeg*0.0003, 20.0)
+	totalBrokerage := buyBrokerage + sellBrokerage
+
+	stt := turnoverSingleLeg * 0.00025
+	exchangeFees := totalTurnoverRoundTrip * 0.0000322
+	sebiFees := totalTurnoverRoundTrip * 0.0000001
+	stampDuty := turnoverSingleLeg * 0.00003
+	gst := (totalBrokerage + exchangeFees + sebiFees) * 0.18
+	total := totalBrokerage + stt + exchangeFees + sebiFees + stampDuty + gst
+
+	return models.ItemizedCharges{
+		Brokerage:              buyBrokerage + sellBrokerage,
+		STT:                    stt,
+		StampDuty:              stampDuty,
+		ExchangeTurnoverCharge: exchangeFees,
+		SebiTurnoverCharge:     sebiFees,
+		GST:                    gst,
+		TotalCharges:           total,
 	}
 }
 
@@ -54,7 +104,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		rm.agentPositions[key] = pos
 	}
 
-	// 1. Money Protection: Check current running exposure against P&L AND accumulated tax drag
 	if pos.NetQuantity != 0 {
 		multiplier := 1.0
 		if pos.Side == "SHORT" {
@@ -62,7 +111,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		}
 		pos.UnrealizedPnL = (rawTick.LastPrice - pos.AveragePrice) * float64(pos.NetQuantity) * multiplier
 
-		// ⚡ The Real Equation: True Net Session Return = Trading P&L - Total Statutory Fees paid so far
 		totalNetSessionPnL := rm.dailyRealized + pos.UnrealizedPnL - rm.dailyChargesPaid
 
 		if totalNetSessionPnL <= -MaxDailyLossAllowed {
@@ -73,7 +121,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			return
 		}
 
-		// Handle normal intraday square-off times
 		loc, _ := time.LoadLocation("Asia/Kolkata")
 		if rawTick.Timestamp.In(loc).Hour() == 15 && rawTick.Timestamp.In(loc).Minute() >= 15 {
 			rm.executeBrokerOrder(symbol, pos, "Intraday 15:15 Force Square-off", rawTick.Timestamp)
@@ -85,13 +132,11 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	currentSide := pos.Side
 	rm.mu.Unlock()
 
-	// 2. Delegate to Analytics
 	decision, triggered := rm.scalper.AnalyzeMarket(enrichedTick, currentSide)
 	if !triggered {
 		return
 	}
 
-	// 3. Money Management Decision Gate
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
@@ -107,14 +152,11 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			return
 		}
 
-		// ⚡ CRITICAL RISK INTERCEPTION: Predict round-trip taxes for this entry *before* submitting it
 		predictedFees := PredictRoundTripCharges(allowedQty, rawTick.LastPrice)
-
-		// Evaluate if committing to this trade's fees will push us past our daily loss boundary
 		projectedNetSessionPnL := rm.dailyRealized - (rm.dailyChargesPaid + predictedFees)
 		if projectedNetSessionPnL <= -MaxDailyLossAllowed {
 			logger.Warnf("[Money Manager] Vetoed Scalper Signal for %s. Predicted tax drag (₹%.2f) breaches remaining daily risk wallet.", symbol, predictedFees)
-			return // Order Restrained!
+			return
 		}
 
 		orderReq := models.OrderRequest{
@@ -128,7 +170,26 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 		logger.Infof("[Money Manager] Approved Setup. Predicted tax buffer: ₹%.2f. Executing BUY for %s", predictedFees, symbol)
 
-		// Instantly lock fees into our accounting book
+		// ⚡ Itemized Accounting Ledger Updates
+		charges := computeItemizedCharges(allowedQty, rawTick.LastPrice)
+		rm.globalSummary.Brokerage += charges.Brokerage
+		rm.globalSummary.STT += charges.STT
+		rm.globalSummary.StampDuty += charges.StampDuty
+		rm.globalSummary.ExchangeTurnoverCharge += charges.ExchangeTurnoverCharge
+		rm.globalSummary.SebiTurnoverCharge += charges.SebiTurnoverCharge
+		rm.globalSummary.GST += charges.GST
+		rm.globalSummary.TotalCharges += charges.TotalCharges
+
+		rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
+			Timestamp:       rawTick.Timestamp,
+			Side:            "BUY",
+			Symbol:          symbol,
+			Exchange:        "NSE",
+			Quantity:        allowedQty,
+			AveragePrice:    rawTick.LastPrice,
+			AllocatedCharge: charges.TotalCharges,
+		})
+
 		rm.dailyChargesPaid += predictedFees
 
 		pos.NetQuantity = allowedQty
@@ -163,6 +224,18 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 	}
 
 	logger.Warnf("[Money Manager] Executing Square-Off for %s. Reason: %s", symbol, reason)
+
+	// ⚡ Record Sell/Exit Side itemized fees into our historical logging structure
+	charges := computeItemizedCharges(pos.NetQuantity, pos.AveragePrice)
+	rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
+		Timestamp:       timestamp,
+		Side:            exitSide,
+		Symbol:          symbol,
+		Exchange:        "NSE",
+		Quantity:        pos.NetQuantity,
+		AveragePrice:    pos.AveragePrice, // Captures entry-basis baseline calculation context
+		AllocatedCharge: charges.TotalCharges,
+	})
 
 	rm.lastExitTime[symbol] = timestamp
 	rm.dailyRealized += pos.UnrealizedPnL

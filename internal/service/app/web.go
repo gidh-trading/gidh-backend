@@ -61,6 +61,29 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/orders/", a.handleGetHistoricalOrders)
 	mux.HandleFunc("/api/positions/history/", a.handleGetHistoricalPositions)
 
+	mux.HandleFunc("/api/internal/backtest/vcn/all", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+
+		if r.Method != http.MethodGet {
+			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+
+		if a.RiskManager == nil {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{
+				"error": "Risk manager instance is inactive or application is running in live mode",
+			})
+			return
+		}
+
+		// Pull the granular payload directly matching the UI Contract note signature
+		payload := a.RiskManager.GetUIContractNote()
+
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(payload)
+	})
+
 	handlerWithLogging := LoggingMiddleware(mux)
 
 	a.server = &http.Server{
