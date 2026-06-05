@@ -233,10 +233,6 @@ func (bm *BarManager) updateTimeframe(
 			bm.writer.AddBar(*closedBar)
 		}
 
-		if bm.MacroListener != nil {
-			bm.MacroListener.IngestClosedBar(closedBar)
-		}
-
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
 	}
 

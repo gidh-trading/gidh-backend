@@ -249,10 +249,9 @@ func (sa *ScalperAgent) UpgradeActiveTargets(stock string, targetTimeframe strin
 
 	stats, hasInterval := stockMatrix[targetTimeframe]
 	if !hasInterval {
-		return false // Timeframe parameter not present in current lookups
+		return false
 	}
 
-	// Atomically switch active target parameters to the wider historical profile
 	pos.TargetP75 = stats.P75
 	pos.TargetP90 = stats.P90
 	pos.ActiveInterval = targetTimeframe

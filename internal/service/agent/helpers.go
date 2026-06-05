@@ -3,12 +3,7 @@ package agent
 import (
 	"gidh-backend/internal/service/models"
 	"math"
-	"time"
 )
-
-func (rm *RiskManager) IngestClosedBar(bar *models.Bar) {
-	rm.scalper.IngestClosedBar(bar)
-}
 
 // VCNGlobalMetrics represents the total state of the single shared backtest account
 type VCNGlobalMetrics struct {
@@ -75,25 +70,4 @@ func computeItemizedCharges(quantity int, price float64) models.ItemizedCharges 
 		GST:                    gst,
 		TotalCharges:           total,
 	}
-}
-
-// updateTickBuffer handles the moving 60-second slice of telemetry data
-func (sa *ScalperAgent) updateTickBuffer(symbol string, enrichedTick *models.EnrichedTick) {
-	sa.mu.Lock()
-	defer sa.mu.Unlock()
-
-	buffer := sa.enrichedBuffers[symbol]
-	cutoff := enrichedTick.Raw.Timestamp.Add(-60 * time.Second)
-
-	validIdx := 0
-	for i, t := range buffer {
-		if t.Raw.Timestamp.After(cutoff) {
-			validIdx = i
-			break
-		}
-	}
-	if validIdx > 0 {
-		sa.enrichedBuffers[symbol] = buffer[validIdx:]
-	}
-	sa.enrichedBuffers[symbol] = append(sa.enrichedBuffers[symbol], enrichedTick)
 }

@@ -65,8 +65,8 @@ func NewApp(cfg *config.Config) (*App, error) {
 
 	if cfg.Mode == "live" {
 		app.initLiveState(ctx)
-		dnaMap, advMap, potentialsMatrix := app.loadMarketData(ctx, time.Now())
-		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
+		dnaMap, profilesMap, potentialsMatrix := app.loadMarketData(ctx, time.Now())
+		if err := app.initPipeline(ctx, dnaMap, profilesMap, potentialsMatrix); err != nil {
 			return nil, err
 		}
 		if err := app.initStreamManager(); err != nil {
@@ -119,7 +119,7 @@ func (a *App) initOrderManager() {
 func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (
 	map[uint32]*models.MarketDNA,
 	map[uint32]*models.InstrumentProfile,
-	models.TargetMatrix,
+	models.TargetMatrix, // 🔥 Added matrix map signature
 ) {
 	if a.pool == nil {
 		return make(map[uint32]*models.MarketDNA), make(map[uint32]*models.InstrumentProfile), make(models.TargetMatrix)
@@ -147,7 +147,7 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (
 		profilesMap = make(map[uint32]*models.InstrumentProfile)
 	}
 
-	// 4. 🔥 Natively retrieve the complete historical price potential matrix maps
+	// 4. 🔥 Fetch the complete historical price potential matrix map
 	potentialsMatrix, err := instReader.FetchAllPricePotentials(ctx)
 	if err != nil {
 		logger.Errorf("FAILED TO LOAD PRICE POTENTIAL MATRIX MAP: %v", err)
@@ -165,7 +165,12 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (
 	return dnaMap, profilesMap, potentialsMatrix
 }
 
-func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, profilesMap map[uint32]*models.InstrumentProfile) error {
+func (a *App) initPipeline(
+	ctx context.Context,
+	dnaMap map[uint32]*models.MarketDNA,
+	profilesMap map[uint32]*models.InstrumentProfile,
+	potentialsMatrix models.TargetMatrix, // 🔥 Accept the statistical target profiles
+) error {
 
 	// 1. Build the fast structural maps for historical parameters
 	advMap := make(map[uint32]float64)
@@ -176,7 +181,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		bucketSizeMap[token] = prof.BucketSize
 	}
 
-	// 2. Initialize the Volume Profile Stage (it maps wsHub internally for its independent broadcasts)
+	// 2. Initialize the Volume Profile Stage
 	vpStage := pipeline.NewVolumeProfileStage(a.instrumentList, bucketSizeMap, a.pool, a.wsHub)
 
 	if a.Config.Mode == "live" {
@@ -200,12 +205,12 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	if a.Config.Mode != "live" {
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
 
-		scalperAgent := agent.NewScalperAgent()
+		// 🔥 Instantiate Scalper with window size lookback of 5 + pass our ready-to-use memory matrix map
+		scalperAgent := agent.NewScalperAgent(5, potentialsMatrix)
 		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)
 
 		// Map structural pipelines straight into the synchronous referee loops
 		a.Pipeline.BacktestAgent = backtestMoneyManager
-		barManager.MacroListener = backtestMoneyManager
 		a.RiskManager = backtestMoneyManager
 
 	} else {
