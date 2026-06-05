@@ -1,12 +1,14 @@
 package agent
 
 import (
+	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
 )
 
 type ScalperAgent struct {
+	mu              sync.RWMutex // ⚡ Added: Protect buffers from cross-talk between stock workers
 	enrichedBuffers map[string][]*models.EnrichedTick
 	macroHorizons   map[string]map[string]*models.Bar
 }
@@ -20,17 +22,21 @@ func NewScalperAgent() *ScalperAgent {
 
 // IngestClosedBar caches timeframe intervals when a candle finishes compiling
 func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+
 	if sa.macroHorizons[bar.StockName] == nil {
 		sa.macroHorizons[bar.StockName] = make(map[string]*models.Bar)
 	}
 	sa.macroHorizons[bar.StockName][bar.Timeframe] = bar
 }
 
-// AnalyzeMarket evaluates the 60s micro tick window and macro bars to return strategic directions
+// AnalyzeMarket evaluates the 60s micro ENRICHED tick window and macro bars to return strategic directions
 func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positionSide string) (string, bool) {
 	raw := enrichedTick.Raw
 	symbol := raw.StockName
 
+	sa.mu.Lock() // ⚡ Lock writing state modifications exclusively
 	// 1. Engineering: Maintain sliding 60-second rolling buffer of ENRICHED ticks
 	buffer := sa.enrichedBuffers[symbol]
 	cutoff := raw.Timestamp.Add(-60 * time.Second)
@@ -53,16 +59,18 @@ func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positio
 	// 2. Analytics: Load finalized macro bar boundaries for context
 	macroMap, exists := sa.macroHorizons[symbol]
 	if !exists || macroMap == nil {
+		sa.mu.Unlock()
 		return "", false
 	}
 	bar1m, ok := macroMap["1m"]
 	if !ok || bar1m == nil {
+		sa.mu.Unlock()
 		return "", false
 	}
+	sa.mu.Unlock() // ⚡ Unlock state variables so other workers can execute
 
-	// 3. Strategy Logic: Use the rich indicators already computed inside enrichedTick!
+	// 3. Strategy Logic: Analyze micro indicators vs macro structure
 	if positionSide == "FLAT" || positionSide == "" {
-		// Example: Now you can directly look at advanced indicators inside enrichedTick
 		if bar1m.Analytics.VolumeRank >= 6 && len(buffer) > 15 {
 			return "GO_LONG", true
 		}
