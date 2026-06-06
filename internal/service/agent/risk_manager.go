@@ -3,13 +3,20 @@ package agent
 import (
 	"context"
 	"fmt"
-	"math"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/order"
 	"gidh-backend/pkg/logger"
+)
+
+const (
+	MaxDailyLossAllowed   = 5000.0
+	InitialCapital        = 100000.0
+	MaxLeverage           = 5.0
+	MaxCapitalPerStockPct = 0.25
+	AgentEmail            = "agent@gidh.trading"
 )
 
 type RiskManager struct {
@@ -20,9 +27,8 @@ type RiskManager struct {
 	dailyRealized  float64
 	circuitBroken  bool
 	lastExitTime   map[string]time.Time
-	takeProfitHit  map[string]bool // 🎯 Track which stocks have completed their daily goal
+	takeProfitHit  map[string]bool
 
-	// Money Management Team additions: Track explicit fee overheads
 	dailyChargesPaid float64
 	globalSummary    models.ItemizedCharges
 	executedTrades   []models.BacktestExecutedTrade
@@ -34,7 +40,7 @@ func NewRiskManager(om order.PositionManager, sa *ScalperAgent) *RiskManager {
 		scalper:          sa,
 		agentPositions:   make(map[string]*models.Position),
 		lastExitTime:     make(map[string]time.Time),
-		takeProfitHit:    make(map[string]bool), // 🎯 Initialize tracking map
+		takeProfitHit:    make(map[string]bool),
 		dailyRealized:    0.0,
 		dailyChargesPaid: 0.0,
 		circuitBroken:    false,
@@ -43,6 +49,8 @@ func NewRiskManager(om order.PositionManager, sa *ScalperAgent) *RiskManager {
 }
 
 func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) {
+	rm.scalper.UpdateMicroContext(enrichedTick)
+
 	rm.mu.Lock()
 	if rm.circuitBroken {
 		rm.mu.Unlock()
@@ -53,7 +61,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	symbol := rawTick.StockName
 	key := fmt.Sprintf("%s:MIS", symbol)
 
-	// 🎯 If this stock already hit its ₹600 limit today, ignore all incoming ticks
 	if rm.takeProfitHit[symbol] {
 		rm.mu.Unlock()
 		return
@@ -65,122 +72,100 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		rm.agentPositions[key] = pos
 	}
 
+	// ------------------------------------------------------------------------
+	// REAL-TIME ACCOUNT-WIDE CAPITAL AUDITING
+	// ------------------------------------------------------------------------
 	if pos.NetQuantity != 0 {
 		multiplier := 1.0
 		if pos.Side == "SHORT" {
 			multiplier = -1.0
 		}
 		pos.UnrealizedPnL = (rawTick.LastPrice - pos.AveragePrice) * float64(pos.NetQuantity) * multiplier
-
 		totalNetSessionPnL := rm.dailyRealized + pos.UnrealizedPnL - rm.dailyChargesPaid
 
-		// 1. Global Max Loss Hard Stop
+		// Global Maximum Protective Drawdown Cap
 		if totalNetSessionPnL <= -MaxDailyLossAllowed {
-			logger.Errorf("[Money Manager] True Capital Drawdown Breached (₹%.2f). Freezing Agent.", totalNetSessionPnL)
+			logger.Errorf("[Finance Dept] CRITICAL: Max Session Drawdown Breached (₹%.2f). Liquidating assets.", totalNetSessionPnL)
 			rm.circuitBroken = true
-			rm.executeBrokerOrder(symbol, pos, "Net Session Risk Floor Breach", rawTick.Timestamp)
+			rm.executeBrokerOrder(symbol, pos, "Global Capital Drawdown Veto Actuated", rawTick.Timestamp)
 			rm.mu.Unlock()
 			return
 		}
 
-		// 2. Per-Stock Take Profit Target (₹600 INR Net of predicted friction)
-		predictedRoundTripFees := PredictRoundTripCharges(pos.NetQuantity, pos.AveragePrice)
-		stockNetTradePnL := pos.UnrealizedPnL - predictedRoundTripFees
-
-		if stockNetTradePnL >= 600.0 {
-			logger.Infof("[Money Manager] Take Profit Target Achieved for %s (Net Position PnL: ₹%.2f). Securing gains.", symbol, stockNetTradePnL)
-
-			rm.takeProfitHit[symbol] = true // 🎯 Lock entry gates for this instrument
-			rm.executeBrokerOrder(symbol, pos, "Stock Per-Position Take Profit Hit", rawTick.Timestamp)
-			rm.mu.Unlock()
-			return
-		}
-
-		// 3. Time-based Force Square-off
+		// Exchange-Forced Settlement Cut-off Time (3:15 PM IST)
 		loc, _ := time.LoadLocation("Asia/Kolkata")
 		if rawTick.Timestamp.In(loc).Hour() == 15 && rawTick.Timestamp.In(loc).Minute() >= 15 {
-			rm.executeBrokerOrder(symbol, pos, "Intraday 15:15 Force Square-off", rawTick.Timestamp)
+			rm.executeBrokerOrder(symbol, pos, "Intraday Force Auto-Squareoff Threshold Reached", rawTick.Timestamp)
 			rm.mu.Unlock()
 			return
 		}
 	}
 
 	currentSide := pos.Side
+	entryPrice := pos.AveragePrice
 	rm.mu.Unlock()
 
-	decision, triggered := rm.scalper.AnalyzeMarket(enrichedTick, currentSide)
-	if !triggered {
+	// ------------------------------------------------------------------------
+	// CONSULT ENGINEERING FOR DIRECTION SIGNALS (ENTRIES AND EXITS)
+	// ------------------------------------------------------------------------
+	signal := rm.scalper.GenerateSignal(symbol, currentSide, entryPrice)
+	if signal == "HOLD" {
 		return
 	}
 
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	// Double check state inside write lock safety zone
-	if rm.takeProfitHit[symbol] {
-		return
-	}
-
-	if decision == "GO_LONG" && pos.NetQuantity == 0 {
+	// ------------------------------------------------------------------------
+	// ORDER EXECUTION PIPELINE
+	// ------------------------------------------------------------------------
+	if (signal == "GO_SHORT" || signal == "GO_LONG") && pos.NetQuantity == 0 {
 		if exitTime, ok := rm.lastExitTime[symbol]; ok {
 			if rawTick.Timestamp.Sub(exitTime) < 5*time.Second {
 				return
 			}
 		}
 
-		allowedQty := int(math.Floor((InitialCapital * MaxLeverage) / rawTick.LastPrice))
+		allowedQty, predictedFees := rm.CalculatePositionSizeAndFees(symbol, rawTick.LastPrice)
 		if allowedQty <= 0 {
 			return
 		}
 
-		predictedFees := PredictRoundTripCharges(allowedQty, rawTick.LastPrice)
-		projectedNetSessionPnL := rm.dailyRealized - (rm.dailyChargesPaid + predictedFees)
-		if projectedNetSessionPnL <= -MaxDailyLossAllowed {
-			logger.Warnf("[Money Manager] Vetoed Scalper Signal for %s. Predicted tax drag (₹%.2f) breaches remaining daily risk wallet.", symbol, predictedFees)
+		if rm.dailyRealized-(rm.dailyChargesPaid+predictedFees) <= -MaxDailyLossAllowed {
+			logger.Warnf("[Finance Dept] Vetoed %s entry. Costs push account beyond drawdown allowance.", symbol)
 			return
+		}
+
+		txType := "BUY"
+		posSide := "LONG"
+		if signal == "GO_SHORT" {
+			txType = "SELL"
+			posSide = "SHORT"
 		}
 
 		orderReq := models.OrderRequest{
 			Symbol:          symbol,
 			Product:         "MIS",
-			TransactionType: "BUY",
+			TransactionType: txType,
 			OrderType:       "MARKET",
 			Quantity:        allowedQty,
 			UserEmail:       AgentEmail,
 		}
 
-		logger.Infof("[Money Manager] Approved Setup. Predicted tax buffer: ₹%.2f. Executing BUY for %s", predictedFees, symbol)
-
-		charges := computeItemizedCharges(allowedQty, rawTick.LastPrice)
-		rm.globalSummary.Brokerage += charges.Brokerage
-		rm.globalSummary.STT += charges.STT
-		rm.globalSummary.StampDuty += charges.StampDuty
-		rm.globalSummary.ExchangeTurnoverCharge += charges.ExchangeTurnoverCharge
-		rm.globalSummary.SebiTurnoverCharge += charges.SebiTurnoverCharge
-		rm.globalSummary.GST += charges.GST
-		rm.globalSummary.TotalCharges += charges.TotalCharges
-
-		rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
-			Timestamp:       rawTick.Timestamp,
-			Side:            "BUY",
-			Symbol:          symbol,
-			Exchange:        "NSE",
-			Quantity:        allowedQty,
-			AveragePrice:    rawTick.LastPrice,
-			AllocatedCharge: charges.TotalCharges,
-		})
-
-		rm.dailyChargesPaid += predictedFees
+		rm.LogTransactionFees(allowedQty, rawTick.LastPrice, txType, predictedFees, rawTick.Timestamp)
 
 		pos.NetQuantity = allowedQty
-		pos.Side = "LONG"
+		pos.Side = posSide
 		pos.AveragePrice = rawTick.LastPrice
 		pos.UnrealizedPnL = 0.0
 
 		_, _ = rm.orderManager.PlaceOrder(context.Background(), orderReq)
 
-	} else if decision == "EXIT_LONG" && pos.NetQuantity != 0 {
-		rm.executeBrokerOrder(symbol, pos, "Scalper Signal Exit", rawTick.Timestamp)
+	} else if (signal == "EXIT_LONG" || signal == "EXIT_SHORT") && pos.NetQuantity != 0 {
+		// Verify signal side corresponds with active position state before clearing
+		if (signal == "EXIT_LONG" && pos.Side == "LONG") || (signal == "EXIT_SHORT" && pos.Side == "SHORT") {
+			rm.executeBrokerOrder(symbol, pos, "Scalper Technical Context Exit Triggered", rawTick.Timestamp)
+		}
 	}
 }
 
@@ -203,9 +188,9 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 		UserEmail:       AgentEmail,
 	}
 
-	logger.Warnf("[Money Manager] Executing Square-Off for %s. Reason: %s", symbol, reason)
+	logger.Warnf("[Finance Dept] ORDER DISPATCHED: %s | Reason: %s", symbol, reason)
 
-	charges := computeItemizedCharges(pos.NetQuantity, pos.AveragePrice)
+	charges := rm.CalculateItemizedCharges(pos.NetQuantity, pos.AveragePrice)
 	rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
 		Timestamp:       timestamp,
 		Side:            exitSide,
@@ -225,10 +210,4 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 	pos.UnrealizedPnL = 0.0
 
 	_, _ = rm.orderManager.PlaceOrder(context.Background(), exitReq)
-}
-
-func (rm *RiskManager) IngestClosedBar(bar *models.Bar) {
-	if rm.scalper != nil {
-		rm.scalper.IngestClosedBar(bar)
-	}
 }

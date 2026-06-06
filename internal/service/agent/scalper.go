@@ -3,137 +3,122 @@ package agent
 import (
 	"gidh-backend/internal/service/models"
 	"sync"
+	"time"
 )
 
-type ScalperAgent struct {
-	mu            sync.RWMutex
-	macroHorizons map[string]map[string]*models.Bar
-
-	// Strategy 1: Session State Memory
-	vwapHistory  map[string][]float64 // Tracks trailing VWAP prints per instrument to parse slope
-	isGapDownDay map[string]bool      // Cache to lock in asset qualification at market open
+// HistoricTickSnapshot captures a clean state of an individual transaction element
+type HistoricTickSnapshot struct {
+	Timestamp  time.Time
+	Price      float64
+	Volume     float64
+	VolumeRank int
+	Direction  models.DirectionState
+	ChangePct  float64
 }
 
-func NewScalperAgent() *ScalperAgent {
+// InstrumentState serves as the engineering data vault for a single asset ticker.
+type InstrumentState struct {
+	Symbol      string
+	LastUpdated time.Time
+
+	// Microscopic Live Scalar Trackers (Latest streaming tick info)
+	LatestPrice      float64
+	LatestChangePct  float64
+	LatestVolumeRank int
+	LatestDirection  models.DirectionState
+
+	// QUEUE 1: Transaction-Based Rolling Window Memory (Fixed Count)
+	TxQueue []HistoricTickSnapshot
+
+	// QUEUE 2: Time-Based Rolling Window Memory (Fluid Count, Fixed Duration)
+	TimeQueue []HistoricTickSnapshot
+}
+
+type ScalperAgent struct {
+	mu           sync.RWMutex
+	Registry     map[string]*InstrumentState
+	MaxTxCount   int           // Max depth cap for the transaction queue (e.g., 50 ticks)
+	TimeDuration time.Duration // Lookback duration boundary for the time queue (e.g., 5 * time.Minute)
+}
+
+// NewScalperAgent creates and initializes the time-independent engineering storage manager
+func NewScalperAgent(maxTxCount int, timeDuration time.Duration) *ScalperAgent {
 	return &ScalperAgent{
-		macroHorizons: make(map[string]map[string]*models.Bar),
-		vwapHistory:   make(map[string][]float64),
-		isGapDownDay:  make(map[string]bool),
+		Registry:     make(map[string]*InstrumentState),
+		MaxTxCount:   maxTxCount,
+		TimeDuration: timeDuration,
 	}
 }
 
-func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
+// UpdateMicroContext updates both transaction and time-bounded queues simultaneously per tick.
+func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
 
-	if sa.macroHorizons[bar.StockName] == nil {
-		sa.macroHorizons[bar.StockName] = make(map[string]*models.Bar)
-	}
-	sa.macroHorizons[bar.StockName][bar.Timeframe] = bar
-
-	// Append trailing 1m VWAP records to compute a rolling 3-period slope
-	if bar.Timeframe == "1m" {
-		sa.vwapHistory[bar.StockName] = append(sa.vwapHistory[bar.StockName], bar.VWAP)
-		// Maintain a strict 4-element maximum (Current + 3 Trailing periods)
-		if len(sa.vwapHistory[bar.StockName]) > 4 {
-			sa.vwapHistory[bar.StockName] = sa.vwapHistory[bar.StockName][1:]
-		}
-	}
-}
-
-func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positionSide string) (string, bool) {
 	raw := enrichedTick.Raw
 	symbol := raw.StockName
 
+	state, exists := sa.Registry[symbol]
+	if !exists {
+		state = &InstrumentState{
+			Symbol:    symbol,
+			TxQueue:   make([]HistoricTickSnapshot, 0, sa.MaxTxCount),
+			TimeQueue: make([]HistoricTickSnapshot, 0, 100), // Optimal capacity estimation block
+		}
+		sa.Registry[symbol] = state
+	}
+
+	// 1. Ingest immediate live scalar lookups
+	state.LatestPrice = raw.LastPrice
+	state.LatestChangePct = raw.Change
+	state.LastUpdated = time.Now()
+
+	volRank := 0
+	state.LatestVolumeRank = enrichedTick.Enrichment.VolumeRank
+	state.LatestDirection = enrichedTick.Enrichment.Direction
+	volRank = enrichedTick.Enrichment.VolumeRank
+
+	// Unpack volume fields (Using LastQuantity safely)
+	vol := float64(enrichedTick.TickVolume)
+	if vol <= 0 {
+		vol = 1.0 // Safety normalization fallback for zero baseline quantity prints
+	}
+
+	// 2. Assemble historical snapshot element frame
+	snapshot := HistoricTickSnapshot{
+		Timestamp:  raw.Timestamp,
+		Price:      raw.LastPrice,
+		Volume:     vol,
+		VolumeRank: volRank,
+		Direction:  enrichedTick.Enrichment.Direction,
+		ChangePct:  raw.Change,
+	}
+
 	// ------------------------------------------------------------------------
-	// LAYER 0: PRE-FLIGHT REGIME CHECK (First tick registers the session gap)
+	// PROCESSING QUEUE 1: TRANSACTION-BASED WINDOW MANAGEMENT (FIXED COUNT)
 	// ------------------------------------------------------------------------
-	sa.mu.Lock()
-	if _, evaluated := sa.isGapDownDay[symbol]; !evaluated {
-		// Use the change percentage built straight into your incoming tick stream
-		// A negative change percentage on the opening print confirms a gap down
-		if raw.Change < 0 {
-			prevClose := raw.LastPrice - raw.Change
-			if prevClose > 0 {
-				gapPct := (raw.Change / prevClose) * 100
-				// Qualification check: opened down more than 1% OR below yesterday's low
-				if gapPct <= -1.0 || raw.Open < raw.Low {
-					sa.isGapDownDay[symbol] = true
-				} else {
-					sa.isGapDownDay[symbol] = false
-				}
-			}
+	state.TxQueue = append(state.TxQueue, snapshot)
+	if len(state.TxQueue) > sa.MaxTxCount {
+		state.TxQueue = state.TxQueue[1:]
+	}
+
+	// ------------------------------------------------------------------------
+	// PROCESSING QUEUE 2: TIME-BASED WINDOW MANAGEMENT (FIXED DURATION)
+	// ------------------------------------------------------------------------
+	state.TimeQueue = append(state.TimeQueue, snapshot)
+
+	// Drop historical tick elements outside your window boundary (e.g., older than 5 minutes)
+	timeCutoff := raw.Timestamp.Add(-sa.TimeDuration)
+
+	validIdx := 0
+	for i, oldTick := range state.TimeQueue {
+		if oldTick.Timestamp.Before(timeCutoff) {
+			validIdx = i + 1
 		} else {
-			sa.isGapDownDay[symbol] = false
+			break // Chronological packet ordering guarantees trailing entries fall inside parameters
 		}
 	}
-
-	isQualifiedGapDay := sa.isGapDownDay[symbol]
-	sa.mu.Unlock()
-
-	// If this stock did not experience a pre-market supply shock today, bypass execution entirely
-	if !isQualifiedGapDay {
-		return "", false
+	if validIdx > 0 {
+		state.TimeQueue = state.TimeQueue[validIdx:]
 	}
-
-	// Extract the macro 1m candle context populated by your pipeline
-	sa.mu.RLock()
-	macroMap, exists := sa.macroHorizons[symbol]
-	if !exists || macroMap == nil {
-		sa.mu.RUnlock()
-		return "", false
-	}
-	bar1m, ok := macroMap["1m"]
-	if !ok || bar1m == nil {
-		sa.mu.RUnlock()
-		return "", false
-	}
-
-	// Fetch trailing VWAP historical array to extract the direction vector
-	vHistory := sa.vwapHistory[symbol]
-	sa.mu.RUnlock()
-
-	// ------------------------------------------------------------------------
-	// LAYER 1 & 2: LOCATION & REGIME TREND FILTERS
-	// ------------------------------------------------------------------------
-	// Price must remain strictly below the institutional volume-weighted average
-	if bar1m.Close >= bar1m.VWAP {
-		return "", false
-	}
-
-	// Determine institutional slope: Must have at least 2 minutes of bar history to derive slope
-	if len(vHistory) < 2 {
-		return "", false
-	}
-
-	// Calculate delta against the historical anchor print (up to 3 minutes lookback)
-	oldestVwap := vHistory[0]
-	vwapSlope := bar1m.VWAP - oldestVwap
-
-	// If VWAP is flat or sloping upward, institutional value is rising; do not short
-	if vwapSlope >= 0 {
-		return "", false
-	}
-
-	// ------------------------------------------------------------------------
-	// LAYER 3: EXECUTION TIMING TRIGGERS (SHORT ONLY STRATEGY)
-	// ------------------------------------------------------------------------
-	switch positionSide {
-	case "FLAT", "":
-		// ENTRY CONDITION: Extreme institutional selling urgency confirmed via ranks
-		isHighVolumeBearish := bar1m.Analytics.VolumeRank >= 6 &&
-			(bar1m.Analytics.Direction == models.DirStrongBearish || bar1m.Analytics.Direction == models.DirBearish)
-
-		if isHighVolumeBearish {
-			return "GO_SHORT", true
-		}
-
-	case "SHORT":
-		// EXIT CONDITION: Exit if the macro footprint signals buyers are absorbing the tape
-		if bar1m.Analytics.Direction == models.DirBullishAbsorption {
-			return "EXIT_SHORT", true
-		}
-	}
-
-	return "", false
 }

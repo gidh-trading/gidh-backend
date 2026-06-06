@@ -181,19 +181,23 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 
 	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
 
-	// 6. Assemble the streamlined Execution Pipeline Stage
+	// 5. Assemble the streamlined Execution Pipeline Stage
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barManager, scoutStage, a.DBWriter)
 
 	// ⚡ INTEGRATION BOUNDARY: Guard agent execution to operate STRICTLY in backtesting
 	if a.Config.Mode != "live" {
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
 
-		scalperAgent := agent.NewScalperAgent()
+		// Instantiate your isolated multi-file Data Registry (50 transactions & fluid rolling 5-minute queues)
+		scalperAgent := agent.NewScalperAgent(50, 5*time.Minute)
+
+		// Instantiate your split multi-file Finance Controller, injecting dependencies
 		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)
 
-		// Map structural pipelines straight into the synchronous referee loops
-		a.Pipeline.BacktestAgent = backtestMoneyManager
-		barManager.MacroListener = backtestMoneyManager
+		// Map structural streaming ticks straight into the synchronous referee loops
+		a.Pipeline.BacktestAgent = backtestMoneyManager // Receives high-velocity EnrichedTicks
+
+		// Assign the app state container tracking references safely
 		a.RiskManager = backtestMoneyManager
 
 	} else {
