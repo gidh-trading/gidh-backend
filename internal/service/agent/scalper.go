@@ -123,14 +123,8 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 	}
 }
 
-// GetLastTransactions returns the last 'count' snapshots from the transaction-based queue.
-// If 'count' is greater than available data, it safely returns all available entries.
-func (sa *ScalperAgent) GetLastTransactions(symbol string, count int) []HistoricTickSnapshot {
-	sa.mu.RLock()
-	defer sa.mu.RUnlock()
-
-	state, exists := sa.Registry[symbol]
-	if !exists || len(state.TxQueue) == 0 || count <= 0 {
+func (sa *ScalperAgent) getLastTransactionsUnlocked(state *InstrumentState, count int) []HistoricTickSnapshot {
+	if state == nil || len(state.TxQueue) == 0 || count <= 0 {
 		return nil
 	}
 
@@ -139,7 +133,6 @@ func (sa *ScalperAgent) GetLastTransactions(symbol string, count int) []Historic
 		count = totalElements
 	}
 
-	// Slice from the end of the queue to get the most recent 'count' elements
 	startIndex := totalElements - count
 	result := make([]HistoricTickSnapshot, count)
 	copy(result, state.TxQueue[startIndex:])
@@ -147,22 +140,14 @@ func (sa *ScalperAgent) GetLastTransactions(symbol string, count int) []Historic
 	return result
 }
 
-// GetRecentMinutesData returns all snapshots from the time-based queue that fell within
-// the last 'minutes' duration relative to the most recent tick's timestamp.
-func (sa *ScalperAgent) GetRecentMinutesData(symbol string, minutes int) []HistoricTickSnapshot {
-	sa.mu.RLock()
-	defer sa.mu.RUnlock()
-
-	state, exists := sa.Registry[symbol]
-	if !exists || len(state.TimeQueue) == 0 || minutes <= 0 {
+func (sa *ScalperAgent) getRecentMinutesDataUnlocked(state *InstrumentState, minutes int) []HistoricTickSnapshot {
+	if state == nil || len(state.TimeQueue) == 0 || minutes <= 0 {
 		return nil
 	}
 
-	// Determine baseline: Use the latest tick's timestamp as the current track reference
 	latestTimestamp := state.TimeQueue[len(state.TimeQueue)-1].Timestamp
 	cutoffTime := latestTimestamp.Add(-time.Duration(minutes) * time.Minute)
 
-	// Since TimeQueue is chronologically sorted, find the first valid index
 	validIdx := -1
 	for i, tick := range state.TimeQueue {
 		if !tick.Timestamp.Before(cutoffTime) {
@@ -171,15 +156,39 @@ func (sa *ScalperAgent) GetRecentMinutesData(symbol string, minutes int) []Histo
 		}
 	}
 
-	// If no elements fall within the window, return nil
 	if validIdx == -1 {
 		return nil
 	}
 
-	// Extract and copy the relevant window slice
 	relevantData := state.TimeQueue[validIdx:]
 	result := make([]HistoricTickSnapshot, len(relevantData))
 	copy(result, relevantData)
 
 	return result
+}
+
+// ============================================================================
+// PUBLIC THREAD-SAFE API (Use these from other packages/external components)
+// ============================================================================
+
+func (sa *ScalperAgent) GetLastTransactions(symbol string, count int) []HistoricTickSnapshot {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
+
+	state, exists := sa.Registry[symbol]
+	if !exists {
+		return nil
+	}
+	return sa.getLastTransactionsUnlocked(state, count)
+}
+
+func (sa *ScalperAgent) GetRecentMinutesData(symbol string, minutes int) []HistoricTickSnapshot {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
+
+	state, exists := sa.Registry[symbol]
+	if !exists {
+		return nil
+	}
+	return sa.getRecentMinutesDataUnlocked(state, minutes)
 }

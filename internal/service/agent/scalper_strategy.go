@@ -40,21 +40,24 @@ func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryP
 
 // EvaluateDualQueueEntry compares recent velocity trends against time-duration metrics
 func (sa *ScalperAgent) EvaluateDualQueueEntry(state *InstrumentState) bool {
-	// Microscopic layer verification check (Volume rank from incoming enrichment)
 	if state.LatestVolumeRank < 6 || state.LatestDirection != "BEARISH" {
 		return false
 	}
 
-	// Macro layer verification check: Confirm if price is trading below the 5-minute historical mean
+	// FIX: Use the internal unlocked variant because GenerateSignal already holds sa.mu.RLock()
+	timeData5m := sa.getRecentMinutesDataUnlocked(state, 5)
+	if len(timeData5m) == 0 {
+		return false
+	}
+
 	var timeSum float64 = 0.0
-	for _, t := range state.TimeQueue {
+	for _, t := range timeData5m {
 		timeSum += t.Price
 	}
-	
-	avgPrice5m := timeSum / float64(len(state.TimeQueue))
 
+	avgPrice5m := timeSum / float64(len(timeData5m))
 	if state.LatestPrice >= avgPrice5m {
-		return false // Price resides above short-term duration average; filter entry
+		return false
 	}
 
 	return true
