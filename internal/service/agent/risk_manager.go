@@ -20,6 +20,7 @@ type RiskManager struct {
 	dailyRealized  float64
 	circuitBroken  bool
 	lastExitTime   map[string]time.Time
+	takeProfitHit  map[string]bool // 🎯 Track which stocks have completed their daily goal
 
 	// Money Management Team additions: Track explicit fee overheads
 	dailyChargesPaid float64
@@ -33,6 +34,7 @@ func NewRiskManager(om order.PositionManager, sa *ScalperAgent) *RiskManager {
 		scalper:          sa,
 		agentPositions:   make(map[string]*models.Position),
 		lastExitTime:     make(map[string]time.Time),
+		takeProfitHit:    make(map[string]bool), // 🎯 Initialize tracking map
 		dailyRealized:    0.0,
 		dailyChargesPaid: 0.0,
 		circuitBroken:    false,
@@ -51,6 +53,12 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	symbol := rawTick.StockName
 	key := fmt.Sprintf("%s:MIS", symbol)
 
+	// 🎯 If this stock already hit its ₹600 limit today, ignore all incoming ticks
+	if rm.takeProfitHit[symbol] {
+		rm.mu.Unlock()
+		return
+	}
+
 	pos, exists := rm.agentPositions[key]
 	if !exists {
 		pos = &models.Position{Symbol: symbol, Product: "MIS", NetQuantity: 0, Side: "FLAT"}
@@ -66,6 +74,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 		totalNetSessionPnL := rm.dailyRealized + pos.UnrealizedPnL - rm.dailyChargesPaid
 
+		// 1. Global Max Loss Hard Stop
 		if totalNetSessionPnL <= -MaxDailyLossAllowed {
 			logger.Errorf("[Money Manager] True Capital Drawdown Breached (₹%.2f). Freezing Agent.", totalNetSessionPnL)
 			rm.circuitBroken = true
@@ -74,6 +83,20 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			return
 		}
 
+		// 2. Per-Stock Take Profit Target (₹600 INR Net of predicted friction)
+		predictedRoundTripFees := PredictRoundTripCharges(pos.NetQuantity, pos.AveragePrice)
+		stockNetTradePnL := pos.UnrealizedPnL - predictedRoundTripFees
+
+		if stockNetTradePnL >= 600.0 {
+			logger.Infof("[Money Manager] Take Profit Target Achieved for %s (Net Position PnL: ₹%.2f). Securing gains.", symbol, stockNetTradePnL)
+
+			rm.takeProfitHit[symbol] = true // 🎯 Lock entry gates for this instrument
+			rm.executeBrokerOrder(symbol, pos, "Stock Per-Position Take Profit Hit", rawTick.Timestamp)
+			rm.mu.Unlock()
+			return
+		}
+
+		// 3. Time-based Force Square-off
 		loc, _ := time.LoadLocation("Asia/Kolkata")
 		if rawTick.Timestamp.In(loc).Hour() == 15 && rawTick.Timestamp.In(loc).Minute() >= 15 {
 			rm.executeBrokerOrder(symbol, pos, "Intraday 15:15 Force Square-off", rawTick.Timestamp)
@@ -92,6 +115,11 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
+
+	// Double check state inside write lock safety zone
+	if rm.takeProfitHit[symbol] {
+		return
+	}
 
 	if decision == "GO_LONG" && pos.NetQuantity == 0 {
 		if exitTime, ok := rm.lastExitTime[symbol]; ok {
@@ -123,7 +151,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 		logger.Infof("[Money Manager] Approved Setup. Predicted tax buffer: ₹%.2f. Executing BUY for %s", predictedFees, symbol)
 
-		// ⚡ Itemized Accounting Ledger Updates
 		charges := computeItemizedCharges(allowedQty, rawTick.LastPrice)
 		rm.globalSummary.Brokerage += charges.Brokerage
 		rm.globalSummary.STT += charges.STT
@@ -178,7 +205,6 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 
 	logger.Warnf("[Money Manager] Executing Square-Off for %s. Reason: %s", symbol, reason)
 
-	// ⚡ Record Sell/Exit Side itemized fees into our historical logging structure
 	charges := computeItemizedCharges(pos.NetQuantity, pos.AveragePrice)
 	rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
 		Timestamp:       timestamp,
@@ -186,7 +212,7 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 		Symbol:          symbol,
 		Exchange:        "NSE",
 		Quantity:        pos.NetQuantity,
-		AveragePrice:    pos.AveragePrice, // Captures entry-basis baseline calculation context
+		AveragePrice:    pos.AveragePrice,
 		AllocatedCharge: charges.TotalCharges,
 	})
 

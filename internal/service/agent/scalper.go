@@ -31,7 +31,7 @@ func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positio
 	raw := enrichedTick.Raw
 	symbol := raw.StockName
 
-	// 1. Thread-Safe extraction of the macro context
+	// 1. Extract the macro 1m candle context
 	sa.mu.RLock()
 	macroMap, exists := sa.macroHorizons[symbol]
 	if !exists || macroMap == nil {
@@ -45,56 +45,30 @@ func (sa *ScalperAgent) AnalyzeMarket(enrichedTick *models.EnrichedTick, positio
 	}
 	sa.mu.RUnlock()
 
-	// 2. Strategy Execution Engine using upstream enrichment rolling states directly
+	// 2. Simplified Execution Engine
 	switch positionSide {
 	case "FLAT", "":
-		// ⚡ Macro Filter: Did the last closed candle establish high institutional velocity context?
-		isHighVolumeAbnormal := bar1m.Analytics.VolumeRank >= 6
-		isPriceStretching := bar1m.Analytics.PriceRank >= 6
-
-		if isHighVolumeAbnormal && isPriceStretching {
-			// ⚡ Micro Trigger: Is the CURRENT incoming tick showing sustained institutional momentum?
-			// Relying on the upstream enrichment stage's pre-calculated rolling calculations directly.
-			isLiveVelocitySustained := enrichedTick.Enrichment.VolumeRank >= 5
-
-			if isLiveVelocitySustained {
-				// --- EVALUATE LONG BREAKOUT SETUP ---
-				isBullishConviction := bar1m.Analytics.Direction == models.DirStrongBullish || bar1m.Analytics.Direction == models.DirBullish
-				if isBullishConviction && raw.LastPrice >= bar1m.Close {
-					return "GO_LONG", true
-				}
-
-				// --- EVALUATE SHORT BREAKDOWN SETUP ---
-				isBearishConviction := bar1m.Analytics.Direction == models.DirStrongBearish || bar1m.Analytics.Direction == models.DirBearish
-				if isBearishConviction && raw.LastPrice <= bar1m.Close {
-					return "GO_SHORT", true
-				}
+		// ENTRY: Is the closed macro candle a high-velocity momentum breakout?
+		isHighVolume := bar1m.Analytics.VolumeRank >= 6
+		if isHighVolume {
+			// Ride the momentum in the direction of the macro bar
+			if bar1m.Analytics.Direction == models.DirStrongBullish || bar1m.Analytics.Direction == models.DirBullish {
+				return "GO_LONG", true
+			}
+			if bar1m.Analytics.Direction == models.DirStrongBearish || bar1m.Analytics.Direction == models.DirBearish {
+				return "GO_SHORT", true
 			}
 		}
 
 	case "LONG":
-		// ⚡ Micro Trigger: Emergency Exit on immediate high-volume downside transaction pressure
-		if enrichedTick.Enrichment.VolumeRank >= 6 && raw.LastPrice < bar1m.Close {
-			return "EXIT_LONG", true
-		}
-
-		// ⚡ Macro Filter: Technical Exit on completed structural candle fatigue
-		if bar1m.Analytics.Direction == models.DirBearishAbsorption ||
-			bar1m.Analytics.Direction == models.DirStrongBearish ||
-			bar1m.Analytics.Direction == models.DirBearish {
+		// EXIT LONG: Exit only if structural absorption confirms buyers are trapped
+		if bar1m.Analytics.Direction == models.DirBearishAbsorption {
 			return "EXIT_LONG", true
 		}
 
 	case "SHORT":
-		// ⚡ Micro Trigger: Emergency Exit on immediate high-volume upside transaction pressure
-		if enrichedTick.Enrichment.VolumeRank >= 6 && raw.LastPrice > bar1m.Close {
-			return "EXIT_SHORT", true
-		}
-
-		// ⚡ Macro Filter: Technical Exit on completed structural candle fatigue
-		if bar1m.Analytics.Direction == models.DirBullishAbsorption ||
-			bar1m.Analytics.Direction == models.DirStrongBullish ||
-			bar1m.Analytics.Direction == models.DirBullish {
+		// EXIT SHORT: Exit only if structural absorption confirms sellers are trapped
+		if bar1m.Analytics.Direction == models.DirBullishAbsorption {
 			return "EXIT_SHORT", true
 		}
 	}
