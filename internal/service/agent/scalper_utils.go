@@ -2,10 +2,6 @@ package agent
 
 import "time"
 
-// ------------------------------------------------------------------------
-// STEP 1-3 UTILITIES: TIME, TIME-ZONES & BREAKOUT RANGE BOUNDARIES
-// ------------------------------------------------------------------------
-
 func (sa *ScalperAgent) getMarketMinutes(t time.Time) (int, time.Time) {
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	if err == nil {
@@ -43,5 +39,15 @@ func (sa *ScalperAgent) UpdateOpeningRangeBoundaries(state *InstrumentState, mar
 				state.OpeningLow = state.LatestPrice
 			}
 		}
+	}
+}
+
+// RegisterPositionClosure updates state memory frames to activate the 5-minute cooldown mechanism
+func (sa *ScalperAgent) RegisterPositionClosure(symbol string, completionTime time.Time) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+
+	if state, exists := sa.Registry[symbol]; exists {
+		state.LastExitTime = completionTime
 	}
 }
