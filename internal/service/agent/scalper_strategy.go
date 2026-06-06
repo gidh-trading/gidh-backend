@@ -15,177 +15,200 @@ func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryP
 		return "HOLD"
 	}
 
-	// Step 1: Is the market even open or past the cutoff?
+	// ------------------------------------------------------------------------
+	// STEP 1: TIME BOUNDARY GUARDRAILS
+	// ------------------------------------------------------------------------
 	marketMins, tickTime := sa.getMarketMinutes(state.LastUpdated)
 	if marketMins < 555 || marketMins > 630 {
 		return sa.handleSessionCloseExits(currentSide)
 	}
 
-	// Step 2: Handle Active Position Management (Exits)
+	// ------------------------------------------------------------------------
+	// STEP 2: ACTIVE POSITION MANAGEMENT (Inlined Tape Resolution & Risk Brackets)
+	// ------------------------------------------------------------------------
 	if currentSide != "FLAT" && currentSide != "" {
-		return sa.EvaluateActiveExits(state, entryPrice, currentSide)
+		dir := string(state.LatestDirection)
+
+		if currentSide == "SHORT" {
+			// A. If opposite absorption prints on the ribbon, we WAIT for resolution
+			if dir == "BULLISH_ABSORPTION" {
+				return "HOLD"
+			}
+
+			// B. RESOLUTION TRIGGER: Passive buyers turn aggressive and lift the offers
+			if dir == "BULLISH" || dir == "STRONG_BULLISH" {
+				return "EXIT_SHORT"
+			}
+
+			// C. RISK BACKSTOP: Emergency structural/volatility bracket breach
+			if sa.EvaluateDualQueueBrackets(state, entryPrice, "SHORT") {
+				return "EXIT_SHORT"
+			}
+		}
+
+		if currentSide == "LONG" {
+			// A. If overhead passive sellers step in, hold and wait for resolution
+			if dir == "BEARISH_ABSORPTION" {
+				return "HOLD"
+			}
+
+			// B. RESOLUTION TRIGGER: Sellers overwhelm the order block and hit bids aggressively
+			if dir == "BEARISH" || dir == "STRONG_BEARISH" {
+				return "EXIT_LONG"
+			}
+
+			// C. RISK BACKSTOP: Emergency structural/volatility bracket breach
+			if sa.EvaluateDualQueueBrackets(state, entryPrice, "LONG") {
+				return "EXIT_LONG"
+			}
+		}
+
+		return "HOLD"
 	}
 
-	// Step 3: Run Entry Guardrails (Cooldowns & Range building blocks)
+	// ------------------------------------------------------------------------
+	// STEP 3: ENTRY GUARDRAILS (Post-Trade Cooldowns & Range Discovery)
+	// ------------------------------------------------------------------------
 	if sa.isEngineInCooldown(state, tickTime) {
 		return "HOLD"
 	}
 
 	sa.UpdateOpeningRangeBoundaries(state, marketMins)
-	if marketMins < 560 { // Block all trades between 9:15 and 9:20 AM
+	if marketMins < 560 { // Strict observation lockout from 9:15 AM to 9:20 AM
 		return "HOLD"
 	}
 
-	// Step 4: Calculate Core Alpha Metrics
-	vwapSlope := sa.calculateVwapSlope(state)
-	bullWeight, bearWeight := sa.calculateVolumeWeights(state, 10, 6)
-
-	// Step 5: Evaluate Strategy Rules Execution Step
-	return sa.EvaluateMorningStrategyRules(state, vwapSlope, bullWeight, bearWeight)
-}
-
-// ------------------------------------------------------------------------
-// STEP 1-3 UTILITIES: TIME, TIME-ZONES & BREAKOUT RANGE BOUNDARIES
-// ------------------------------------------------------------------------
-
-func (sa *ScalperAgent) getMarketMinutes(t time.Time) (int, time.Time) {
-	loc, err := time.LoadLocation("Asia/Kolkata")
-	if err == nil {
-		t = t.In(loc)
-	}
-	hour, minute, _ := t.Clock()
-	return (hour * 60) + minute, t
-}
-
-func (sa *ScalperAgent) handleSessionCloseExits(currentSide string) string {
-	if currentSide == "SHORT" {
-		return "EXIT_SHORT"
-	}
-	if currentSide == "LONG" {
-		return "EXIT_LONG"
-	}
-	return "HOLD"
-}
-
-func (sa *ScalperAgent) isEngineInCooldown(state *InstrumentState, currentTickTime time.Time) bool {
-	return !state.LastExitTime.IsZero() && currentTickTime.Sub(state.LastExitTime) < 5*time.Minute
-}
-
-func (sa *ScalperAgent) UpdateOpeningRangeBoundaries(state *InstrumentState, marketMins int) {
-	if marketMins >= 555 && marketMins < 560 {
-		if !state.OpeningRangeSet {
-			state.OpeningHigh = state.LatestPrice
-			state.OpeningLow = state.LatestPrice
-			state.OpeningRangeSet = true
-		} else {
-			if state.LatestPrice > state.OpeningHigh {
-				state.OpeningHigh = state.LatestPrice
-			}
-			if state.LatestPrice < state.OpeningLow {
-				state.OpeningLow = state.LatestPrice
-			}
-		}
-	}
-}
-
-// ------------------------------------------------------------------------
-// STEP 4 UTILITIES: MATH INDICATORS & TAPE VOLUMES
-// ------------------------------------------------------------------------
-
-func (sa *ScalperAgent) calculateVwapSlope(state *InstrumentState) float64 {
-	if state.PrevSessionVWAP == 0 {
-		state.PrevSessionVWAP = state.LatestSessionVWAP
-		return 0.0
-	}
-	slope := state.LatestSessionVWAP - state.PrevSessionVWAP
-	state.PrevSessionVWAP = state.LatestSessionVWAP // update state memory frame
-	return slope
-}
-
-func (sa *ScalperAgent) calculateVolumeWeights(state *InstrumentState, ticksLookback int, minRank int) (float64, float64) {
-	recentTicks := sa.getLastTransactionsUnlocked(state, ticksLookback)
-	var bullWeight, bearWeight float64
-
-	for _, tx := range recentTicks {
-		if tx.VolumeRank >= minRank {
-			switch tx.Direction {
-			case "BULLISH", "STRONG_BULLISH", "BULLISH_ABSORPTION":
-				bullWeight += tx.Volume
-			case "BEARISH", "STRONG_BEARISH", "BEARISH_ABSORPTION":
-				bearWeight += tx.Volume
-			}
-		}
-	}
-	return bullWeight, bearWeight
-}
-
-// EvaluateMorningStrategyRules serves as your clean canvas to write trading rules.
-// Each rule is broken down as an explicit boolean step.
-func (sa *ScalperAgent) EvaluateMorningStrategyRules(
-	state *InstrumentState,
-	vwapSlope float64,
-	bullWeight float64,
-	bearWeight float64,
-) string {
-
-	// STEP A: Structural Anchor Verification
+	// ------------------------------------------------------------------------
+	// STEP 4: ENTRY STRATEGY RULES MATRIX (Direction & Volume-Driven)
+	// ------------------------------------------------------------------------
 	if !state.OpeningRangeSet || state.OpeningHigh == 0 {
 		return "HOLD"
 	}
 
-	// STEP B: Chop Zone / Centroid Proximity Check
+	// Chop Zone Filter: Avoid trading too close to the session average baseline
 	distFromVWAP := ((state.LatestPrice - state.LatestSessionVWAP) / state.LatestSessionVWAP) * 100
 	if math.Abs(distFromVWAP) < 0.15 {
-		return "HOLD" // Price is hovering inside the high-churn fair value zone
+		return "HOLD"
 	}
 
-	// ------------------------------------------------------------------------
-	// SHORT STRATEGY PATTERN (Institutional Breakdown Setup)
-	// ------------------------------------------------------------------------
-	isBelowVWAP := state.LatestPrice < state.LatestSessionVWAP
-	isVwapSlopingDown := vwapSlope < 0
-	isOpeningLowBroken := state.LatestPrice < state.OpeningLow
-	isBearishTapeDominant := bearWeight > (bullWeight * 1.5)
+	// Establish institutional baseline parameters
+	isHighVolumeParticipant := state.LatestVolumeRank >= 6
+	dir := string(state.LatestDirection)
 
-	// Combine components into a transparent execution gate
-	if isBelowVWAP && isVwapSlopingDown && isOpeningLowBroken && isBearishTapeDominant {
+	// --- SHORT PATTERN CRITERIA ---
+	isBelowVWAP := state.LatestPrice < state.LatestSessionVWAP
+	isOpeningLowBroken := state.LatestPrice < state.OpeningLow
+	isBearishTape := dir == "BEARISH" || dir == "STRONG_BEARISH"
+
+	if isBelowVWAP && isOpeningLowBroken && isHighVolumeParticipant && isBearishTape {
 		return "GO_SHORT"
 	}
 
-	// ------------------------------------------------------------------------
-	// LONG STRATEGY PATTERN (Institutional Breakout Setup)
-	// ------------------------------------------------------------------------
+	// --- LONG PATTERN CRITERIA ---
 	isAboveVWAP := state.LatestPrice > state.LatestSessionVWAP
-	isVwapSlopingUp := vwapSlope > 0
 	isOpeningHighBroken := state.LatestPrice > state.OpeningHigh
-	isBullishTapeDominant := bullWeight > (bearWeight * 1.5)
+	isBullishTape := dir == "BULLISH" || dir == "STRONG_BULLISH"
 
-	// Combine components into a transparent execution gate
-	if isAboveVWAP && isVwapSlopingUp && isOpeningHighBroken && isBullishTapeDominant {
+	if isAboveVWAP && isOpeningHighBroken && isHighVolumeParticipant && isBullishTape {
 		return "GO_LONG"
 	}
 
 	return "HOLD"
 }
 
+// ------------------------------------------------------------------------
+// STEP 4: ENTRY STRATEGY RULES MATRIX (Direction-Driven Open)
+// ------------------------------------------------------------------------
+
+func (sa *ScalperAgent) EvaluateMorningStrategyRules(state *InstrumentState, minRank int) string {
+	// Structural Anchor Verification
+	if !state.OpeningRangeSet || state.OpeningHigh == 0 {
+		return "HOLD"
+	}
+
+	// Chop Zone / Centroid Proximity Check
+	distFromVWAP := ((state.LatestPrice - state.LatestSessionVWAP) / state.LatestSessionVWAP) * 100
+	if math.Abs(distFromVWAP) < 0.15 {
+		return "HOLD" // Price is hovering inside the high-churn fair value zone
+	}
+
+	// Microscopic Order Flow Checks
+	isHighVolumeParticipant := state.LatestVolumeRank >= minRank
+	dir := string(state.LatestDirection)
+
+	// --- SHORT PATTERN CRITERIA ---
+	isBelowVWAP := state.LatestPrice < state.LatestSessionVWAP
+	isOpeningLowBroken := state.LatestPrice < state.OpeningLow
+	isBearishTape := dir == "BEARISH" || dir == "STRONG_BEARISH"
+
+	if isBelowVWAP && isOpeningLowBroken && isHighVolumeParticipant && isBearishTape {
+		return "GO_SHORT"
+	}
+
+	// --- LONG PATTERN CRITERIA ---
+	isAboveVWAP := state.LatestPrice > state.LatestSessionVWAP
+	isOpeningHighBroken := state.LatestPrice > state.OpeningHigh
+	isBullishTape := dir == "BULLISH" || dir == "STRONG_BULLISH"
+
+	if isAboveVWAP && isOpeningHighBroken && isHighVolumeParticipant && isBullishTape {
+		return "GO_LONG"
+	}
+
+	return "HOLD"
+}
+
+// ------------------------------------------------------------------------
+// STEP 5: ACTIVE POSITION MANAGEMENT (Tape Resolution Exits)
+// ------------------------------------------------------------------------
+
 func (sa *ScalperAgent) EvaluateActiveExits(state *InstrumentState, entryPrice float64, currentSide string) string {
+	dir := string(state.LatestDirection)
+
+	// --- POSITION IS SHORT ---
 	if currentSide == "SHORT" {
-		if state.LatestDirection == "BULLISH_ABSORPTION" || state.LatestDirection == "STRONG_BULLISH" {
+		// 1. If counter-absorption is printing on the ribbon, we WAIT for resolution
+		if dir == "BULLISH_ABSORPTION" {
+			return "HOLD"
+		}
+
+		// 2. RESOLUTION ACCELERATION: Buyers break through the block and absorb completely
+		if dir == "BULLISH" || dir == "STRONG_BULLISH" {
 			return "EXIT_SHORT"
 		}
+
+		// 3. Mathematical Risk Guardrails Fallback
 		if sa.EvaluateDualQueueBrackets(state, entryPrice, "SHORT") {
 			return "EXIT_SHORT"
 		}
 	}
 
+	// --- POSITION IS LONG ---
 	if currentSide == "LONG" {
-		if state.LatestDirection == "BEARISH_ABSORPTION" || state.LatestDirection == "STRONG_BEARISH" {
+		// 1. If overhead passive sellers step in, hold and look for absorption breakdown
+		if dir == "BEARISH_ABSORPTION" {
+			return "HOLD"
+		}
+
+		// 2. RESOLUTION ACCELERATION: Sellers overpower order blocks completely
+		if dir == "BEARISH" || dir == "STRONG_BEARISH" {
 			return "EXIT_LONG"
 		}
+
+		// 3. Mathematical Risk Guardrails Fallback
 		if sa.EvaluateDualQueueBrackets(state, entryPrice, "LONG") {
 			return "EXIT_LONG"
 		}
 	}
 
 	return "HOLD"
+}
+
+// RegisterPositionClosure logs trade updates to fire the Cooldown module engine
+func (sa *ScalperAgent) RegisterPositionClosure(symbol string, completionTime time.Time) {
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+
+	if state, exists := sa.Registry[symbol]; exists {
+		state.LastExitTime = completionTime
+	}
 }
