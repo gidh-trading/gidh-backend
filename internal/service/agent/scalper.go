@@ -122,3 +122,64 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 		state.TimeQueue = state.TimeQueue[validIdx:]
 	}
 }
+
+// GetLastTransactions returns the last 'count' snapshots from the transaction-based queue.
+// If 'count' is greater than available data, it safely returns all available entries.
+func (sa *ScalperAgent) GetLastTransactions(symbol string, count int) []HistoricTickSnapshot {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
+
+	state, exists := sa.Registry[symbol]
+	if !exists || len(state.TxQueue) == 0 || count <= 0 {
+		return nil
+	}
+
+	totalElements := len(state.TxQueue)
+	if count > totalElements {
+		count = totalElements
+	}
+
+	// Slice from the end of the queue to get the most recent 'count' elements
+	startIndex := totalElements - count
+	result := make([]HistoricTickSnapshot, count)
+	copy(result, state.TxQueue[startIndex:])
+
+	return result
+}
+
+// GetRecentMinutesData returns all snapshots from the time-based queue that fell within
+// the last 'minutes' duration relative to the most recent tick's timestamp.
+func (sa *ScalperAgent) GetRecentMinutesData(symbol string, minutes int) []HistoricTickSnapshot {
+	sa.mu.RLock()
+	defer sa.mu.RUnlock()
+
+	state, exists := sa.Registry[symbol]
+	if !exists || len(state.TimeQueue) == 0 || minutes <= 0 {
+		return nil
+	}
+
+	// Determine baseline: Use the latest tick's timestamp as the current track reference
+	latestTimestamp := state.TimeQueue[len(state.TimeQueue)-1].Timestamp
+	cutoffTime := latestTimestamp.Add(-time.Duration(minutes) * time.Minute)
+
+	// Since TimeQueue is chronologically sorted, find the first valid index
+	validIdx := -1
+	for i, tick := range state.TimeQueue {
+		if !tick.Timestamp.Before(cutoffTime) {
+			validIdx = i
+			break
+		}
+	}
+
+	// If no elements fall within the window, return nil
+	if validIdx == -1 {
+		return nil
+	}
+
+	// Extract and copy the relevant window slice
+	relevantData := state.TimeQueue[validIdx:]
+	result := make([]HistoricTickSnapshot, len(relevantData))
+	copy(result, relevantData)
+
+	return result
+}

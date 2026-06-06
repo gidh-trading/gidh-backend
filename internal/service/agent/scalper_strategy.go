@@ -50,6 +50,7 @@ func (sa *ScalperAgent) EvaluateDualQueueEntry(state *InstrumentState) bool {
 	for _, t := range state.TimeQueue {
 		timeSum += t.Price
 	}
+	
 	avgPrice5m := timeSum / float64(len(state.TimeQueue))
 
 	if state.LatestPrice >= avgPrice5m {

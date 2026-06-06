@@ -189,7 +189,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
 
 		// Instantiate your isolated multi-file Data Registry (50 transactions & fluid rolling 5-minute queues)
-		scalperAgent := agent.NewScalperAgent(50, 5*time.Minute)
+		scalperAgent := agent.NewScalperAgent(500, 60*time.Minute)
 
 		// Instantiate your split multi-file Finance Controller, injecting dependencies
 		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)
