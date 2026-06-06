@@ -8,12 +8,13 @@ import (
 
 // HistoricTickSnapshot captures a clean state of an individual transaction element
 type HistoricTickSnapshot struct {
-	Timestamp  time.Time
-	Price      float64
-	Volume     float64
-	VolumeRank int
-	Direction  models.DirectionState
-	ChangePct  float64
+	Timestamp   time.Time
+	Price       float64
+	Volume      float64
+	SessionVWAP float64
+	VolumeRank  int
+	Direction   models.DirectionState
+	ChangePct   float64
 }
 
 // InstrumentState serves as the engineering data vault for a single asset ticker.
@@ -22,10 +23,11 @@ type InstrumentState struct {
 	LastUpdated time.Time
 
 	// Microscopic Live Scalar Trackers (Latest streaming tick info)
-	LatestPrice      float64
-	LatestChangePct  float64
-	LatestVolumeRank int
-	LatestDirection  models.DirectionState
+	LatestPrice       float64
+	LatestSessionVWAP float64
+	LatestChangePct   float64
+	LatestVolumeRank  int
+	LatestDirection   models.DirectionState
 
 	// QUEUE 1: Transaction-Based Rolling Window Memory (Fixed Count)
 	TxQueue []HistoricTickSnapshot
@@ -70,8 +72,9 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 
 	// 1. Ingest immediate live scalar lookups
 	state.LatestPrice = raw.LastPrice
+	state.LatestSessionVWAP = raw.AverageTradedPrice
 	state.LatestChangePct = raw.Change
-	state.LastUpdated = time.Now()
+	state.LastUpdated = raw.Timestamp
 
 	volRank := 0
 	state.LatestVolumeRank = enrichedTick.Enrichment.VolumeRank
@@ -86,12 +89,13 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 
 	// 2. Assemble historical snapshot element frame
 	snapshot := HistoricTickSnapshot{
-		Timestamp:  raw.Timestamp,
-		Price:      raw.LastPrice,
-		Volume:     vol,
-		VolumeRank: volRank,
-		Direction:  enrichedTick.Enrichment.Direction,
-		ChangePct:  raw.Change,
+		Timestamp:   raw.Timestamp,
+		Price:       raw.LastPrice,
+		Volume:      vol,
+		SessionVWAP: raw.AverageTradedPrice,
+		VolumeRank:  volRank,
+		Direction:   enrichedTick.Enrichment.Direction,
+		ChangePct:   raw.Change,
 	}
 
 	// ------------------------------------------------------------------------

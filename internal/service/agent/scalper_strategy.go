@@ -1,13 +1,12 @@
 package agent
 
-import "fmt"
-
 // GenerateSignal handles the Morning Momentum Flow (MMF) strategy.
 func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryPrice float64) string {
 	sa.mu.RLock()
 	defer sa.mu.RUnlock()
 
 	state, exists := sa.Registry[symbol]
+
 	if !exists || len(state.TxQueue) == 0 || len(state.TimeQueue) == 0 {
 		return "HOLD"
 	}
@@ -15,9 +14,8 @@ func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryP
 	// 1. STRICT TIME GATING (9:15 AM to 10:30 AM IST)
 	// Assuming state.LastUpdated represents the tick time.
 	// You may need to ensure the timezone is set to IST if trading Indian markets.
-	hour, min, _ := state.LastUpdated.Clock()
-	marketMinutes := hour*60 + min
-	fmt.Println(marketMinutes)
+	hour, minute, _ := state.LastUpdated.Clock()
+	marketMinutes := hour*60 + minute
 
 	// 9:15 = 555 mins, 10:30 = 630 mins
 	if marketMinutes < 555 || marketMinutes > 630 {
@@ -77,24 +75,9 @@ func (sa *ScalperAgent) EvaluateMorningStrategy(state *InstrumentState) string {
 		return ""
 	}
 
-	// Calculate the Rolling Session VWAP using the TimeQueue (which holds up to 60 mins of data)
-	var totalVolume float64 = 0.0
-	var totalValue float64 = 0.0
-
-	for _, t := range state.TimeQueue {
-		totalVolume += t.Volume
-		totalValue += t.Price * t.Volume
-	}
-
-	if totalVolume == 0 {
-		return ""
-	}
-
-	sessionVWAP := totalValue / totalVolume
-
 	// LOGIC: Momentum Alignment
 	// If current price is below the Morning VWAP, we are in a Bearish flow.
-	if state.LatestPrice < sessionVWAP {
+	if state.LatestPrice < state.LatestSessionVWAP {
 		// Look for a bearish micro-burst to jump on
 		if state.LatestDirection == "BEARISH" || state.LatestDirection == "STRONG_BEARISH" {
 			return "GO_SHORT"
@@ -102,7 +85,7 @@ func (sa *ScalperAgent) EvaluateMorningStrategy(state *InstrumentState) string {
 	}
 
 	// If current price is above the Morning VWAP, we are in a Bullish flow.
-	if state.LatestPrice > sessionVWAP {
+	if state.LatestPrice > state.LatestSessionVWAP {
 		// Look for a bullish micro-burst
 		if state.LatestDirection == "BULLISH" || state.LatestDirection == "STRONG_BULLISH" {
 			return "GO_LONG"
