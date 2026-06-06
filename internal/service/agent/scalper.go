@@ -166,29 +166,3 @@ func (sa *ScalperAgent) getRecentMinutesDataUnlocked(state *InstrumentState, min
 
 	return result
 }
-
-// ============================================================================
-// PUBLIC THREAD-SAFE API (Use these from other packages/external components)
-// ============================================================================
-
-func (sa *ScalperAgent) GetLastTransactions(symbol string, count int) []HistoricTickSnapshot {
-	sa.mu.RLock()
-	defer sa.mu.RUnlock()
-
-	state, exists := sa.Registry[symbol]
-	if !exists {
-		return nil
-	}
-	return sa.getLastTransactionsUnlocked(state, count)
-}
-
-func (sa *ScalperAgent) GetRecentMinutesData(symbol string, minutes int) []HistoricTickSnapshot {
-	sa.mu.RLock()
-	defer sa.mu.RUnlock()
-
-	state, exists := sa.Registry[symbol]
-	if !exists {
-		return nil
-	}
-	return sa.getRecentMinutesDataUnlocked(state, minutes)
-}

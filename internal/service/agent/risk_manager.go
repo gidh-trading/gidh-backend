@@ -159,7 +159,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		pos.AveragePrice = rawTick.LastPrice
 		pos.UnrealizedPnL = 0.0
 
-		_, _ = rm.orderManager.PlaceOrder(context.Background(), orderReq)
+		go rm.orderManager.PlaceOrder(context.Background(), orderReq)
 
 	} else if (signal == "EXIT_LONG" || signal == "EXIT_SHORT") && pos.NetQuantity != 0 {
 		// Verify signal side corresponds with active position state before clearing
@@ -209,5 +209,5 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 	pos.AveragePrice = 0.0
 	pos.UnrealizedPnL = 0.0
 
-	_, _ = rm.orderManager.PlaceOrder(context.Background(), exitReq)
+	go rm.orderManager.PlaceOrder(context.Background(), exitReq)
 }
