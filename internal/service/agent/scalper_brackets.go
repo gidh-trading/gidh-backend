@@ -1,7 +1,7 @@
 package agent
 
 // EvaluateDualQueueBrackets tracks dynamic protection levels by measuring time and count metrics
-func (sa *ScalperAgent) EvaluateDualQueueBrackets(state *InstrumentState, entryPrice float64) bool {
+func (sa *ScalperAgent) EvaluateDualQueueBrackets(state *InstrumentState, entryPrice float64, currentSide string) bool {
 	// 1. DYNAMIC TIME-BASED MONITORING
 	// FIX: Use unlocked variant
 	timeData5m := sa.getRecentMinutesDataUnlocked(state, 5)
@@ -16,7 +16,12 @@ func (sa *ScalperAgent) EvaluateDualQueueBrackets(state *InstrumentState, entryP
 
 	if totalTimeVolume > 0 {
 		timeVwap5m := totalTimeValue / totalTimeVolume
-		if state.LatestPrice >= timeVwap5m {
+		// If SHORT, exit if price spikes above the 5m VWAP
+		if currentSide == "SHORT" && state.LatestPrice >= timeVwap5m {
+			return true
+		}
+		// If LONG, exit if price breaks below the 5m VWAP
+		if currentSide == "LONG" && state.LatestPrice <= timeVwap5m {
 			return true
 		}
 	}
@@ -36,7 +41,12 @@ func (sa *ScalperAgent) EvaluateDualQueueBrackets(state *InstrumentState, entryP
 	if totalTxVolume > 0 {
 		txVwap50 := totalTxValue / totalTxVolume
 		distFromTxVwap := ((state.LatestPrice - txVwap50) / txVwap50) * 100
-		if distFromTxVwap <= -1.50 {
+
+		// Asymmetric logic protection drop
+		if currentSide == "LONG" && distFromTxVwap <= -1.50 {
+			return true
+		}
+		if currentSide == "SHORT" && distFromTxVwap >= 1.50 {
 			return true
 		}
 	}

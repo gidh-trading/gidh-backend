@@ -34,6 +34,16 @@ type InstrumentState struct {
 
 	// QUEUE 2: Time-Based Rolling Window Memory (Fluid Count, Fixed Duration)
 	TimeQueue []HistoricTickSnapshot
+
+	// ========================================================================
+	// NEW STRUCTURAL METRICS FOR MORNING STRATEGY
+	// ========================================================================
+	OpeningRangeSet bool    // Has the 9:15-9:20 range been calculated yet?
+	OpeningHigh     float64 // Highest price printed between 9:15 and 9:20 AM
+	OpeningLow      float64 // Lowest price printed between 9:15 and 9:20 AM
+
+	LastExitTime    time.Time // Timestamp of the last position closure (for Cooldown)
+	PrevSessionVWAP float64   // Used to measure the directional slope of VWAP over time
 }
 
 type ScalperAgent struct {
