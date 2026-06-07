@@ -5,14 +5,12 @@ import (
 )
 
 type MorningRankStrategy struct {
-	Timeframe            string
 	FixedProfitTargetINR float64
 	MaxLossTargetINR     float64
 }
 
 func NewMorningRankStrategy() *MorningRankStrategy {
 	return &MorningRankStrategy{
-		Timeframe:            "1m",
 		FixedProfitTargetINR: 2000.0, // Hardcoded cash target goal
 		MaxLossTargetINR:     600.0,  // Risk barrier cap
 	}
@@ -21,15 +19,15 @@ func NewMorningRankStrategy() *MorningRankStrategy {
 func (s *MorningRankStrategy) Name() string { return "Morning_4Method_Ranks" }
 
 func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
-	bars := state.BarHistory[s.Timeframe]
-	if len(bars) == 0 || state.LiveSessionVWAP <= 0.0 {
+	bars1m := state.BarHistory["1m"]
+	if len(bars1m) == 0 || state.LiveSessionVWAP <= 0.0 {
 		return "HOLD"
 	}
 
-	latestClosedBar := bars[len(bars)-1]
+	latestClosedBar := bars1m[len(bars1m)-1]
 	analytics := latestClosedBar.Analytics
 
-	if analytics.VolumeRank == 7 {
+	if analytics.VolumeRank >= 6 {
 
 		// Evaluate using 5% of Daily ATR as our VWAP Band channel width
 		bandState := evaluateVWAPBand(state, 0.05)
@@ -50,12 +48,12 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 }
 
 func (s *MorningRankStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	bars := state.BarHistory[s.Timeframe]
-	if len(bars) == 0 {
+	bars1m := state.BarHistory["1m"]
+	if len(bars1m) == 0 {
 		return "HOLD"
 	}
 
-	latestClosedBar := bars[len(bars)-1]
+	latestClosedBar := bars1m[len(bars1m)-1]
 	analytics := latestClosedBar.Analytics
 
 	// 1. General Low-Volume Momentum Drop: Exit if absolute session-wise activity dries up completely
