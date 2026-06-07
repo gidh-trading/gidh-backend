@@ -105,7 +105,7 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 	isLowerThanOpen := bar.Close < bar.Open
 
 	// Look at the accumulated peak volume intensity over the course of this bar's life
-	if bar.Analytics.VolumeRank >= 6 && bar.Analytics.PriceRank <= 4 {
+	if bar.Analytics.VolumeRank >= 7 && bar.Analytics.PriceRank <= 4 {
 		if positionRatio >= 0.50 {
 			bar.Analytics.Direction = models.DirBullishAbsorption
 			return
