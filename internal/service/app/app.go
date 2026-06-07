@@ -2,8 +2,9 @@ package app
 
 import (
 	"context"
-	"gidh-backend/internal/service/agent"
 	"gidh-backend/internal/service/order"
+	"gidh-backend/internal/service/risk"
+	"gidh-backend/internal/service/scalper"
 	"net/http"
 	"sync"
 	"time"
@@ -28,7 +29,7 @@ type App struct {
 	Pipeline       *Pipeline
 	DBWriter       *writer.DBWriter
 	OrderManager   order.PositionManager
-	RiskManager    *agent.RiskManager
+	RiskManager    *risk.RiskManager
 	kiteClient     *kiteconnect.Client
 	server         *http.Server
 	wsHub          *ws.Hub
@@ -184,22 +185,27 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// 5. Assemble the streamlined Execution Pipeline Stage
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barManager, scoutStage, a.DBWriter)
 
-	// ⚡ INTEGRATION BOUNDARY: Guard agent execution to operate STRICTLY in backtesting
+	// ========================================================================
+	// ⚡ NEW MODULAR SEPARATED INTERFACE ASSEMBLY PIPELINE
+	// ========================================================================
 	if a.Config.Mode != "live" {
-		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
+		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Modular Algorithmic Teams Layer.")
 
-		scalperAgent := agent.NewScalperAgent(60*time.Minute, 60*time.Minute)
+		// Step C: Initialize the pure infrastructure data engine, enforcing a 1-hour bar lookback cache
+		scalperEngine := scalper.NewEngine(1 * time.Hour)
 
-		// CONNECT PIPELINE: Direct closed bars from BarManager into Scalper Agent state registry cache automatically
-		barManager.MacroListener = scalperAgent
+		// CONNECT PIPELINE: Stream completed multi-timeframe candle structures straight into the bar map cache
+		barManager.MacroListener = scalperEngine
 
-		// Instantiate your split multi-file Finance Controller, injecting dependencies
-		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)
+		// Step D: Initialize your standalone Finance Controller, injecting the stateless trading desk
+		backtestMoneyManager := risk.NewRiskManager(a.OrderManager, scalperEngine)
 
-		// Map structural streaming ticks straight into the synchronous referee loops
-		a.Pipeline.BacktestAgent = backtestMoneyManager // Receives high-velocity EnrichedTicks
+		// Step E: Map high-velocity sequential tick features directly into the synchronized money manager
+		a.Pipeline.BacktestAgent = backtestMoneyManager
 
-		// Assign the app state container tracking references safely
+		// Step F: Assign the application state tracking properties cleanly using our updated package types
+		// Note: Ensure that the `App` struct field type definitions match your brand-new packages:
+		// e.g., a.RiskManager *risk.RiskManager
 		a.RiskManager = backtestMoneyManager
 
 	} else {
