@@ -25,24 +25,7 @@ func (sa *ScalperAgent) isEngineInCooldown(state *InstrumentState, currentTickTi
 	return !state.LastExitTime.IsZero() && currentTickTime.Sub(state.LastExitTime) < 5*time.Minute
 }
 
-func (sa *ScalperAgent) UpdateOpeningRangeBoundaries(state *InstrumentState, marketMins int) {
-	if marketMins >= 555 && marketMins < 560 {
-		if !state.OpeningRangeSet {
-			state.OpeningHigh = state.LatestPrice
-			state.OpeningLow = state.LatestPrice
-			state.OpeningRangeSet = true
-		} else {
-			if state.LatestPrice > state.OpeningHigh {
-				state.OpeningHigh = state.LatestPrice
-			}
-			if state.LatestPrice < state.OpeningLow {
-				state.OpeningLow = state.LatestPrice
-			}
-		}
-	}
-}
-
-// RegisterPositionClosure updates state memory frames to activate the 5-minute cooldown mechanism
+// RegisterPositionClosure updates state memory to activate the 5-minute cooldown mechanism
 func (sa *ScalperAgent) RegisterPositionClosure(symbol string, completionTime time.Time) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()

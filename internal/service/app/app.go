@@ -188,8 +188,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	if a.Config.Mode != "live" {
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
 
-		// FIXED: NewScalperAgent signature matching. Max transactions: 500, Tick Window: 60 min, Bar history rolling capacity lookup window: 60 min
-		scalperAgent := agent.NewScalperAgent(500, 60*time.Minute, 60*time.Minute)
+		scalperAgent := agent.NewScalperAgent(60*time.Minute, 60*time.Minute)
 
 		// CONNECT PIPELINE: Direct closed bars from BarManager into Scalper Agent state registry cache automatically
 		barManager.MacroListener = scalperAgent

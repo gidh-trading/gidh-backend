@@ -2,155 +2,124 @@ package agent
 
 import (
 	"gidh-backend/pkg/logger"
+	"time"
 )
 
-// generateMorningSignal implements Phase 1 (9:15 AM - 10:30 AM) of the Feudal Age strategy.
-// generateMorningSignal implements Phase 1 (9:15 AM - 10:30 AM) of the Feudal Age strategy.
-func (sa *ScalperAgent) generateMorningSignal(state *InstrumentState, currentSide string) string {
-	// 1. TIME BOUNDARY GUARDRAILS
+// GenerateSignal handles the primary routing logic using the Absorption State Machine.
+func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryPrice float64) string {
+	sa.mu.RLock()
+	state, exists := sa.Registry[symbol]
+	sa.mu.RUnlock()
+
+	if !exists || len(state.TimeQueue) == 0 {
+		return "HOLD"
+	}
+
+	// 1. GLOBAL EMERGENCY RISK SHIELD (Hard Stop-Loss)
+	if currentSide != "FLAT" && currentSide != "" {
+		if sa.CheckGlobalEmergencyBrackets(state, entryPrice, currentSide) {
+			state.CurrentSetupPhase = PhaseNeutral // Reset on hard stop
+			if currentSide == "SHORT" {
+				return "EXIT_SHORT"
+			}
+			return "EXIT_LONG"
+		}
+	}
+
+	// 2. ACTIVE POSITION MANAGEMENT ("Enjoy the ride")
+	if currentSide != "FLAT" && currentSide != "" {
+		state.CurrentSetupPhase = PhaseActiveTrade
+		return sa.evaluateAbsorptionExit(state, currentSide)
+	}
+
+	// Initialize state if empty
+	if state.CurrentSetupPhase == "" {
+		state.CurrentSetupPhase = PhaseNeutral
+	}
+
 	marketMins, tickTime := sa.getMarketMinutes(state.LastUpdated)
-	if marketMins < 555 || marketMins > 630 {
+
+	// Session Close Check
+	if marketMins > 900 { // Adjust to your exact session close time
 		return sa.handleSessionCloseExits(currentSide)
 	}
 
-	// 2. ACTIVE POSITION MANAGEMENT
-	if currentSide != "FLAT" && currentSide != "" {
-		return sa.evaluateActivePositionExit(state, currentSide)
-	}
-
-	// 3. ENTRY PROTECTION CONTROLS
+	// 3. ENTRY COOLDOWN
 	if sa.isEngineInCooldown(state, tickTime) {
+		state.CurrentSetupPhase = PhaseNeutral
 		return "HOLD"
 	}
 
-	sa.UpdateOpeningRangeBoundaries(state, marketMins)
+	dir := string(state.LatestDirection)
+	volRank := state.LatestVolumeRank
 
-	// Changed from 570 (9:30 AM) to 560 (9:20 AM) so it doesn't wait forever
-	if marketMins < 560 || !state.OpeningRangeSet || state.OpeningHigh == 0 {
+	// ========================================================================
+	// THE PURE ORDER FLOW STATE MACHINE
+	// ========================================================================
+	switch state.CurrentSetupPhase {
+
+	case PhaseNeutral:
+		// TRIGGER: Look for the passive limit order footprint
+		if dir == "BULLISH_ABSORPTION" {
+			state.CurrentSetupPhase = PhaseBullishAbsorptionSpotted
+			state.PhaseTimestamp = tickTime
+			logger.Infof("[State Machine] BULLISH ABSORPTION on %s. Waiting for Buy Resolution.", state.Symbol)
+		} else if dir == "BEARISH_ABSORPTION" {
+			state.CurrentSetupPhase = PhaseBearishAbsorptionSpotted
+			state.PhaseTimestamp = tickTime
+			logger.Infof("[State Machine] BEARISH ABSORPTION on %s. Waiting for Sell Resolution.", state.Symbol)
+		}
 		return "HOLD"
-	}
 
-	// 4. THE STRICT MASTER TREND FILTER (Gatekeeper)
-	isAboveVWAP := state.LatestPrice > state.LatestSessionVWAP
-	isBelowVWAP := state.LatestPrice < state.LatestSessionVWAP
+	case PhaseBullishAbsorptionSpotted:
+		// INVALIDATION: Timeout or flip
+		if tickTime.Sub(state.PhaseTimestamp) > 5*time.Minute || dir == "STRONG_BEARISH" {
+			state.CurrentSetupPhase = PhaseNeutral
+			return "HOLD"
+		}
 
-	// 5. CALCULATE CONVICTION SCORING
-	obiRatio := sa.calculateOBIRatio(state.LatestTotalBuyQuantity, state.LatestTotalSellQuantity)
+		// EXTENSION: Refresh timer on new absorption
+		if dir == "BULLISH_ABSORPTION" {
+			state.PhaseTimestamp = tickTime
+			return "HOLD"
+		}
 
-	longScore := sa.calculateLongConviction(state, obiRatio)
-	shortScore := sa.calculateShortConviction(state, obiRatio)
+		// RESOLUTION: Market orders step in
+		if (dir == "BULLISH" || dir == "STRONG_BULLISH") && volRank >= 6 {
+			logger.Infof("[State Machine] LONG RESOLUTION Confirmed on %s! VolRank: %d", state.Symbol, volRank)
+			return "GO_LONG"
+		}
+		return "HOLD"
 
-	// 6. STRATEGY ENTRY EVALUATION (Threshold lowered to 6 while OBI is mocked)
-	// We removed the strict 'LatestDirection' check because the Breakout + VWAP filter is enough proof.
-	if isAboveVWAP && longScore >= 6 {
-		logger.Infof("[Feudal Morning] LONG Triggered for %s. Score: %d/10 | OBI: %.2f | Change: %.2f%%",
-			state.Symbol, longScore, obiRatio, state.LatestChangePct)
-		return "GO_LONG"
-	}
+	case PhaseBearishAbsorptionSpotted:
+		// INVALIDATION: Timeout or flip
+		if tickTime.Sub(state.PhaseTimestamp) > 5*time.Minute || dir == "STRONG_BULLISH" {
+			state.CurrentSetupPhase = PhaseNeutral
+			return "HOLD"
+		}
 
-	if isBelowVWAP && shortScore >= 6 {
-		logger.Infof("[Feudal Morning] SHORT Triggered for %s. Score: %d/10 | OBI: %.2f | Change: %.2f%%",
-			state.Symbol, shortScore, obiRatio, state.LatestChangePct)
-		return "GO_SHORT"
+		// EXTENSION: Refresh timer on new absorption
+		if dir == "BEARISH_ABSORPTION" {
+			state.PhaseTimestamp = tickTime
+			return "HOLD"
+		}
+
+		// RESOLUTION: Market orders step in
+		if (dir == "BEARISH" || dir == "STRONG_BEARISH") && volRank >= 6 {
+			logger.Infof("[State Machine] SHORT RESOLUTION Confirmed on %s! VolRank: %d", state.Symbol, volRank)
+			return "GO_SHORT"
+		}
+		return "HOLD"
 	}
 
 	return "HOLD"
 }
 
-// ========================================================================
-// 📊 ISOLATED CONVICTION SCORING ENGINES
-// ========================================================================
-
-// calculateLongConviction sums up the points based on structural rules for Long trade setups.
-func (sa *ScalperAgent) calculateLongConviction(state *InstrumentState, obiRatio float64) int {
-	score := 0
-
-	// Rule 1: Resolution Breakout (+3 Points)
-	// We check if the LAST CLOSED 1-minute bar actually closed above the Opening High.
-	if bars, exists := state.BarHistory["1m"]; exists && len(bars) > 0 {
-		lastClosedBar := bars[len(bars)-1]
-		if lastClosedBar.Close > state.OpeningHigh {
-			score += 3
-		}
-	} else {
-		// Fallback if bars haven't populated yet
-		if state.LatestPrice > state.OpeningHigh {
-			score += 3
-		}
-	}
-
-	// Rule 2: Order Book Imbalance (+2 Points)
-	if obiRatio >= 0.1 {
-		score += 2
-	}
-
-	// Rule 3: Price Rank Filter (+2 Points)
-	if state.LatestPriceRank >= 5 {
-		score += 2
-	}
-
-	// Rule 4: Volume Surge (+3 Points)
-	if state.LatestVolumeRank >= 6 {
-		score += 3
-	}
-
-	return score
-}
-
-// calculateShortConviction sums up the points based on structural rules for Short trade setups.
-func (sa *ScalperAgent) calculateShortConviction(state *InstrumentState, obiRatio float64) int {
-	score := 0
-
-	// Rule 1: Resolution Breakout (+3 Points)
-	if bars, exists := state.BarHistory["1m"]; exists && len(bars) > 0 {
-		lastClosedBar := bars[len(bars)-1]
-		if lastClosedBar.Close < state.OpeningLow {
-			score += 3
-		}
-	} else {
-		if state.LatestPrice < state.OpeningLow {
-			score += 3
-		}
-	}
-
-	// Rule 2: Order Book Imbalance (+2 Points)
-	if obiRatio <= -0.1 {
-		score += 2
-	}
-
-	// Rule 3: Price Rank Filter (+2 Points)
-	if state.LatestPriceRank >= 5 {
-		score += 2
-	}
-
-	// Rule 4: Volume Surge (+3 Points)
-	if state.LatestVolumeRank >= 6 {
-		score += 3
-	}
-
-	return score
-}
-
-// ========================================================================
-// ⚙️ STRATEGY UTILITY HELPERS
-// ========================================================================
-
-func (sa *ScalperAgent) calculateOBIRatio(tBq, tSq int64) float64 {
-	fBq := float64(tBq)
-	fSq := float64(tSq)
-	if (fBq + fSq) == 0 {
-		return 0.0
-	}
-	return (fBq - fSq) / (fBq + fSq)
-}
-
-// evaluateActivePositionExit handles mid-trade management using Time-Based Memory.
-func (sa *ScalperAgent) evaluateActivePositionExit(state *InstrumentState, currentSide string) string {
-	// Pull the last 1 full minute of ticks, regardless of how many transactions there were.
+// evaluateAbsorptionExit handles mid-trade management ("Enjoy the ride" until structural flip).
+func (sa *ScalperAgent) evaluateAbsorptionExit(state *InstrumentState, currentSide string) string {
 	recentTxs := sa.getRecentMinutesDataUnlocked(state, 1)
 
-	// If we don't have enough time built up (e.g., less than 30 ticks in a minute), HOLD.
-	if len(recentTxs) < 30 {
+	if len(recentTxs) < 20 {
 		return "HOLD"
 	}
 
@@ -166,21 +135,22 @@ func (sa *ScalperAgent) evaluateActivePositionExit(state *InstrumentState, curre
 		}
 	}
 
-	total := float64(len(recentTxs))
-	bullPct := bullCount / total
-	bearPct := bearCount / total
-
-	// Require a sustained 1-minute structural shift to warrant an early exit
-	if currentSide == "LONG" {
-		if bearPct > 0.65 {
-			return "EXIT_LONG"
-		}
+	totalAggressive := bullCount + bearCount
+	if totalAggressive == 0 {
+		return "HOLD"
 	}
 
-	if currentSide == "SHORT" {
-		if bullPct > 0.65 {
-			return "EXIT_SHORT"
-		}
+	bullPct := bullCount / totalAggressive
+	bearPct := bearCount / totalAggressive
+
+	if currentSide == "LONG" && bearPct > 0.70 {
+		state.CurrentSetupPhase = PhaseNeutral
+		return "EXIT_LONG"
+	}
+
+	if currentSide == "SHORT" && bullPct > 0.70 {
+		state.CurrentSetupPhase = PhaseNeutral
+		return "EXIT_SHORT"
 	}
 
 	return "HOLD"

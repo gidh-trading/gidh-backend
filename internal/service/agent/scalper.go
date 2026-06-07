@@ -6,80 +6,59 @@ import (
 	"time"
 )
 
-// HistoricTickSnapshot captures a clean state of an individual transaction element
+// Define the Absorption State Machine Phases
+type SetupPhase string
+
+const (
+	PhaseNeutral                  SetupPhase = "NEUTRAL"
+	PhaseBullishAbsorptionSpotted SetupPhase = "BULLISH_ABSORPTION_SPOTTED"
+	PhaseBearishAbsorptionSpotted SetupPhase = "BEARISH_ABSORPTION_SPOTTED"
+	PhaseActiveTrade              SetupPhase = "ACTIVE_TRADE"
+)
+
+// HistoricTickSnapshot only keeps what is needed for the 1-minute exit resolution memory.
 type HistoricTickSnapshot struct {
-	Timestamp   time.Time
-	Price       float64
-	Volume      float64
-	SessionVWAP float64
-	VolumeRank  int
-	PriceRank   int
-	TickRank    int
-	RangeRank   int
-	Direction   models.DirectionState
-	ChangePct   float64
+	Timestamp time.Time
+	Direction models.DirectionState
 }
 
-// InstrumentState serves as the engineering data vault for a single asset ticker.
+// InstrumentState is now hyper-lean, tracking only order flow state and bar history.
 type InstrumentState struct {
 	Symbol      string
 	LastUpdated time.Time
 
-	// Microscopic Live Scalar Trackers (Latest streaming tick info)
-	LatestPrice             float64
-	LatestSessionVWAP       float64
-	LatestChangePct         float64
-	LatestVolumeRank        int
-	LatestPriceRank         int
-	LatestRangeRank         int
-	LatestTickRank          int
-	LatestDirection         models.DirectionState
-	LatestTotalBuyQuantity  int64
-	LatestTotalSellQuantity int64
+	// Live State
+	LatestPrice      float64
+	LatestDirection  models.DirectionState
+	LatestVolumeRank int
 
-	// QUEUE 1: Transaction-Based Rolling Window Memory (Fixed Count)
-	TxQueue []HistoricTickSnapshot
-
-	// QUEUE 2: Time-Based Rolling Window Memory (Fluid Count, Fixed Duration)
-	TimeQueue []HistoricTickSnapshot
-
-	// ========================================================================
-	// NEW: HISTORICAL TIME-FRAME BARS STATE MAP (Up to 1 hour rolling window)
-	// ========================================================================
+	// Memory (Used for Exits & Context)
+	TimeQueue  []HistoricTickSnapshot
 	BarHistory map[string][]*models.Bar
 
-	// ========================================================================
-	// NEW STRUCTURAL METRICS FOR MORNING STRATEGY
-	// ========================================================================
-	OpeningRangeSet bool    // Has the 9:15-9:20 range been calculated yet?
-	OpeningHigh     float64 // Highest price printed between 9:15 and 9:20 AM
-	OpeningLow      float64 // Lowest price printed between 9:15 and 9:20 AM
-
-	LastExitTime    time.Time // Timestamp of the last position closure (for Cooldown)
-	PrevSessionVWAP float64   // Used to measure the directional slope of VWAP over time
+	// State Machine & Cooldown
+	LastExitTime      time.Time
+	CurrentSetupPhase SetupPhase
+	PhaseTimestamp    time.Time
 }
 
 type ScalperAgent struct {
 	mu           sync.RWMutex
 	Registry     map[string]*InstrumentState
-	MaxTxCount   int           // Max depth cap for the transaction queue (e.g., 50 ticks)
-	TimeDuration time.Duration // Lookback duration boundary for the time queue (e.g., 5 * time.Minute)
-	BarDuration  time.Duration // LOOKBACK BOUNDARY FOR HISTORICAL TIMEFRAME BARS (e.g., 1 * time.Hour)
+	TimeDuration time.Duration // Lookback for the time queue (e.g., 5 * time.Minute)
+	BarDuration  time.Duration // Lookback for historical bars (e.g., 1 * time.Hour)
 }
 
-// NewScalperAgent creates and initializes the time-independent engineering storage manager
-// Now properly supports 3 configuration arguments to match pipeline setup logic.
-func NewScalperAgent(maxTxCount int, timeDuration time.Duration, barDuration time.Duration) *ScalperAgent {
+// NewScalperAgent creates the lean state manager. (Removed MaxTxCount).
+func NewScalperAgent(timeDuration time.Duration, barDuration time.Duration) *ScalperAgent {
 	return &ScalperAgent{
 		Registry:     make(map[string]*InstrumentState),
-		MaxTxCount:   maxTxCount,
 		TimeDuration: timeDuration,
 		BarDuration:  barDuration,
 	}
 }
 
-// IngestClosedBar implements a clean strategy channel interface compatible with BarManager hooks.
-// It keeps tracks of past hours of historical bars and prunes outdated buckets.
+// IngestClosedBar maintains the historical bar map for timeframe resolution checks.
 func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
 	if bar == nil {
 		return
@@ -93,21 +72,15 @@ func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
 	if !exists {
 		state = &InstrumentState{
 			Symbol:     symbol,
-			TxQueue:    make([]HistoricTickSnapshot, 0, sa.MaxTxCount),
 			TimeQueue:  make([]HistoricTickSnapshot, 0, 100),
 			BarHistory: make(map[string][]*models.Bar),
 		}
 		sa.Registry[symbol] = state
 	}
 
-	if state.BarHistory == nil {
-		state.BarHistory = make(map[string][]*models.Bar)
-	}
-
 	tf := bar.Timeframe
 	state.BarHistory[tf] = append(state.BarHistory[tf], bar)
 
-	// Keep rolling historical lookback within parameters (1 hour sliding cutoff window)
 	barCutoff := bar.Timestamp.Add(-sa.BarDuration)
 	validIdx := 0
 	for i, historicalBar := range state.BarHistory[tf] {
@@ -122,7 +95,7 @@ func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
 	}
 }
 
-// UpdateMicroContext updates both transaction and time-bounded queues simultaneously per tick.
+// UpdateMicroContext updates the live state and the rolling TimeQueue.
 func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 	sa.mu.Lock()
 	defer sa.mu.Unlock()
@@ -134,74 +107,32 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 	if !exists {
 		state = &InstrumentState{
 			Symbol:     symbol,
-			TxQueue:    make([]HistoricTickSnapshot, 0, sa.MaxTxCount),
 			TimeQueue:  make([]HistoricTickSnapshot, 0, 100),
 			BarHistory: make(map[string][]*models.Bar),
 		}
 		sa.Registry[symbol] = state
 	}
 
-	// 1. Ingest immediate live scalar lookups
+	// 1. Update Live Variables
 	state.LatestPrice = raw.LastPrice
-	state.LatestSessionVWAP = raw.AverageTradedPrice
-	state.LatestChangePct = raw.Change
 	state.LastUpdated = raw.Timestamp
-	state.LatestTotalBuyQuantity = raw.TotalBuyQuantity
-	state.LatestTotalSellQuantity = raw.TotalSellQuantity
-
-	state.LatestVolumeRank = enrichedTick.Enrichment.VolumeRank
-	state.LatestPriceRank = enrichedTick.Enrichment.PriceRank
-	state.LatestRangeRank = enrichedTick.Enrichment.RangeRank
-	state.LatestTickRank = enrichedTick.Enrichment.TickRank
 	state.LatestDirection = enrichedTick.Enrichment.Direction
+	state.LatestVolumeRank = enrichedTick.Enrichment.VolumeRank
 
-	volRank := enrichedTick.Enrichment.VolumeRank
-	priceRank := enrichedTick.Enrichment.PriceRank
-	rangeRank := enrichedTick.Enrichment.RangeRank
-	tickRank := enrichedTick.Enrichment.TickRank
-
-	// Unpack volume fields (Using LastQuantity safely)
-	vol := float64(enrichedTick.TickVolume)
-	if vol <= 0 {
-		vol = 1.0 // Safety normalization fallback for zero baseline quantity prints
-	}
-
-	// 2. Assemble historical snapshot element frame
+	// 2. Manage Rolling Time Memory (for Exits)
 	snapshot := HistoricTickSnapshot{
-		Timestamp:   raw.Timestamp,
-		Price:       raw.LastPrice,
-		Volume:      vol,
-		SessionVWAP: raw.AverageTradedPrice,
-		VolumeRank:  volRank,
-		PriceRank:   priceRank,
-		RangeRank:   rangeRank,
-		TickRank:    tickRank,
-		Direction:   enrichedTick.Enrichment.Direction,
-		ChangePct:   raw.Change,
+		Timestamp: raw.Timestamp,
+		Direction: enrichedTick.Enrichment.Direction,
 	}
-
-	// ------------------------------------------------------------------------
-	// PROCESSING QUEUE 1: TRANSACTION-BASED WINDOW MANAGEMENT (FIXED COUNT)
-	// ------------------------------------------------------------------------
-	state.TxQueue = append(state.TxQueue, snapshot)
-	if len(state.TxQueue) > sa.MaxTxCount {
-		state.TxQueue = state.TxQueue[1:]
-	}
-
-	// ------------------------------------------------------------------------
-	// PROCESSING QUEUE 2: TIME-BASED WINDOW MANAGEMENT (FIXED DURATION)
-	// ------------------------------------------------------------------------
 	state.TimeQueue = append(state.TimeQueue, snapshot)
 
-	// Drop historical tick elements outside your window boundary (e.g., older than 5 minutes)
 	timeCutoff := raw.Timestamp.Add(-sa.TimeDuration)
-
 	validIdx := 0
 	for i, oldTick := range state.TimeQueue {
 		if oldTick.Timestamp.Before(timeCutoff) {
 			validIdx = i + 1
 		} else {
-			break // Chronological packet ordering guarantees trailing entries fall inside parameters
+			break
 		}
 	}
 	if validIdx > 0 {
@@ -209,23 +140,7 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 	}
 }
 
-func (sa *ScalperAgent) getLastTransactionsUnlocked(state *InstrumentState, count int) []HistoricTickSnapshot {
-	if state == nil || len(state.TxQueue) == 0 || count <= 0 {
-		return nil
-	}
-
-	totalElements := len(state.TxQueue)
-	if count > totalElements {
-		count = totalElements
-	}
-
-	startIndex := totalElements - count
-	result := make([]HistoricTickSnapshot, count)
-	copy(result, state.TxQueue[startIndex:])
-
-	return result
-}
-
+// getRecentMinutesDataUnlocked fetches the rolling time window.
 func (sa *ScalperAgent) getRecentMinutesDataUnlocked(state *InstrumentState, minutes int) []HistoricTickSnapshot {
 	if state == nil || len(state.TimeQueue) == 0 || minutes <= 0 {
 		return nil
@@ -251,33 +166,4 @@ func (sa *ScalperAgent) getRecentMinutesDataUnlocked(state *InstrumentState, min
 	copy(result, relevantData)
 
 	return result
-}
-
-// GenerateSignal handles the primary routing logic for engineering direction signals.
-func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryPrice float64) string {
-	sa.mu.RLock()
-	state, exists := sa.Registry[symbol]
-	sa.mu.RUnlock()
-
-	if !exists || len(state.TxQueue) == 0 || len(state.TimeQueue) == 0 {
-		return "HOLD"
-	}
-
-	if currentSide != "FLAT" && currentSide != "" {
-		if sa.CheckGlobalEmergencyBrackets(state, entryPrice, currentSide) {
-			if currentSide == "SHORT" {
-				return "EXIT_SHORT"
-			}
-			if currentSide == "LONG" {
-				return "EXIT_LONG"
-			}
-		}
-	}
-
-	morningSignal := sa.generateMorningSignal(state, currentSide)
-	if morningSignal != "HOLD" {
-		return morningSignal
-	}
-
-	return "HOLD"
 }
