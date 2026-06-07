@@ -13,14 +13,13 @@ type MorningRankStrategy struct {
 func NewMorningRankStrategy() *MorningRankStrategy {
 	return &MorningRankStrategy{
 		Timeframe:            "1m",
-		FixedProfitTargetINR: 1000.0, // Hardcoded cash target goal
-		MaxLossTargetINR:     2500.0, // Risk barrier cap
+		FixedProfitTargetINR: 2000.0, // Hardcoded cash target goal
+		MaxLossTargetINR:     600.0,  // Risk barrier cap
 	}
 }
 
 func (s *MorningRankStrategy) Name() string { return "Morning_4Method_Ranks" }
 
-// 1. ENTRY METHOD
 func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 	bars := state.BarHistory[s.Timeframe]
 	if len(bars) == 0 || state.LiveSessionVWAP <= 0.0 {
@@ -31,21 +30,25 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 	analytics := latestClosedBar.Analytics
 
 	if analytics.VolumeRank == 7 {
-		if state.LatestPrice > state.LiveSessionVWAP {
+
+		// Evaluate using 5% of Daily ATR as our VWAP Band channel width
+		bandState := evaluateVWAPBand(state, 0.05)
+
+		switch bandState {
+		case "ABOVE_BAND":
 			if analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish {
 				return "GO_LONG"
 			}
-		}
-		if state.LatestPrice < state.LiveSessionVWAP {
+		case "BELOW_BAND":
 			if analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish {
 				return "GO_SHORT"
 			}
 		}
 	}
+
 	return "HOLD"
 }
 
-// 2. TECHNICAL EXIT METHOD
 func (s *MorningRankStrategy) CheckExit(state *InstrumentState, currentSide string) string {
 	bars := state.BarHistory[s.Timeframe]
 	if len(bars) == 0 {
@@ -55,16 +58,22 @@ func (s *MorningRankStrategy) CheckExit(state *InstrumentState, currentSide stri
 	latestClosedBar := bars[len(bars)-1]
 	analytics := latestClosedBar.Analytics
 
-	if analytics.VolumeRank <= 3 {
+	// 1. General Low-Volume Momentum Drop: Exit if absolute session-wise activity dries up completely
+	if analytics.VolumeRank <= 4 {
 		return "EXIT_" + currentSide
 	}
 
-	if currentSide == "LONG" && (analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish) {
+	// 2. Institutional Counter-Trend Exit: Only exit if the opposing move is backed by heavy size (p90+)
+	if currentSide == "LONG" && analytics.VolumeRank >= 6 &&
+		(analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish) {
 		return "EXIT_LONG"
 	}
-	if currentSide == "SHORT" && (analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish) {
+
+	if currentSide == "SHORT" && analytics.VolumeRank >= 6 &&
+		(analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish) {
 		return "EXIT_SHORT"
 	}
+
 	return "HOLD"
 }
 

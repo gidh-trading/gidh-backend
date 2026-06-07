@@ -113,9 +113,11 @@ func (ir *InstrumentReader) FetchConfigsByStockNames(ctx context.Context, stockN
 func (ir *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[uint32]*models.InstrumentProfile, error) {
 	profilesMap := make(map[uint32]*models.InstrumentProfile)
 
+	// Using the explicit inner join directly to resolve stock names at raw fetch speed
 	query := `
-		SELECT instrument_token, bucket_size, atr_14, adr_pct, adv_30d, adv_val_30d 
-		FROM public.instrument_profile`
+       SELECT ic.stock_name, ip.instrument_token, ip.bucket_size, ip.atr_14, ip.adr_pct, ip.adv_30d, ip.adv_val_30d 
+       FROM instrument_profile ip
+       INNER JOIN instrument_configs ic ON ip.instrument_token = ic.instrument_token`
 
 	rows, err := ir.pool.Query(ctx, query)
 	if err != nil {
@@ -125,7 +127,16 @@ func (ir *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[ui
 
 	for rows.Next() {
 		var p models.InstrumentProfile
-		if err := rows.Scan(&p.InstrumentToken, &p.BucketSize, &p.ATR14, &p.ADRPct, &p.ADV30d, &p.ADVVal30d); err != nil {
+		// Scan the stock_name string right alongside the profile metrics
+		if err := rows.Scan(
+			&p.StockName,
+			&p.InstrumentToken,
+			&p.BucketSize,
+			&p.ATR14,
+			&p.ADRPct,
+			&p.ADV30d,
+			&p.ADVVal30d,
+		); err != nil {
 			return nil, err
 		}
 		profilesMap[p.InstrumentToken] = &p

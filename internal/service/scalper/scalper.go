@@ -24,6 +24,7 @@ type InstrumentState struct {
 
 	BarHistory        map[string][]*models.Bar
 	CurrentSetupPhase SetupPhase
+	Profile           *models.InstrumentProfile
 }
 
 type Engine struct {
@@ -31,22 +32,21 @@ type Engine struct {
 	Registry       map[string]*InstrumentState
 	ActiveStrategy Strategy
 	MaxBarLookback time.Duration
+	profiles       map[string]*models.InstrumentProfile
 }
 
-// NewEngine initializes the core decoupled infrastructure container
-func NewEngine(barLookback time.Duration) *Engine {
-	// 1. FIXED: Calling the correct strategy constructor
+// NewEngine now accepts your pre-loaded profiles map keyed by stock/symbol name
+func NewEngine(barLookback time.Duration, profiles map[string]*models.InstrumentProfile) *Engine {
 	morningCard := NewMorningRankStrategy()
 	afternoonCard := NewAfternoonReversalStrategy()
 
-	// 2. Put your cards into the time-based router traffic cop
 	timeBasedRouter := NewTimeBasedRouter(morningCard, afternoonCard)
 
-	// 3. Construct and return the infrastructure engine shell
 	return &Engine{
 		Registry:       make(map[string]*InstrumentState),
 		ActiveStrategy: timeBasedRouter,
 		MaxBarLookback: barLookback,
+		profiles:       profiles, // Wired here
 	}
 }
 
@@ -66,6 +66,7 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 			Symbol:            symbol,
 			BarHistory:        make(map[string][]*models.Bar),
 			CurrentSetupPhase: PhaseNeutral,
+			Profile:           e.profiles[symbol], // Fix: Hydrate profile immediately upon lazy load
 		}
 		e.Registry[symbol] = state
 	}
@@ -92,14 +93,16 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	state, exists := e.Registry[enrichedTick.Raw.StockName]
+	symbol := enrichedTick.Raw.StockName
+	state, exists := e.Registry[symbol]
 	if !exists {
 		state = &InstrumentState{
-			Symbol:            enrichedTick.Raw.StockName,
+			Symbol:            symbol,
 			BarHistory:        make(map[string][]*models.Bar),
 			CurrentSetupPhase: PhaseNeutral,
+			Profile:           e.profiles[symbol], // Fix: Hydrate profile immediately upon lazy load
 		}
-		e.Registry[enrichedTick.Raw.StockName] = state
+		e.Registry[symbol] = state
 	}
 
 	rawTick := enrichedTick.Raw
@@ -113,11 +116,10 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick) {
 
 // GenerateSignal checks inventory states and routes data down to your router rules
 func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
-	e.mu.RLock()
+	e.mu.Lock() // Changed to Lock to thread-safely modify CurrentSetupPhase on the state object
 	state, exists := e.Registry[symbol]
-	e.mu.RUnlock()
-
 	if !exists || e.ActiveStrategy == nil {
+		e.mu.Unlock()
 		return "HOLD"
 	}
 
@@ -127,6 +129,7 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	} else {
 		state.CurrentSetupPhase = PhaseActiveTrade
 	}
+	e.mu.Unlock()
 
 	// Track Track A: Flat position lookups
 	if state.CurrentSetupPhase == PhaseNeutral {

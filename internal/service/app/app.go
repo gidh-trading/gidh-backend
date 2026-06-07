@@ -186,26 +186,28 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barManager, scoutStage, a.DBWriter)
 
 	// ========================================================================
-	// ⚡ NEW MODULAR SEPARATED INTERFACE ASSEMBLY PIPELINE
+	// ⚡ MODULAR SEPARATED INTERFACE ASSEMBLY PIPELINE
 	// ========================================================================
 	if a.Config.Mode != "live" {
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Modular Algorithmic Teams Layer.")
 
-		// Step C: Initialize the pure infrastructure data engine, enforcing a 1-hour bar lookback cache
-		scalperEngine := scalper.NewEngine(1 * time.Hour)
+		// Construct the symbol name map for the execution engine registry
+		symbolProfiles := make(map[string]*models.InstrumentProfile)
+		for _, prof := range profilesMap {
+			if prof.StockName != "" {
+				symbolProfiles[prof.StockName] = prof
+			}
+		}
 
-		// CONNECT PIPELINE: Stream completed multi-timeframe candle structures straight into the bar map cache
+		// Step C: Initialize your engine using the compiled symbol map
+		scalperEngine := scalper.NewEngine(1*time.Hour, symbolProfiles)
+
+		// Connect macro streaming listeners
 		barManager.MacroListener = scalperEngine
 
-		// Step D: Initialize your standalone Finance Controller, injecting the stateless trading desk
+		// Initialize standalone Risk, Capital and Broker Order Controllers
 		backtestMoneyManager := risk.NewRiskManager(a.OrderManager, scalperEngine)
-
-		// Step E: Map high-velocity sequential tick features directly into the synchronized money manager
 		a.Pipeline.BacktestAgent = backtestMoneyManager
-
-		// Step F: Assign the application state tracking properties cleanly using our updated package types
-		// Note: Ensure that the `App` struct field type definitions match your brand-new packages:
-		// e.g., a.RiskManager *risk.RiskManager
 		a.RiskManager = backtestMoneyManager
 
 	} else {

@@ -107,11 +107,57 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	rangeRank := 4
 
 	if baseline, ok := ctx.DNA[minuteIndex]; ok {
+		// Calculate the baseline historical absolute pace per minute
+		var absoluteVolumeVelocityFloor float64 = 0.0
+		var globalPaceFloor float64 = 0.0 // Global daily baseline floor, completely ignoring midday dips
+
+		if ctx.Profile != nil && ctx.Profile.ADV30d > 0 {
+			averageVolPerMinute := float64(ctx.Profile.ADV30d) / 375.0
+
+			// 1. Establish a strict, un-multiplied global baseline floor for Rank 6/7 validation
+			// An institutional print (P90+) should be substantial compared to the *whole* day's average pace.
+			globalPaceFloor = averageVolPerMinute * 0.85
+
+			// 2. Identify the active session based on the localized time
+			currentHourMinute := (ts.Hour() * 100) + ts.Minute()
+			var sessionMultiplier float64 = 1.0
+
+			switch {
+			// Morning Session (09:15 - 10:30) -> Higher absolute threshold required
+			case currentHourMinute >= 915 && currentHourMinute < 1030:
+				sessionMultiplier = 0.97
+
+			// Midday Session (10:30 - 14:15) -> Absorb the natural volume dip safely
+			case currentHourMinute >= 1030 && currentHourMinute < 1415:
+				sessionMultiplier = 0.70
+
+			// Afternoon Session (14:15 - 15:30) -> Volume returning for the close
+			case currentHourMinute >= 1415 && currentHourMinute <= 1530:
+				sessionMultiplier = 0.97
+			}
+
+			// Apply the session multiplier along with your strict 95% institutional requirement
+			absoluteVolumeVelocityFloor = averageVolPerMinute * sessionMultiplier * 0.95
+		}
+
+		// Inject absolute liquidity floor and macro-pace validation alongside relative thresholds
 		switch {
 		case liveVolume >= baseline.VolumeP97:
-			volRank = 7
+			// If it clears the relative local P97, it MUST clear the global day pace to get Rank 7
+			if liveVolume >= absoluteVolumeVelocityFloor && liveVolume >= globalPaceFloor {
+				volRank = 7
+			} else {
+				volRank = 5 // Degrade to a localized pop due to lack of absolute day-level impact
+			}
+
 		case liveVolume >= baseline.VolumeP90:
-			volRank = 6
+			// If it clears the relative local P90, it MUST clear the global day pace to get Rank 6
+			if liveVolume >= absoluteVolumeVelocityFloor && liveVolume >= globalPaceFloor {
+				volRank = 6
+			} else {
+				volRank = 5 // Degrade to a localized pop due to lack of absolute day-level impact
+			}
+
 		case liveVolume >= baseline.VolumeP75:
 			volRank = 5
 		case liveVolume >= baseline.VolumeP50:
