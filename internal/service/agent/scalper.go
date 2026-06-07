@@ -44,6 +44,11 @@ type InstrumentState struct {
 	TimeQueue []HistoricTickSnapshot
 
 	// ========================================================================
+	// NEW: HISTORICAL TIME-FRAME BARS STATE MAP (Up to 1 hour rolling window)
+	// ========================================================================
+	BarHistory map[string][]*models.Bar
+
+	// ========================================================================
 	// NEW STRUCTURAL METRICS FOR MORNING STRATEGY
 	// ========================================================================
 	OpeningRangeSet bool    // Has the 9:15-9:20 range been calculated yet?
@@ -59,14 +64,61 @@ type ScalperAgent struct {
 	Registry     map[string]*InstrumentState
 	MaxTxCount   int           // Max depth cap for the transaction queue (e.g., 50 ticks)
 	TimeDuration time.Duration // Lookback duration boundary for the time queue (e.g., 5 * time.Minute)
+	BarDuration  time.Duration // LOOKBACK BOUNDARY FOR HISTORICAL TIMEFRAME BARS (e.g., 1 * time.Hour)
 }
 
 // NewScalperAgent creates and initializes the time-independent engineering storage manager
-func NewScalperAgent(maxTxCount int, timeDuration time.Duration) *ScalperAgent {
+// Now properly supports 3 configuration arguments to match pipeline setup logic.
+func NewScalperAgent(maxTxCount int, timeDuration time.Duration, barDuration time.Duration) *ScalperAgent {
 	return &ScalperAgent{
 		Registry:     make(map[string]*InstrumentState),
 		MaxTxCount:   maxTxCount,
 		TimeDuration: timeDuration,
+		BarDuration:  barDuration,
+	}
+}
+
+// IngestClosedBar implements a clean strategy channel interface compatible with BarManager hooks.
+// It keeps tracks of past hours of historical bars and prunes outdated buckets.
+func (sa *ScalperAgent) IngestClosedBar(bar *models.Bar) {
+	if bar == nil {
+		return
+	}
+
+	sa.mu.Lock()
+	defer sa.mu.Unlock()
+
+	symbol := bar.StockName
+	state, exists := sa.Registry[symbol]
+	if !exists {
+		state = &InstrumentState{
+			Symbol:     symbol,
+			TxQueue:    make([]HistoricTickSnapshot, 0, sa.MaxTxCount),
+			TimeQueue:  make([]HistoricTickSnapshot, 0, 100),
+			BarHistory: make(map[string][]*models.Bar),
+		}
+		sa.Registry[symbol] = state
+	}
+
+	if state.BarHistory == nil {
+		state.BarHistory = make(map[string][]*models.Bar)
+	}
+
+	tf := bar.Timeframe
+	state.BarHistory[tf] = append(state.BarHistory[tf], bar)
+
+	// Keep rolling historical lookback within parameters (1 hour sliding cutoff window)
+	barCutoff := bar.Timestamp.Add(-sa.BarDuration)
+	validIdx := 0
+	for i, historicalBar := range state.BarHistory[tf] {
+		if historicalBar.Timestamp.Before(barCutoff) {
+			validIdx = i + 1
+		} else {
+			break
+		}
+	}
+	if validIdx > 0 {
+		state.BarHistory[tf] = state.BarHistory[tf][validIdx:]
 	}
 }
 
@@ -81,9 +133,10 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 	state, exists := sa.Registry[symbol]
 	if !exists {
 		state = &InstrumentState{
-			Symbol:    symbol,
-			TxQueue:   make([]HistoricTickSnapshot, 0, sa.MaxTxCount),
-			TimeQueue: make([]HistoricTickSnapshot, 0, 100), // Optimal capacity estimation block
+			Symbol:     symbol,
+			TxQueue:    make([]HistoricTickSnapshot, 0, sa.MaxTxCount),
+			TimeQueue:  make([]HistoricTickSnapshot, 0, 100),
+			BarHistory: make(map[string][]*models.Bar),
 		}
 		sa.Registry[symbol] = state
 	}
@@ -96,21 +149,16 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 	state.LatestTotalBuyQuantity = raw.TotalBuyQuantity
 	state.LatestTotalSellQuantity = raw.TotalSellQuantity
 
-	volRank := 0
-	priceRank := 0
-	rangeRank := 0
-	tickRank := 0
-
 	state.LatestVolumeRank = enrichedTick.Enrichment.VolumeRank
 	state.LatestPriceRank = enrichedTick.Enrichment.PriceRank
 	state.LatestRangeRank = enrichedTick.Enrichment.RangeRank
 	state.LatestTickRank = enrichedTick.Enrichment.TickRank
 	state.LatestDirection = enrichedTick.Enrichment.Direction
 
-	volRank = enrichedTick.Enrichment.VolumeRank
-	priceRank = enrichedTick.Enrichment.PriceRank
-	rangeRank = enrichedTick.Enrichment.RangeRank
-	tickRank = enrichedTick.Enrichment.TickRank
+	volRank := enrichedTick.Enrichment.VolumeRank
+	priceRank := enrichedTick.Enrichment.PriceRank
+	rangeRank := enrichedTick.Enrichment.RangeRank
+	tickRank := enrichedTick.Enrichment.TickRank
 
 	// Unpack volume fields (Using LastQuantity safely)
 	vol := float64(enrichedTick.TickVolume)
@@ -206,7 +254,6 @@ func (sa *ScalperAgent) getRecentMinutesDataUnlocked(state *InstrumentState, min
 }
 
 // GenerateSignal handles the primary routing logic for engineering direction signals.
-// It serves as the main entry point that will evaluate our suite of trading strategies.
 func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryPrice float64) string {
 	sa.mu.RLock()
 	state, exists := sa.Registry[symbol]
@@ -216,9 +263,6 @@ func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryP
 		return "HOLD"
 	}
 
-	// ------------------------------------------------------------------------
-	// STEP 1: GLOBAL CAPITAL EMERGENCY RISK SHIELD
-	// ------------------------------------------------------------------------
 	if currentSide != "FLAT" && currentSide != "" {
 		if sa.CheckGlobalEmergencyBrackets(state, entryPrice, currentSide) {
 			if currentSide == "SHORT" {
@@ -230,19 +274,10 @@ func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryP
 		}
 	}
 
-	// ------------------------------------------------------------------------
-	// STEP 2: STRATEGY ROUTING PIPELINE
-	// ------------------------------------------------------------------------
-
-	// Execute the Morning Momentum Flow (Dark Age) Strategy
 	morningSignal := sa.generateMorningSignal(state, currentSide)
 	if morningSignal != "HOLD" {
 		return morningSignal
 	}
-
-	// Future strategy modules can be sequentially evaluated right here:
-	// afternoonSignal := sa.generateAfternoonSignal(state, currentSide)
-	// if afternoonSignal != "HOLD" { return afternoonSignal }
 
 	return "HOLD"
 }

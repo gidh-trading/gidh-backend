@@ -188,8 +188,11 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	if a.Config.Mode != "live" {
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Algorithmic Trading Team Layer.")
 
-		// Instantiate your isolated multi-file Data Registry (50 transactions & fluid rolling 5-minute queues)
-		scalperAgent := agent.NewScalperAgent(500, 60*time.Minute)
+		// FIXED: NewScalperAgent signature matching. Max transactions: 500, Tick Window: 60 min, Bar history rolling capacity lookup window: 60 min
+		scalperAgent := agent.NewScalperAgent(500, 60*time.Minute, 60*time.Minute)
+
+		// CONNECT PIPELINE: Direct closed bars from BarManager into Scalper Agent state registry cache automatically
+		barManager.MacroListener = scalperAgent
 
 		// Instantiate your split multi-file Finance Controller, injecting dependencies
 		backtestMoneyManager := agent.NewRiskManager(a.OrderManager, scalperAgent)

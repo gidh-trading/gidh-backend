@@ -65,12 +65,21 @@ func (sa *ScalperAgent) generateMorningSignal(state *InstrumentState, currentSid
 func (sa *ScalperAgent) calculateLongConviction(state *InstrumentState, obiRatio float64) int {
 	score := 0
 
-	// Rule 1: Opening Range Breakout (+3 Points)
-	if state.LatestPrice > state.OpeningHigh {
-		score += 3
+	// Rule 1: Resolution Breakout (+3 Points)
+	// We check if the LAST CLOSED 1-minute bar actually closed above the Opening High.
+	if bars, exists := state.BarHistory["1m"]; exists && len(bars) > 0 {
+		lastClosedBar := bars[len(bars)-1]
+		if lastClosedBar.Close > state.OpeningHigh {
+			score += 3
+		}
+	} else {
+		// Fallback if bars haven't populated yet
+		if state.LatestPrice > state.OpeningHigh {
+			score += 3
+		}
 	}
 
-	// Rule 2: Order Book Imbalance (+3 Points)
+	// Rule 2: Order Book Imbalance (+2 Points)
 	if obiRatio >= 0.1 {
 		score += 2
 	}
@@ -80,7 +89,7 @@ func (sa *ScalperAgent) calculateLongConviction(state *InstrumentState, obiRatio
 		score += 2
 	}
 
-	// Rule 4: Volume Surge (+2 Points)
+	// Rule 4: Volume Surge (+3 Points)
 	if state.LatestVolumeRank >= 6 {
 		score += 3
 	}
@@ -92,12 +101,19 @@ func (sa *ScalperAgent) calculateLongConviction(state *InstrumentState, obiRatio
 func (sa *ScalperAgent) calculateShortConviction(state *InstrumentState, obiRatio float64) int {
 	score := 0
 
-	// Rule 1: Opening Range Breakout (+3 Points)
-	if state.LatestPrice < state.OpeningLow {
-		score += 3
+	// Rule 1: Resolution Breakout (+3 Points)
+	if bars, exists := state.BarHistory["1m"]; exists && len(bars) > 0 {
+		lastClosedBar := bars[len(bars)-1]
+		if lastClosedBar.Close < state.OpeningLow {
+			score += 3
+		}
+	} else {
+		if state.LatestPrice < state.OpeningLow {
+			score += 3
+		}
 	}
 
-	// Rule 2: Order Book Imbalance (+3 Points)
+	// Rule 2: Order Book Imbalance (+2 Points)
 	if obiRatio <= -0.1 {
 		score += 2
 	}
@@ -107,7 +123,7 @@ func (sa *ScalperAgent) calculateShortConviction(state *InstrumentState, obiRati
 		score += 2
 	}
 
-	// Rule 4: Volume Surge (+2 Points)
+	// Rule 4: Volume Surge (+3 Points)
 	if state.LatestVolumeRank >= 6 {
 		score += 3
 	}
@@ -119,30 +135,51 @@ func (sa *ScalperAgent) calculateShortConviction(state *InstrumentState, obiRati
 // ⚙️ STRATEGY UTILITY HELPERS
 // ========================================================================
 
-// calculateOBIRatio safely computes the standard Order Book Imbalance ratio.
 func (sa *ScalperAgent) calculateOBIRatio(tBq, tSq int64) float64 {
-	return float64((tBq - tSq) / (tBq + tSq))
+	fBq := float64(tBq)
+	fSq := float64(tSq)
+	if (fBq + fSq) == 0 {
+		return 0.0
+	}
+	return (fBq - fSq) / (fBq + fSq)
 }
 
-// evaluateActivePositionExit handles mid-trade management via inline tape indicators.
+// evaluateActivePositionExit handles mid-trade management using Time-Based Memory.
 func (sa *ScalperAgent) evaluateActivePositionExit(state *InstrumentState, currentSide string) string {
-	dir := string(state.LatestDirection)
+	// Pull the last 1 full minute of ticks, regardless of how many transactions there were.
+	recentTxs := sa.getRecentMinutesDataUnlocked(state, 1)
 
-	if currentSide == "SHORT" {
-		if dir == "BULLISH_ABSORPTION" {
-			return "HOLD"
-		}
+	// If we don't have enough time built up (e.g., less than 30 ticks in a minute), HOLD.
+	if len(recentTxs) < 30 {
+		return "HOLD"
+	}
+
+	bullCount := 0.0
+	bearCount := 0.0
+
+	for _, tx := range recentTxs {
+		dir := string(tx.Direction)
 		if dir == "BULLISH" || dir == "STRONG_BULLISH" {
-			return "EXIT_SHORT"
+			bullCount++
+		} else if dir == "BEARISH" || dir == "STRONG_BEARISH" {
+			bearCount++
 		}
 	}
 
+	total := float64(len(recentTxs))
+	bullPct := bullCount / total
+	bearPct := bearCount / total
+
+	// Require a sustained 1-minute structural shift to warrant an early exit
 	if currentSide == "LONG" {
-		if dir == "BEARISH_ABSORPTION" {
-			return "HOLD"
-		}
-		if dir == "BEARISH" || dir == "STRONG_BEARISH" {
+		if bearPct > 0.65 {
 			return "EXIT_LONG"
+		}
+	}
+
+	if currentSide == "SHORT" {
+		if bullPct > 0.65 {
+			return "EXIT_SHORT"
 		}
 	}
 

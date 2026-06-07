@@ -201,6 +201,10 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 		AllocatedCharge: charges.TotalCharges,
 	})
 
+	if rm.scalper != nil {
+		rm.scalper.RegisterPositionClosure(symbol, timestamp)
+	}
+
 	rm.lastExitTime[symbol] = timestamp
 	rm.dailyRealized += pos.UnrealizedPnL
 
