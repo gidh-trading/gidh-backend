@@ -1,8 +1,18 @@
 package scalper
 
-// Strategy defines the exact blueprint for any isolated rule set you create.
+// Strategy isolates execution decisions into clean, distinct logical tracks.
 type Strategy interface {
 	Name() string
-	CheckEntry(state *InstrumentState) string                    // Returns "GO_LONG", "GO_SHORT", or "HOLD"
+
+	// CheckEntry evaluates setups when the position is FLAT
+	CheckEntry(state *InstrumentState) string // Returns "GO_LONG", "GO_SHORT", or "HOLD"
+
+	// CheckExit evaluates indicator trend breakdowns when in an ACTIVE trade
 	CheckExit(state *InstrumentState, currentSide string) string // Returns "EXIT_LONG", "EXIT_SHORT", or "HOLD"
+
+	// CheckTakeProfit evaluates if your profit targets have been met
+	CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool
+
+	// CheckStopLoss evaluates if your safety risk limits have been breached
+	CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool
 }

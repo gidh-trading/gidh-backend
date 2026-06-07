@@ -20,6 +20,7 @@ type InstrumentState struct {
 	LatestDirection  models.DirectionState
 	LatestVolumeRank int
 	LatestPriceRank  int
+	LiveSessionVWAP  float64
 
 	BarHistory        map[string][]*models.Bar
 	CurrentSetupPhase SetupPhase
@@ -36,9 +37,10 @@ type Engine struct {
 func NewEngine(barLookback time.Duration) *Engine {
 	// 1. FIXED: Calling the correct strategy constructor
 	morningCard := NewMorningRankStrategy()
+	afternoonCard := NewAfternoonReversalStrategy()
 
 	// 2. Put your cards into the time-based router traffic cop
-	timeBasedRouter := NewTimeBasedRouter(morningCard, morningCard)
+	timeBasedRouter := NewTimeBasedRouter(morningCard, afternoonCard)
 
 	// 3. Construct and return the infrastructure engine shell
 	return &Engine{
@@ -86,29 +88,31 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 }
 
 // UpdateContext accepts streaming micro-ticks
-func (e *Engine) UpdateContext(symbol string, price float64, timestamp time.Time, direction models.DirectionState, volRank int, priceRank int) {
+func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	state, exists := e.Registry[symbol]
+	state, exists := e.Registry[enrichedTick.Raw.StockName]
 	if !exists {
 		state = &InstrumentState{
-			Symbol:            symbol,
+			Symbol:            enrichedTick.Raw.StockName,
 			BarHistory:        make(map[string][]*models.Bar),
 			CurrentSetupPhase: PhaseNeutral,
 		}
-		e.Registry[symbol] = state
+		e.Registry[enrichedTick.Raw.StockName] = state
 	}
 
-	state.LatestPrice = price
-	state.LastUpdated = timestamp
-	state.LatestDirection = direction
-	state.LatestVolumeRank = volRank
-	state.LatestPriceRank = priceRank
+	rawTick := enrichedTick.Raw
+	state.LatestPrice = rawTick.LastPrice
+	state.LastUpdated = rawTick.Timestamp
+	state.LatestDirection = enrichedTick.Enrichment.Direction
+	state.LatestVolumeRank = enrichedTick.Enrichment.VolumeRank
+	state.LatestPriceRank = enrichedTick.Enrichment.PriceRank
+	state.LiveSessionVWAP = rawTick.AverageTradedPrice
 }
 
 // GenerateSignal checks inventory states and routes data down to your router rules
-func (e *Engine) GenerateSignal(symbol string, currentSide string) string {
+func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.RLock()
 	state, exists := e.Registry[symbol]
 	e.mu.RUnlock()
@@ -117,17 +121,32 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string) string {
 		return "HOLD"
 	}
 
+	// Determine state phase
 	if currentSide == "FLAT" || currentSide == "" {
 		state.CurrentSetupPhase = PhaseNeutral
 	} else {
 		state.CurrentSetupPhase = PhaseActiveTrade
 	}
 
+	// Track Track A: Flat position lookups
 	if state.CurrentSetupPhase == PhaseNeutral {
 		return e.ActiveStrategy.CheckEntry(state)
 	}
 
+	// Track Track B: Active Trade sequential checklist evaluation
 	if state.CurrentSetupPhase == PhaseActiveTrade {
+
+		// 🛑 CHECK 1: Evaluate safety Stop Loss first!
+		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+			return "EXIT_" + currentSide
+		}
+
+		// 🎯 CHECK 2: Evaluate hard cash Take Profit target next!
+		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+			return "EXIT_" + currentSide
+		}
+
+		// 📉 CHECK 3: If targets are clear, look at indicator trend exits
 		return e.ActiveStrategy.CheckExit(state, currentSide)
 	}
 
