@@ -13,6 +13,9 @@ type HistoricTickSnapshot struct {
 	Volume      float64
 	SessionVWAP float64
 	VolumeRank  int
+	PriceRank   int
+	TickRank    int
+	RangeRank   int
 	Direction   models.DirectionState
 	ChangePct   float64
 }
@@ -23,11 +26,16 @@ type InstrumentState struct {
 	LastUpdated time.Time
 
 	// Microscopic Live Scalar Trackers (Latest streaming tick info)
-	LatestPrice       float64
-	LatestSessionVWAP float64
-	LatestChangePct   float64
-	LatestVolumeRank  int
-	LatestDirection   models.DirectionState
+	LatestPrice             float64
+	LatestSessionVWAP       float64
+	LatestChangePct         float64
+	LatestVolumeRank        int
+	LatestPriceRank         int
+	LatestRangeRank         int
+	LatestTickRank          int
+	LatestDirection         models.DirectionState
+	LatestTotalBuyQuantity  int64
+	LatestTotalSellQuantity int64
 
 	// QUEUE 1: Transaction-Based Rolling Window Memory (Fixed Count)
 	TxQueue []HistoricTickSnapshot
@@ -85,11 +93,24 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 	state.LatestSessionVWAP = raw.AverageTradedPrice
 	state.LatestChangePct = raw.Change
 	state.LastUpdated = raw.Timestamp
+	state.LatestTotalBuyQuantity = raw.TotalBuyQuantity
+	state.LatestTotalSellQuantity = raw.TotalSellQuantity
 
 	volRank := 0
+	priceRank := 0
+	rangeRank := 0
+	tickRank := 0
+
 	state.LatestVolumeRank = enrichedTick.Enrichment.VolumeRank
+	state.LatestPriceRank = enrichedTick.Enrichment.PriceRank
+	state.LatestRangeRank = enrichedTick.Enrichment.RangeRank
+	state.LatestTickRank = enrichedTick.Enrichment.TickRank
 	state.LatestDirection = enrichedTick.Enrichment.Direction
+
 	volRank = enrichedTick.Enrichment.VolumeRank
+	priceRank = enrichedTick.Enrichment.PriceRank
+	rangeRank = enrichedTick.Enrichment.RangeRank
+	tickRank = enrichedTick.Enrichment.TickRank
 
 	// Unpack volume fields (Using LastQuantity safely)
 	vol := float64(enrichedTick.TickVolume)
@@ -104,6 +125,9 @@ func (sa *ScalperAgent) UpdateMicroContext(enrichedTick *models.EnrichedTick) {
 		Volume:      vol,
 		SessionVWAP: raw.AverageTradedPrice,
 		VolumeRank:  volRank,
+		PriceRank:   priceRank,
+		RangeRank:   rangeRank,
+		TickRank:    tickRank,
 		Direction:   enrichedTick.Enrichment.Direction,
 		ChangePct:   raw.Change,
 	}
@@ -179,4 +203,46 @@ func (sa *ScalperAgent) getRecentMinutesDataUnlocked(state *InstrumentState, min
 	copy(result, relevantData)
 
 	return result
+}
+
+// GenerateSignal handles the primary routing logic for engineering direction signals.
+// It serves as the main entry point that will evaluate our suite of trading strategies.
+func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryPrice float64) string {
+	sa.mu.RLock()
+	state, exists := sa.Registry[symbol]
+	sa.mu.RUnlock()
+
+	if !exists || len(state.TxQueue) == 0 || len(state.TimeQueue) == 0 {
+		return "HOLD"
+	}
+
+	// ------------------------------------------------------------------------
+	// STEP 1: GLOBAL CAPITAL EMERGENCY RISK SHIELD
+	// ------------------------------------------------------------------------
+	if currentSide != "FLAT" && currentSide != "" {
+		if sa.CheckGlobalEmergencyBrackets(state, entryPrice, currentSide) {
+			if currentSide == "SHORT" {
+				return "EXIT_SHORT"
+			}
+			if currentSide == "LONG" {
+				return "EXIT_LONG"
+			}
+		}
+	}
+
+	// ------------------------------------------------------------------------
+	// STEP 2: STRATEGY ROUTING PIPELINE
+	// ------------------------------------------------------------------------
+
+	// Execute the Morning Momentum Flow (Dark Age) Strategy
+	morningSignal := sa.generateMorningSignal(state, currentSide)
+	if morningSignal != "HOLD" {
+		return morningSignal
+	}
+
+	// Future strategy modules can be sequentially evaluated right here:
+	// afternoonSignal := sa.generateAfternoonSignal(state, currentSide)
+	// if afternoonSignal != "HOLD" { return afternoonSignal }
+
+	return "HOLD"
 }

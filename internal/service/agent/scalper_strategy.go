@@ -1,116 +1,149 @@
 package agent
 
 import (
-	"math"
+	"gidh-backend/pkg/logger"
 )
 
-// GenerateSignal handles the Morning Momentum Flow (MMF) strategy using order flow and global brackets.
-func (sa *ScalperAgent) GenerateSignal(symbol string, currentSide string, entryPrice float64) string {
-	sa.mu.RLock()
-	state, exists := sa.Registry[symbol]
-	sa.mu.RUnlock()
-
-	if !exists || len(state.TxQueue) == 0 || len(state.TimeQueue) == 0 {
-		return "HOLD"
-	}
-
-	// ------------------------------------------------------------------------
-	// STEP 1: GLOBAL CAPITAL EMERGENCY RISK SHIELD
-	// ------------------------------------------------------------------------
-	if currentSide != "FLAT" && currentSide != "" {
-		if sa.CheckGlobalEmergencyBrackets(state, entryPrice, currentSide) {
-			if currentSide == "SHORT" {
-				return "EXIT_SHORT"
-			}
-			if currentSide == "LONG" {
-				return "EXIT_LONG"
-			}
-		}
-	}
-
-	// ------------------------------------------------------------------------
-	// STEP 2: TIME BOUNDARY GUARDRAILS
-	// ------------------------------------------------------------------------
+// generateMorningSignal implements Phase 1 (9:15 AM - 10:30 AM) of the Feudal Age strategy.
+// generateMorningSignal implements Phase 1 (9:15 AM - 10:30 AM) of the Feudal Age strategy.
+func (sa *ScalperAgent) generateMorningSignal(state *InstrumentState, currentSide string) string {
+	// 1. TIME BOUNDARY GUARDRAILS
 	marketMins, tickTime := sa.getMarketMinutes(state.LastUpdated)
 	if marketMins < 555 || marketMins > 630 {
 		return sa.handleSessionCloseExits(currentSide)
 	}
 
-	// ------------------------------------------------------------------------
-	// STEP 3: STRATEGY ACTIVE POSITION MANAGEMENT (Inline Tape Resolution Exits)
-	// ------------------------------------------------------------------------
+	// 2. ACTIVE POSITION MANAGEMENT
 	if currentSide != "FLAT" && currentSide != "" {
-		dir := string(state.LatestDirection)
-
-		if currentSide == "SHORT" {
-			// A. Passive limit floor discovered: WAIT for resolution
-			if dir == "BULLISH_ABSORPTION" {
-				return "HOLD"
-			}
-			// B. Resolution verified: Passive buyers turn aggressive and sweep offers
-			if dir == "BULLISH" || dir == "STRONG_BULLISH" {
-				return "EXIT_SHORT"
-			}
-		}
-
-		if currentSide == "LONG" {
-			// A. Overhead passive selling barrier encountered: WAIT for resolution
-			if dir == "BEARISH_ABSORPTION" {
-				return "HOLD"
-			}
-			// B. Resolution verified: Passive sellers hit bids with aggressive market orders
-			if dir == "BEARISH" || dir == "STRONG_BEARISH" {
-				return "EXIT_LONG"
-			}
-		}
-
-		return "HOLD"
+		return sa.evaluateActivePositionExit(state, currentSide)
 	}
 
-	// ------------------------------------------------------------------------
-	// STEP 4: STRATEGY ENTRY PROTECTION CONTROLS (Cooldowns & Range Discovery)
-	// ------------------------------------------------------------------------
+	// 3. ENTRY PROTECTION CONTROLS
 	if sa.isEngineInCooldown(state, tickTime) {
 		return "HOLD"
 	}
 
 	sa.UpdateOpeningRangeBoundaries(state, marketMins)
-	if marketMins < 560 { // Observational lockout period (9:15 AM - 9:20 AM)
+
+	// Changed from 570 (9:30 AM) to 560 (9:20 AM) so it doesn't wait forever
+	if marketMins < 560 || !state.OpeningRangeSet || state.OpeningHigh == 0 {
 		return "HOLD"
 	}
 
-	if !state.OpeningRangeSet || state.OpeningHigh == 0 {
-		return "HOLD"
-	}
-
-	// Central fair value chop zone filtering
-	distFromVWAP := ((state.LatestPrice - state.LatestSessionVWAP) / state.LatestSessionVWAP) * 100
-	if math.Abs(distFromVWAP) < 0.15 {
-		return "HOLD"
-	}
-
-	// ------------------------------------------------------------------------
-	// STEP 5: CORE TAPE STRATEGY ENTRYS
-	// ------------------------------------------------------------------------
-	isHighVolumeParticipant := state.LatestVolumeRank >= 6
-	dir := string(state.LatestDirection)
-
-	// --- SHORT SIGNAL GATING ---
+	// 4. THE STRICT MASTER TREND FILTER (Gatekeeper)
+	isAboveVWAP := state.LatestPrice > state.LatestSessionVWAP
 	isBelowVWAP := state.LatestPrice < state.LatestSessionVWAP
-	isOpeningLowBroken := state.LatestPrice < state.OpeningLow
-	isBearishTape := dir == "BEARISH" || dir == "STRONG_BEARISH"
 
-	if isBelowVWAP && isOpeningLowBroken && isHighVolumeParticipant && isBearishTape {
+	// 5. CALCULATE CONVICTION SCORING
+	obiRatio := sa.calculateOBIRatio(state.LatestTotalBuyQuantity, state.LatestTotalSellQuantity)
+
+	longScore := sa.calculateLongConviction(state, obiRatio)
+	shortScore := sa.calculateShortConviction(state, obiRatio)
+
+	// 6. STRATEGY ENTRY EVALUATION (Threshold lowered to 6 while OBI is mocked)
+	// We removed the strict 'LatestDirection' check because the Breakout + VWAP filter is enough proof.
+	if isAboveVWAP && longScore >= 6 {
+		logger.Infof("[Feudal Morning] LONG Triggered for %s. Score: %d/10 | OBI: %.2f | Change: %.2f%%",
+			state.Symbol, longScore, obiRatio, state.LatestChangePct)
+		return "GO_LONG"
+	}
+
+	if isBelowVWAP && shortScore >= 6 {
+		logger.Infof("[Feudal Morning] SHORT Triggered for %s. Score: %d/10 | OBI: %.2f | Change: %.2f%%",
+			state.Symbol, shortScore, obiRatio, state.LatestChangePct)
 		return "GO_SHORT"
 	}
 
-	// --- LONG SIGNAL GATING ---
-	isAboveVWAP := state.LatestPrice > state.LatestSessionVWAP
-	isOpeningHighBroken := state.LatestPrice > state.OpeningHigh
-	isBullishTape := dir == "BULLISH" || dir == "STRONG_BULLISH"
+	return "HOLD"
+}
 
-	if isAboveVWAP && isOpeningHighBroken && isHighVolumeParticipant && isBullishTape {
-		return "GO_LONG"
+// ========================================================================
+// 📊 ISOLATED CONVICTION SCORING ENGINES
+// ========================================================================
+
+// calculateLongConviction sums up the points based on structural rules for Long trade setups.
+func (sa *ScalperAgent) calculateLongConviction(state *InstrumentState, obiRatio float64) int {
+	score := 0
+
+	// Rule 1: Opening Range Breakout (+3 Points)
+	if state.LatestPrice > state.OpeningHigh {
+		score += 3
+	}
+
+	// Rule 2: Order Book Imbalance (+3 Points)
+	if obiRatio >= 0.1 {
+		score += 2
+	}
+
+	// Rule 3: Price Rank Filter (+2 Points)
+	if state.LatestPriceRank >= 5 {
+		score += 2
+	}
+
+	// Rule 4: Volume Surge (+2 Points)
+	if state.LatestVolumeRank >= 6 {
+		score += 3
+	}
+
+	return score
+}
+
+// calculateShortConviction sums up the points based on structural rules for Short trade setups.
+func (sa *ScalperAgent) calculateShortConviction(state *InstrumentState, obiRatio float64) int {
+	score := 0
+
+	// Rule 1: Opening Range Breakout (+3 Points)
+	if state.LatestPrice < state.OpeningLow {
+		score += 3
+	}
+
+	// Rule 2: Order Book Imbalance (+3 Points)
+	if obiRatio <= -0.1 {
+		score += 2
+	}
+
+	// Rule 3: Price Rank Filter (+2 Points)
+	if state.LatestPriceRank >= 5 {
+		score += 2
+	}
+
+	// Rule 4: Volume Surge (+2 Points)
+	if state.LatestVolumeRank >= 6 {
+		score += 3
+	}
+
+	return score
+}
+
+// ========================================================================
+// ⚙️ STRATEGY UTILITY HELPERS
+// ========================================================================
+
+// calculateOBIRatio safely computes the standard Order Book Imbalance ratio.
+func (sa *ScalperAgent) calculateOBIRatio(tBq, tSq int64) float64 {
+	return float64((tBq - tSq) / (tBq + tSq))
+}
+
+// evaluateActivePositionExit handles mid-trade management via inline tape indicators.
+func (sa *ScalperAgent) evaluateActivePositionExit(state *InstrumentState, currentSide string) string {
+	dir := string(state.LatestDirection)
+
+	if currentSide == "SHORT" {
+		if dir == "BULLISH_ABSORPTION" {
+			return "HOLD"
+		}
+		if dir == "BULLISH" || dir == "STRONG_BULLISH" {
+			return "EXIT_SHORT"
+		}
+	}
+
+	if currentSide == "LONG" {
+		if dir == "BEARISH_ABSORPTION" {
+			return "HOLD"
+		}
+		if dir == "BEARISH" || dir == "STRONG_BEARISH" {
+			return "EXIT_LONG"
+		}
 	}
 
 	return "HOLD"
