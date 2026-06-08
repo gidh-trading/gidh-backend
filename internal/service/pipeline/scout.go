@@ -18,6 +18,7 @@ type ScoutHistoricalSnapshot struct {
 	Price           float64   `json:"price"`
 	VolumeRank      int32     `json:"volume_rank"`
 	TickRank        int32     `json:"tick_rank"`
+	PriceRank       int32     `json:"price_rank"`
 	POC             float64   `json:"poc"`
 	VAH             float64   `json:"vah"`
 	VAL             float64   `json:"val"`
@@ -61,19 +62,17 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	token := tick.Raw.InstrumentToken
-	price := tick.Raw.LastPrice
 	volRank := tick.Enrichment.VolumeRank
-	tickRank := tick.Enrichment.TickRank
 	priceRank := tick.Enrichment.PriceRank // Extraction of normalized price velocity
 
 	// 🟢 RULE 1: FILTER PACKET CHATTER NOISE
-	if volRank == 0 && tickRank == 0 {
+	// Updated chatter rule to monitor volumeRank and priceRank
+	if volRank == 0 && priceRank == 0 {
 		return nil
 	}
 
 	s.mu.Lock()
 	state, hasActiveAlert := s.activeAlerts[token]
-	prof, hasProfile := s.profiles[token]
 
 	if tick.VolProfile != nil && tick.VolProfile.VAH > 0 && tick.VolProfile.VAL > 0 {
 		s.profileCache[token] = cachedBoundaries{
@@ -82,50 +81,26 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 			VAL: tick.VolProfile.VAL,
 		}
 	}
-	cached, hasCached := s.profileCache[token]
+	cached, _ := s.profileCache[token]
 	s.mu.Unlock()
 
 	// ==========================================================
 	// ⚡ THE SPARK GATEKEEPER CONDITION
 	// ==========================================================
-	// Only validate and process triggers if price movement is actively crossing
-	// or exceeding the P50 median threshold context.
 	hasSubstantialPriceMove := priceRank >= 4
 
 	now := time.Now()
 	var currentTrigger string
 
-	var dynamicBuffer float64 = 0.0
-	if hasProfile && prof != nil && prof.ATR14 > 0 {
-		dynamicBuffer = 0.05 * float64(prof.ATR14)
-	}
-
-	// ==========================================================
-	// 0. PROFILE MATURITY CHECK (9:30 AM GRACE PERIOD)
-	// ==========================================================
-	loc, _ := time.LoadLocation("Asia/Kolkata")
-	exchangeTime := tick.Raw.Timestamp.In(loc)
-
-	isProfileMature := true
-	if (exchangeTime.Hour() == 9 && exchangeTime.Minute() < 30) || exchangeTime.Hour() < 9 {
-		isProfileMature = false
-	}
-
 	// ==========================================================
 	// 1. STATE RE-EVALUATION LATCH
 	// ==========================================================
 	if hasActiveAlert {
+		// Only retain state tracking logic for VOLUME_SPIKE
 		if state.TriggerType == "VOLUME_SPIKE" {
-			if (volRank >= 6 || tickRank >= 6) && hasSubstantialPriceMove {
+			// Alerts persist only if BOTH priceRank and volumeRank remain strictly above 6
+			if priceRank > 6 && volRank > 6 && hasSubstantialPriceMove {
 				currentTrigger = "VOLUME_SPIKE"
-			}
-		} else if state.TriggerType == "VAH_BREACH" {
-			if hasCached && price >= cached.VAH && hasSubstantialPriceMove {
-				currentTrigger = "VAH_BREACH"
-			}
-		} else if state.TriggerType == "VAL_BREACH" {
-			if hasCached && price <= cached.VAL && hasSubstantialPriceMove {
-				currentTrigger = "VAL_BREACH"
 			}
 		}
 	}
@@ -134,15 +109,11 @@ func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
 	// 2. FRESH ANOMALY SENSING (Only processed if currently idle)
 	// ==========================================================
 	if currentTrigger == "" && !hasActiveAlert && hasSubstantialPriceMove {
-		if volRank >= 6 || tickRank >= 6 { // Syncs to P97 linear scale boundary
+		// Strict condition: Only trigger when BOTH priceRank and volumeRank are strictly greater than 6
+		if priceRank > 6 && volRank > 6 {
 			currentTrigger = "VOLUME_SPIKE"
-		} else if isProfileMature && hasCached {
-			if price > (cached.VAH + dynamicBuffer) {
-				currentTrigger = "VAH_BREACH"
-			} else if price < (cached.VAL - dynamicBuffer) {
-				currentTrigger = "VAL_BREACH"
-			}
 		}
+		// VAH_BREACH and VAL_BREACH conditional blocks completely bypassed here
 	}
 
 	// ==========================================================
@@ -252,6 +223,7 @@ func (s *ScoutStage) compileSnapshot(tick *models.EnrichedTick, cached cachedBou
 		Price:           tick.Raw.LastPrice,
 		VolumeRank:      int32(tick.Enrichment.VolumeRank),
 		TickRank:        int32(tick.Enrichment.TickRank),
+		PriceRank:       int32(tick.Enrichment.PriceRank),
 		POC:             outPoc,
 		VAH:             outVah,
 		VAL:             outVal,
