@@ -1,4 +1,4 @@
-package scalper
+package strategy
 
 import (
 	"gidh-backend/internal/service/models"

@@ -1,4 +1,4 @@
-package scalper
+package strategy
 
 // Strategy isolates execution decisions into clean, distinct logical tracks.
 type Strategy interface {

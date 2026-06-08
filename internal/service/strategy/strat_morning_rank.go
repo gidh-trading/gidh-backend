@@ -1,4 +1,4 @@
-package scalper
+package strategy
 
 import (
 	"gidh-backend/internal/service/models"
@@ -27,7 +27,7 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 	latestClosedBar := bars1m[len(bars1m)-1]
 	analytics := latestClosedBar.Analytics
 
-	if analytics.VolumeRank >= 6 {
+	if analytics.VolumeRank >= 7 {
 
 		// Evaluate using 5% of Daily ATR as our VWAP Band channel width
 		bandState := evaluateVWAPBand(state, 0.05)

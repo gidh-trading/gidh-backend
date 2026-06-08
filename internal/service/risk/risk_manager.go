@@ -3,13 +3,13 @@ package risk
 import (
 	"context"
 	"fmt"
+	"gidh-backend/internal/service/strategy"
 	"gidh-backend/pkg/logger"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/order"
-	"gidh-backend/internal/service/scalper" // Pointing to your clean, new package
 )
 
 const (
@@ -28,7 +28,7 @@ type UIContractNotePayload struct {
 type RiskManager struct {
 	mu             sync.RWMutex
 	orderManager   order.PositionManager
-	scalperEngine  *scalper.Engine
+	strategyEngine *strategy.Engine
 	agentPositions map[string]*models.Position
 	dailyRealized  float64
 	circuitBroken  bool
@@ -39,10 +39,10 @@ type RiskManager struct {
 	executedTrades   []models.BacktestExecutedTrade
 }
 
-func NewRiskManager(om order.PositionManager, se *scalper.Engine) *RiskManager {
+func NewRiskManager(om order.PositionManager, se *strategy.Engine) *RiskManager {
 	return &RiskManager{
 		orderManager:   om,
-		scalperEngine:  se,
+		strategyEngine: se,
 		agentPositions: make(map[string]*models.Position),
 		lastExitTime:   make(map[string]time.Time),
 		dailyRealized:  0.0,
@@ -57,8 +57,8 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	symbol := rawTick.StockName
 	key := fmt.Sprintf("%s:MIS", symbol)
 
-	// Step 1: Push context straight into the Scalper's data layer cache instantly
-	rm.scalperEngine.UpdateContext(enrichedTick)
+	// Step 1: Push context straight into the Strategy Engine's data layer cache instantly
+	rm.strategyEngine.UpdateContext(enrichedTick)
 
 	rm.mu.Lock()
 	if rm.circuitBroken {
@@ -87,7 +87,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	rm.mu.Unlock()
 
 	// Ask the Sequential 4-Method Core for its definitive response string
-	signal := rm.scalperEngine.GenerateSignal(symbol, currentSide, avgPrice, netQty)
+	signal := rm.strategyEngine.GenerateSignal(symbol, currentSide, avgPrice, netQty)
 	if signal == "HOLD" {
 		return
 	}

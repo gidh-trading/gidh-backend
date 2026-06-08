@@ -1,4 +1,4 @@
-package scalper
+package strategy
 
 import "time"
 
@@ -21,42 +21,45 @@ func (r *TimeBasedRouter) Name() string {
 	return "Dynamic_Time_Router"
 }
 
-// 1. CheckEntry looks at the clock first, then hands off the choice to the correct card
 func (r *TimeBasedRouter) CheckEntry(state *InstrumentState) string {
-	currentHour := state.LastUpdated.In(r.loc).Hour()
-
-	if currentHour < 12 {
+	if r.isMorning(state.LastUpdated) {
 		return r.MorningStrat.CheckEntry(state)
 	}
 	return r.AfternoonStrat.CheckEntry(state)
 }
 
-// 2. CheckExit acts as the traffic cop for technical trend exits
 func (r *TimeBasedRouter) CheckExit(state *InstrumentState, currentSide string) string {
-	currentHour := state.LastUpdated.In(r.loc).Hour()
-
-	if currentHour < 12 {
+	if r.isMorning(state.LastUpdated) {
 		return r.MorningStrat.CheckExit(state, currentSide)
 	}
 	return r.AfternoonStrat.CheckExit(state, currentSide)
 }
 
-// 3. CheckTakeProfit routes the cash target verification down to the active card
 func (r *TimeBasedRouter) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	currentHour := state.LastUpdated.In(r.loc).Hour()
-
-	if currentHour < 12 {
+	if r.isMorning(state.LastUpdated) {
 		return r.MorningStrat.CheckTakeProfit(state, currentSide, averagePrice, netQty)
 	}
 	return r.AfternoonStrat.CheckTakeProfit(state, currentSide, averagePrice, netQty)
 }
 
-// 4. CheckStopLoss routes the safety barrier validation down to the active card
 func (r *TimeBasedRouter) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	currentHour := state.LastUpdated.In(r.loc).Hour()
-
-	if currentHour < 12 {
+	if r.isMorning(state.LastUpdated) {
 		return r.MorningStrat.CheckStopLoss(state, currentSide, averagePrice, netQty)
 	}
 	return r.AfternoonStrat.CheckStopLoss(state, currentSide, averagePrice, netQty)
+}
+
+func (r *TimeBasedRouter) isMorning(t time.Time) bool {
+	localTime := t.In(r.loc)
+	hour := localTime.Hour()
+	minute := localTime.Minute()
+
+	// 10:30 AM is equivalent to (hour == 10 && minute >= 30) or any hour >= 11
+	if hour < 10 {
+		return true
+	}
+	if hour == 10 && minute < 30 {
+		return true
+	}
+	return false
 }

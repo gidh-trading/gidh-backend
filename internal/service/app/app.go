@@ -4,7 +4,7 @@ import (
 	"context"
 	"gidh-backend/internal/service/order"
 	"gidh-backend/internal/service/risk"
-	"gidh-backend/internal/service/scalper"
+	"gidh-backend/internal/service/strategy"
 	"net/http"
 	"sync"
 	"time"
@@ -200,13 +200,13 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 
 		// Step C: Initialize your engine using the compiled symbol map
-		scalperEngine := scalper.NewEngine(1*time.Hour, symbolProfiles)
+		strategyEngine := strategy.NewEngine(1*time.Hour, symbolProfiles)
 
 		// Connect macro streaming listeners
-		barManager.MacroListener = scalperEngine
+		barManager.MacroListener = strategyEngine
 
 		// Initialize standalone Risk, Capital and Broker Order Controllers
-		backtestMoneyManager := risk.NewRiskManager(a.OrderManager, scalperEngine)
+		backtestMoneyManager := risk.NewRiskManager(a.OrderManager, strategyEngine)
 		a.Pipeline.BacktestAgent = backtestMoneyManager
 		a.RiskManager = backtestMoneyManager
 

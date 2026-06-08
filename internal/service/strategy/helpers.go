@@ -1,4 +1,4 @@
-package scalper
+package strategy
 
 // evaluateVWAPBand checks if the current price has cleared a volatility-adjusted band around the VWAP.
 // It directly extracts the real-time execution variables from the InstrumentState object.
