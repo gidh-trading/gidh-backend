@@ -97,13 +97,13 @@ func (s *MorningRankStrategy) CheckExit(state *InstrumentState, currentSide stri
 
 	// Trend-Flip Rule: Exit only if opposing institutional volume prints with force (Rank >= 6)
 	if currentSide == "LONG" {
-		if analytics.VolumeRank >= 6 && (analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish) {
+		if analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish {
 			return "EXIT_LONG"
 		}
 	}
 
 	if currentSide == "SHORT" {
-		if analytics.VolumeRank >= 6 && (analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish) {
+		if analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish {
 			return "EXIT_SHORT"
 		}
 	}
