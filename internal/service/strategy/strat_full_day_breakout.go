@@ -5,15 +5,16 @@ import (
 	"math"
 )
 
-type MorningRankStrategy struct{}
+// FullDayBreakoutStrategy monitors the entire session for macro institutional breakout continuations.
+type FullDayBreakoutStrategy struct{}
 
-func NewMorningRankStrategy() *MorningRankStrategy {
-	return &MorningRankStrategy{}
+func NewFullDayBreakoutStrategy() *FullDayBreakoutStrategy {
+	return &FullDayBreakoutStrategy{}
 }
 
-func (s *MorningRankStrategy) Name() string { return "Morning_4Method_Ranks" }
+func (s *FullDayBreakoutStrategy) Name() string { return "Full_Day_Macro_Trend_Continuity" }
 
-func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
+func (s *FullDayBreakoutStrategy) CheckEntry(state *InstrumentState) string {
 	bars1m := state.BarHistory["1m"]
 	if len(bars1m) < 2 {
 		return "HOLD"
@@ -26,14 +27,19 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 		return "HOLD"
 	}
 
-	// 2. 10-Minute Opening Drive Window (9:16 AM - 9:25 AM)
-	if state.MinutesSinceOpen < 1 || state.MinutesSinceOpen > 10 {
+	// 2. Core Session Constraints (9:16 AM to 3:15 PM IST)
+	if state.MinutesSinceOpen < 1 || state.MinutesSinceOpen >= 360 {
 		return "HOLD"
 	}
 
-	// 3. Volatility Over-Extension Cap
+	// 3. 🛑 DYNAMIC VOLATILITY OVER-EXTENSION CAP
 	absDistance := math.Abs(state.NormalizedVwapDistance)
-	if absDistance > 0.35 {
+	var maximumAllowedExtension float64 = 0.65
+	if state.MinutesSinceOpen <= 30 {
+		maximumAllowedExtension = 0.35
+	}
+
+	if absDistance > maximumAllowedExtension {
 		return "HOLD"
 	}
 
@@ -53,6 +59,8 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 	}
 
 	analytics := latestClosedBar.Analytics
+
+	// Core Volume Check: Volume > P97 and Price > P97
 	isInstitutionalShock := analytics.VolumeRank >= 7
 	isPriceExpanding := analytics.PriceRank >= 7
 
@@ -87,7 +95,7 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 	return "HOLD"
 }
 
-func (s *MorningRankStrategy) CheckExit(state *InstrumentState, currentSide string) string {
+func (s *FullDayBreakoutStrategy) CheckExit(state *InstrumentState, currentSide string) string {
 	bars1m := state.BarHistory["1m"]
 	if len(bars1m) == 0 {
 		return "HOLD"
@@ -96,7 +104,7 @@ func (s *MorningRankStrategy) CheckExit(state *InstrumentState, currentSide stri
 	latestClosedBar := bars1m[len(bars1m)-1]
 	analytics := latestClosedBar.Analytics
 
-	// Trend-Flip Rule: Exit only if opposing institutional volume prints with force (Rank >= 6)
+	// Trend-Flip Exit Rule
 	if currentSide == "LONG" {
 		if analytics.VolumeRank >= 6 && (analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish) {
 			return "EXIT_LONG"
@@ -112,10 +120,10 @@ func (s *MorningRankStrategy) CheckExit(state *InstrumentState, currentSide stri
 	return "HOLD"
 }
 
-func (s *MorningRankStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
+func (s *FullDayBreakoutStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	return false
 }
 
-func (s *MorningRankStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
+func (s *FullDayBreakoutStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	return false
 }
