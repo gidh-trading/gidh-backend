@@ -100,9 +100,25 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 		return
 	}
 
+	// Calculate physical wicks
+	var upperWick, lowerWick float64
+	if bar.Close >= bar.Open {
+		upperWick = bar.High - bar.Close
+		lowerWick = bar.Open - bar.Low
+	} else {
+		upperWick = bar.High - bar.Open
+		lowerWick = bar.Close - bar.Low
+	}
+
+	upperWickRatio := upperWick / candleRange
+	lowerWickRatio := lowerWick / candleRange
+
 	positionRatio := (bar.Close - bar.Low) / candleRange
 	isHigherThanOpen := bar.Close > bar.Open
 	isLowerThanOpen := bar.Close < bar.Open
+
+	bar.Analytics.UpperWickRank = bae.getWickRank(upperWickRatio)
+	bar.Analytics.LowerWickRank = bae.getWickRank(lowerWickRatio)
 
 	// Look at the accumulated peak volume intensity over the course of this bar's life
 	if bar.Analytics.VolumeRank >= 7 && bar.Analytics.PriceRank <= 4 {
@@ -127,5 +143,26 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 		bar.Analytics.Direction = models.DirBearish
 	default:
 		bar.Analytics.Direction = models.DirSideways
+	}
+}
+
+// getWickRank converts a physical wick ratio (wick / total_range) into a standardized 1-7 score.
+// A ratio of 0.40 means the single wick makes up 40% of the entire candle's high-low range.
+func (bae *BarAnalyticsEngine) getWickRank(ratio float64) int {
+	switch {
+	case ratio >= 0.45:
+		return 7 // Massive rejection/absorption tail (extreme wick)
+	case ratio >= 0.35:
+		return 6 // Very large wick
+	case ratio >= 0.25:
+		return 5 // Notable structural wick
+	case ratio >= 0.18:
+		return 4 // Average/Medium wick
+	case ratio >= 0.12:
+		return 3 // Small wick
+	case ratio >= 0.05:
+		return 2 // Negligible tail
+	default:
+		return 1 // Practically zero wick / shaved head or bottom
 	}
 }

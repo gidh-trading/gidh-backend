@@ -3,11 +3,13 @@ package models
 import "time"
 
 type BarAnalytics struct {
-	VolumeRank int            `json:"volume_rank"`
-	TickRank   int            `json:"tick_rank"`
-	PriceRank  int            `json:"price_rank"`
-	RangeRank  int            `json:"range_rank"`
-	Direction  DirectionState `json:"direction"`
+	VolumeRank    int            `json:"volume_rank"`
+	TickRank      int            `json:"tick_rank"`
+	PriceRank     int            `json:"price_rank"`
+	RangeRank     int            `json:"range_rank"`
+	Direction     DirectionState `json:"direction"`
+	UpperWickRank int            `json:"upper_wick_rank"`
+	LowerWickRank int            `json:"lower_wick_rank"`
 }
 
 type Bar struct {
