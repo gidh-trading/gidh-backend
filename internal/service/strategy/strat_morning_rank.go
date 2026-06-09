@@ -37,12 +37,11 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 		return "HOLD"
 	}
 
-	// 4. Dynamic Opening Spatial Depth Filter
-	var minimumRequiredStretch float64 = 0.05
-	if state.MinutesSinceOpen <= 3 {
-		minimumRequiredStretch = 0.20
-	}
-	if absDistance < minimumRequiredStretch {
+	// 4. ⚡ HARDENED OPENING SPATIAL DEPTH GATE
+	// We raise the requirement to a flat 0.20 across the entire 10-minute morning window.
+	// This ensures the price must be actively breaking away from the VWAP line before we enter.
+	// This single change completely filters out the faulty SUPREMEIND entry (-0.0744).
+	if absDistance < 0.20 {
 		return "HOLD"
 	}
 
@@ -117,5 +116,27 @@ func (s *MorningRankStrategy) CheckTakeProfit(state *InstrumentState, currentSid
 }
 
 func (s *MorningRankStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
+	return false
+}
+
+// CheckTrailingProfitLock evaluates if an active trend extension has stalled and rolled back.
+// Arms at 20% of daily expected range (0.20) and triggers an exit if 50% of peak extension evaporates.
+func (s *MorningRankStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
+	currentExtension := math.Abs(state.NormalizedVwapDistance)
+
+	// 🔒 LOCK ARMING MILESTONE
+	// The lock only arms if the trade expands past 20% of the stock's total expected daily range.
+	// This ensures your THANGAMAYL move (which peaked at over ₹4,600) gets safely captured.
+	if state.PeakVwapExtension < 0.20 {
+		return false
+	}
+
+	// 🔒 50% RE-TRACEMENT SNAP-LOCK
+	// Once armed, if momentum reverses and 50% of the maximum recorded extension vanishes,
+	// we flag an immediate interface exit live on the current streaming tick.
+	if currentExtension <= (state.PeakVwapExtension * 0.50) {
+		return true // Structural exit triggered!
+	}
+
 	return false
 }

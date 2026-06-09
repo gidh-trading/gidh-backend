@@ -185,6 +185,7 @@ func LogStrategyOptimizationTrade(
 	exitPrice float64,
 	exitReason string,
 	finalPnL float64,
+	peak_pnl float64,
 ) error {
 	if pool == nil {
 		return fmt.Errorf("database connection pool is uninitialized")
@@ -195,19 +196,19 @@ func LogStrategyOptimizationTrade(
 			symbol, strategy_name, trade_side, minutes_since_open,
 			entry_timestamp, entry_price, entry_vwap, entry_volume_rank, 
 			entry_price_rank, entry_wick_ratio, entry_vwap_distance,
-			exit_timestamp, exit_price, exit_reason, final_pnl_inr
+			exit_timestamp, exit_price, exit_reason, final_pnl_inr, peak_pnl_inr
 		) VALUES (
 			$1, $2, $3, $4, 
 			$5, $6, $7, $8, 
 			$9, $10, $11, 
-			$12, $13, $14, $15
+			$12, $13, $14, $15, $16
 		);`
 
 	_, err := pool.Exec(ctx, query,
 		symbol, strategyName, tradeSide, minutesSinceOpen,
 		entryTimestamp, entryPrice, entryVwap, entryVolRank,
 		entryPriceRank, entryWickRatio, entryVwapDistance,
-		exitTimestamp, exitPrice, exitReason, finalPnL,
+		exitTimestamp, exitPrice, exitReason, finalPnL, peak_pnl,
 	)
 	return err
 }

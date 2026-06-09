@@ -19,7 +19,8 @@ CREATE TABLE IF NOT EXISTS strategy_optimization_logs
     exit_timestamp      TIMESTAMPTZ,
     exit_price          DOUBLE PRECISION,
     exit_reason         VARCHAR(50),
-    final_pnl_inr       DOUBLE PRECISION,
+    final_pnl_inr       DOUBLE PRECISION DEFAULT 0 NOT NULL,
+    peak_pnl_inr        DOUBLE PRECISION DEFAULT 0 NOT NULL,
 
     created_at          TIMESTAMPTZ DEFAULT NOW()
 );

@@ -31,6 +31,8 @@ type InstrumentState struct {
 
 	LastTradedBarTime time.Time
 
+	PeakVwapExtension float64 // Stores the maximum absolute distance reached during the trade
+
 	// --- ⏱️ Strategy Time Constraints ---
 	MinutesSinceOpen int // Minutes elapsed since market open (9:15 AM IST)
 
@@ -150,11 +152,10 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	}
 }
 
-// UpdateContext updates real-time tracking metrics between bar closes
-func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick) {
+// UpdateContext updates real-time tracking metrics and evaluates active trailing locks live on every tick.
+// Returns an exit signal ("EXIT_LONG", "EXIT_SHORT") if the trailing lock triggers, otherwise returns "HOLD".
+func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
-	defer e.mu.Unlock()
-
 	symbol := enrichedTick.Raw.StockName
 	state, exists := e.Registry[symbol]
 	if !exists {
@@ -172,10 +173,54 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick) {
 	state.LastUpdated = rawTick.Timestamp
 	state.LiveSessionVWAP = rawTick.AverageTradedPrice
 
+	// 1. Calculate Normalized Spatial Distance from VWAP
 	if state.LiveSessionVWAP > 0 && state.Profile != nil && state.Profile.ADRPct > 0 {
 		rawDistancePct := ((state.LatestPrice - state.LiveSessionVWAP) / state.LiveSessionVWAP) * 100
 		state.NormalizedVwapDistance = rawDistancePct / state.Profile.ADRPct
+	} else {
+		state.NormalizedVwapDistance = 0.0
 	}
+
+	// 2. Manage Peak Metrics and Trailing Protection for Active Positions
+	isFlatNow := currentSide == "FLAT" || currentSide == ""
+	if isFlatNow {
+		state.CurrentSetupPhase = PhaseNeutral
+		state.PeakVwapExtension = 0.0
+	} else {
+		state.CurrentSetupPhase = PhaseActiveTrade
+
+		// Track the absolute maximum distance reached during this specific trade
+		currentExtension := math.Abs(state.NormalizedVwapDistance)
+		if currentExtension > state.PeakVwapExtension {
+			state.PeakVwapExtension = currentExtension
+		}
+
+		// Track the Cash Currency Peak for database optimization logs
+		if openTrade, trackingTrade := e.ActiveTrades[symbol]; trackingTrade {
+			multiplier := 1.0
+			if openTrade.TradeSide == "SHORT" {
+				multiplier = -1.0
+			}
+			currentCashPnL := (state.LatestPrice - averagePrice) * float64(netQty) * multiplier
+			if currentCashPnL > openTrade.PeakPnLINR {
+				openTrade.PeakPnLINR = currentCashPnL
+			}
+
+			// ⚡ TICK-LEVEL PROTECTION EXIT EVALUATION
+			// Evaluates the interface method live on the tick. If it triggers, we release
+			// the mutex lock and dispatch the completed log to prevent leaving money on the table.
+			if e.ActiveStrategy.CheckTrailingProfitLock(state, currentSide) {
+				e.mu.Unlock() // Release lock before executing network/log dispatches
+				if trackingTrade {
+					e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "INTELLIGENT_PROFIT_LOCK", averagePrice, netQty, state.LastUpdated) //
+				}
+				return "EXIT_" + currentSide
+			}
+		}
+	}
+
+	e.mu.Unlock()
+	return "HOLD"
 }
 
 // GenerateSignal handles execution tracking and logs freeze-frame microstructural metrics
@@ -190,9 +235,31 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	isFlatNow := currentSide == "FLAT" || currentSide == ""
 	if isFlatNow {
 		state.CurrentSetupPhase = PhaseNeutral
+		state.PeakVwapExtension = 0.0
 	} else {
 		state.CurrentSetupPhase = PhaseActiveTrade
+
+		// 1. Maintain the Volatility Peak for strategy rules
+		currentExtension := math.Abs(state.NormalizedVwapDistance)
+		if currentExtension > state.PeakVwapExtension {
+			state.PeakVwapExtension = currentExtension
+		}
+
+		// 2. ⚡ Maintain the Cash Currency Peak for database analytics
+		if openTrade, trackingTrade := e.ActiveTrades[symbol]; trackingTrade {
+			multiplier := 1.0
+			if openTrade.TradeSide == "SHORT" {
+				multiplier = -1.0
+			}
+
+			// Calculate current instantaneous cash PnL
+			currentCashPnL := (state.LatestPrice - averagePrice) * float64(netQty) * multiplier
+			if currentCashPnL > openTrade.PeakPnLINR {
+				openTrade.PeakPnLINR = currentCashPnL // Saved continuously onto the live log reference
+			}
+		}
 	}
+
 	e.mu.Unlock()
 
 	// --- 🛑 TRACK A: FLAT EVALUATION (ENTRY DISCOVERY ROUTE) ---
@@ -243,6 +310,14 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 
 		// Capture the exact bar/tick timestamp from our registry state
 		marketExitTime := state.LastUpdated
+
+		// ⚡ INTELLIGENT TRAILING PROTECTION CHECK
+		if e.ActiveStrategy.CheckTrailingProfitLock(state, currentSide) {
+			if trackingTrade {
+				e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "INTELLIGENT_PROFIT_LOCK", averagePrice, netQty, marketExitTime)
+			}
+			return "EXIT_" + currentSide
+		}
 
 		// 1. Evaluate Downside Protection (Stop Loss Check)
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {

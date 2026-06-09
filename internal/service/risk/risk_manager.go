@@ -13,11 +13,11 @@ import (
 )
 
 const (
-	MaxDailyLossAllowed   = 5000.0
-	InitialCapital        = 100000.0
+	MaxDailyLossAllowed   = 1000.0
+	InitialCapital        = 50000.0
 	MaxLeverage           = 5.0
-	MaxCapitalPerStockPct = 0.25
-	AgentEmail            = "agent@gidh.trading"
+	MaxCapitalPerStockPct = 0.50
+	AgentEmail            = "algo.trader@gidh.tech"
 )
 
 type UIContractNotePayload struct {
@@ -57,9 +57,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	symbol := rawTick.StockName
 	key := fmt.Sprintf("%s:MIS", symbol)
 
-	// Step 1: Push context straight into the Strategy Engine's data layer cache instantly
-	rm.strategyEngine.UpdateContext(enrichedTick)
-
 	rm.mu.Lock()
 	if rm.circuitBroken {
 		rm.mu.Unlock()
@@ -70,6 +67,15 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	if !exists {
 		pos = &models.Position{Symbol: symbol, Product: "MIS", NetQuantity: 0, Side: "FLAT"}
 		rm.agentPositions[key] = pos
+	}
+
+	// ⚡ STATE RECOVERY: MANUAL INTERVENTION & OVER-THE-AIR LIMIT FILL SAFETY SYNC
+	// If you manually squared off the asset, or a resting order filled silently,
+	// pos.NetQuantity will be 0, but our tracking memory might still show "LONG" or "SHORT".
+	// We force a localized memory sync here to prevent stale signals or trade collisions.
+	if pos.NetQuantity == 0 && pos.Side != "FLAT" {
+		pos.Side = "FLAT"
+		pos.AveragePrice = 0.0
 	}
 
 	// Account-Level Global Drawdown Circuit Breaker
@@ -86,17 +92,33 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	netQty := pos.NetQuantity
 	rm.mu.Unlock()
 
-	// Ask the Sequential 4-Method Core for its definitive response string
-	signal := rm.strategyEngine.GenerateSignal(symbol, currentSide, avgPrice, netQty)
-	if signal == "HOLD" {
+	// 🚨 STEP 1: Process real-time tick calculations and check trailing profit locks
+	tickSignal := rm.strategyEngine.UpdateContext(enrichedTick, currentSide, avgPrice, netQty)
+
+	// ⚡ CRITICAL TRAILING HIERARCHY OVERRIDE
+	// If the real-time tick says the profit lock was breached, we liquidate instantly.
+	// We return early to ensure bar-close indicator flips can never overwrite this exit.
+	if tickSignal == "EXIT_LONG" || tickSignal == "EXIT_SHORT" {
+		rm.mu.Lock()
+		if pos.NetQuantity != 0 {
+			// Explicitly passing the exit reason lets your database logs categorize this perfectly
+			rm.executeBrokerOrder(symbol, pos, "Intelligent Volatility Profit Lock Triggered", rawTick.Timestamp)
+		}
+		rm.mu.Unlock()
+		return // Block any further processing for this tick packet!
+	}
+
+	// STEP 2: Evaluate standard bar-close triggers only if trailing locks are clear
+	barSignal := rm.strategyEngine.GenerateSignal(symbol, currentSide, avgPrice, netQty)
+	if barSignal == "HOLD" {
 		return
 	}
 
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	// Entry Router Track
-	if (signal == "GO_SHORT" || signal == "GO_LONG") && pos.NetQuantity == 0 {
+	// Entry Order Logic
+	if (barSignal == "GO_SHORT" || barSignal == "GO_LONG") && pos.NetQuantity == 0 {
 		if exitTime, ok := rm.lastExitTime[symbol]; ok {
 			if rawTick.Timestamp.Sub(exitTime) < 5*time.Second {
 				return
@@ -110,7 +132,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 		txType := "BUY"
 		posSide := "LONG"
-		if signal == "GO_SHORT" {
+		if barSignal == "GO_SHORT" {
 			txType = "SELL"
 			posSide = "SHORT"
 		}
@@ -128,10 +150,10 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			UserEmail:       AgentEmail,
 		})
 
-		// Exit Router Track
-	} else if (signal == "EXIT_LONG" || signal == "EXIT_SHORT") && pos.NetQuantity != 0 {
-		if (signal == "EXIT_LONG" && pos.Side == "LONG") || (signal == "EXIT_SHORT" && pos.Side == "SHORT") {
-			rm.executeBrokerOrder(symbol, pos, "Strategy Interface Mandated Exit Triggered", rawTick.Timestamp)
+		// Closed Bar Structural Exit Logic
+	} else if (barSignal == "EXIT_LONG" || barSignal == "EXIT_SHORT") && pos.NetQuantity != 0 {
+		if (barSignal == "EXIT_LONG" && pos.Side == "LONG") || (barSignal == "EXIT_SHORT" && pos.Side == "SHORT") {
+			rm.executeBrokerOrder(symbol, pos, "Strategy Interface Mandated Direction Flip", rawTick.Timestamp)
 		}
 	}
 }

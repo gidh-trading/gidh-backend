@@ -225,6 +225,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 					log.ExitPrice,
 					log.ExitReason,
 					log.FinalPnLINR,
+					log.PeakPnLINR,
 				)
 				if err != nil {
 					logger.Errorf("Failed to persist strategy optimization metrics chunk for %s: %v", log.Symbol, err)

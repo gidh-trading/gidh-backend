@@ -12,23 +12,30 @@ func NewTimeBasedRouter(morning Strategy) *TimeBasedRouter {
 
 func (r *TimeBasedRouter) Name() string { return "Morning_Only_Time_Router" }
 
+func (r *TimeBasedRouter) selectStrategy(state *InstrumentState) Strategy {
+	// Defaults directly to the morning strategy card
+	return r.morningStrategy
+}
+
 func (r *TimeBasedRouter) CheckEntry(state *InstrumentState) string {
-	// Strict Wall: No fresh trade entries are allowed anywhere in the system after 9:25 AM IST
 	if state.MinutesSinceOpen > 10 {
 		return "HOLD"
 	}
-	return r.morningStrategy.CheckEntry(state)
+	return r.selectStrategy(state).CheckEntry(state)
 }
 
 func (r *TimeBasedRouter) CheckExit(state *InstrumentState, currentSide string) string {
-	// Existing active trades can still check their trend-flip exits normally until closed out
-	return r.morningStrategy.CheckExit(state, currentSide)
+	return r.selectStrategy(state).CheckExit(state, currentSide)
+}
+
+func (r *TimeBasedRouter) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
+	return r.selectStrategy(state).CheckTrailingProfitLock(state, currentSide)
 }
 
 func (r *TimeBasedRouter) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	return r.morningStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty)
+	return r.selectStrategy(state).CheckTakeProfit(state, currentSide, averagePrice, netQty)
 }
 
 func (r *TimeBasedRouter) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	return r.morningStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty)
+	return r.selectStrategy(state).CheckStopLoss(state, currentSide, averagePrice, netQty)
 }
