@@ -163,3 +163,50 @@ func CleanupBacktestData(ctx context.Context, dateStr string) error {
 	logger.Infof("Successfully wiped all tables for backtest date: %s", dateStr)
 	return nil
 }
+
+// LogStrategyOptimizationTrade executes a direct single-row insert for completed macro strategy trades.
+// Since writes occur only on position closures, bypassing bulk buffers is safe and efficient.
+func LogStrategyOptimizationTrade(
+	ctx context.Context,
+	pool *pgxpool.Pool,
+	symbol string,
+	strategyName string,
+	tradeSide string,
+	minutesSinceOpen int,
+	entryTimestamp time.Time,
+	entryPrice float64,
+	entryVwap float64,
+	entryVolRank int,
+	entryPriceRank int,
+	entryWickRatio float64,
+	entryVwapDistance float64,
+	exitTimestamp time.Time,
+	exitPrice float64,
+	exitReason string,
+	finalPnL float64,
+) error {
+	if pool == nil {
+		return fmt.Errorf("database connection pool is uninitialized")
+	}
+
+	query := `
+		INSERT INTO strategy_optimization_logs (
+			symbol, strategy_name, trade_side, minutes_since_open,
+			entry_timestamp, entry_price, entry_vwap, entry_volume_rank, 
+			entry_price_rank, entry_wick_ratio, entry_vwap_distance,
+			exit_timestamp, exit_price, exit_reason, final_pnl_inr
+		) VALUES (
+			$1, $2, $3, $4, 
+			$5, $6, $7, $8, 
+			$9, $10, $11, 
+			$12, $13, $14, $15
+		);`
+
+	_, err := pool.Exec(ctx, query,
+		symbol, strategyName, tradeSide, minutesSinceOpen,
+		entryTimestamp, entryPrice, entryVwap, entryVolRank,
+		entryPriceRank, entryWickRatio, entryVwapDistance,
+		exitTimestamp, exitPrice, exitReason, finalPnL,
+	)
+	return err
+}
