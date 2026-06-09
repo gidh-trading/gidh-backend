@@ -20,24 +20,49 @@ func (s *MorningRankStrategy) Name() string { return "Morning_4Method_Ranks" }
 
 func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 	bars1m := state.BarHistory["1m"]
-	if len(bars1m) == 0 || state.LiveSessionVWAP <= 0.0 {
+	// We need at least 2 bars so we can safely extract the stable, closed VWAP of the previous minute
+	if len(bars1m) < 2 {
+		return "HOLD"
+	}
+
+	// ⏱️ ANTI-OVERTRADING FILTER 1: Strict Morning Time Window
+	// Restrict entries strictly to the high-velocity opening drive (9:15 AM - 9:45 AM).
+	// This prevents chasing low-liquidity chopped ranges later in the day.
+	if state.MinutesSinceOpen < 0 || state.MinutesSinceOpen > 30 {
 		return "HOLD"
 	}
 
 	latestClosedBar := bars1m[len(bars1m)-1]
+	previousClosedBar := bars1m[len(bars1m)-2] // Our stable anchor line
+
+	// Extract previous closed bar's structural VWAP to eliminate morning tick fluctuation
+	stableAnchorVwap := previousClosedBar.VWAP
+	if stableAnchorVwap <= 0 {
+		return "HOLD"
+	}
+
 	analytics := latestClosedBar.Analytics
 
-	if analytics.VolumeRank >= 7 {
+	// 📊 ANTI-OVERTRADING FILTER 2: Extreme Capital Commitment & Price Agreement
+	// We only trigger if volume is top-tier (Rank 7 -> P97+)
+	// AND the price body shows clear, heavy institutional expansion (Rank >= 6 -> P90+).
+	// This ensures we never trade minor wiggles or high-volume stalled bars.
+	isInstitutionalShock := analytics.VolumeRank >= 7
+	isPriceExpanding := analytics.PriceRank >= 6
 
-		// Evaluate using 5% of Daily ATR as our VWAP Band channel width
-		bandState := evaluateVWAPBand(state, 0.05)
+	if isInstitutionalShock && isPriceExpanding {
 
-		switch bandState {
-		case "ABOVE_BAND":
+		// --- 🟢 EVALUATE LONG DIRECTION ---
+		// Price closed cleanly ABOVE our stable historical VWAP anchor line
+		if latestClosedBar.Close > stableAnchorVwap {
 			if analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish {
 				return "GO_LONG"
 			}
-		case "BELOW_BAND":
+		}
+
+		// --- 🔴 EVALUATE SHORT DIRECTION ---
+		// Price closed cleanly BELOW our stable historical VWAP anchor line
+		if latestClosedBar.Close < stableAnchorVwap {
 			if analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish {
 				return "GO_SHORT"
 			}
@@ -56,20 +81,28 @@ func (s *MorningRankStrategy) CheckExit(state *InstrumentState, currentSide stri
 	latestClosedBar := bars1m[len(bars1m)-1]
 	analytics := latestClosedBar.Analytics
 
-	// 1. General Low-Volume Momentum Drop: Exit if absolute session-wise activity dries up completely
-	if analytics.VolumeRank <= 4 {
-		return "EXIT_" + currentSide
+	// --- 🟢 EVALUATE LONG POSITION EXITS ---
+	if currentSide == "LONG" {
+		// Exit ONLY if the opposing downward move is backed by heavy size (Rank >= 6 -> P90+)
+		// AND the price cleanly expands downwards against us.
+		// We completely ignore Bearish Absorption walls here to let the cluster resolve naturally.
+		if analytics.VolumeRank >= 6 {
+			if analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish {
+				return "EXIT_LONG"
+			}
+		}
 	}
 
-	// 2. Institutional Counter-Trend Exit: Only exit if the opposing move is backed by heavy size (p90+)
-	if currentSide == "LONG" && analytics.VolumeRank >= 6 &&
-		(analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish) {
-		return "EXIT_LONG"
-	}
-
-	if currentSide == "SHORT" && analytics.VolumeRank >= 6 &&
-		(analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish) {
-		return "EXIT_SHORT"
+	// --- 🔴 EVALUATE SHORT POSITION EXITS ---
+	if currentSide == "SHORT" {
+		// Exit ONLY if the opposing upward move is backed by heavy size (Rank >= 6 -> P90+)
+		// AND the price cleanly expands upwards against us.
+		// We completely ignore Bullish Absorption floors here to let the cluster resolve naturally.
+		if analytics.VolumeRank >= 6 {
+			if analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish {
+				return "EXIT_SHORT"
+			}
+		}
 	}
 
 	return "HOLD"

@@ -188,7 +188,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// ========================================================================
 	// ⚡ MODULAR SEPARATED INTERFACE ASSEMBLY PIPELINE
 	// ========================================================================
-	if a.Config.Mode == "disabled" {
+	if a.Config.Mode != "live" {
 		logger.Infof("[System Initialization] Backtest Mode Detected. Activating Modular Algorithmic Teams Layer.")
 
 		// Construct the symbol name map for the execution engine registry

@@ -1,9 +1,11 @@
 package strategy
 
 import (
-	"gidh-backend/internal/service/models"
+	"math"
 	"sync"
 	"time"
+
+	"gidh-backend/internal/service/models"
 )
 
 type SetupPhase string
@@ -17,14 +19,28 @@ type InstrumentState struct {
 	Symbol           string
 	LastUpdated      time.Time
 	LatestPrice      float64
-	LatestDirection  models.DirectionState
-	LatestVolumeRank int
-	LatestPriceRank  int
-	LiveSessionVWAP  float64
+	LatestDirection  models.DirectionState // e.g., "BULLISH_ABSORPTION"
+	LatestVolumeRank int                   // Peak-locked rank (0, 90, 95, 97, 99)
+	LatestPriceRank  int                   // Candle body size percentile
+	LiveSessionVWAP  float64               // Anchor line from exchange
 
-	BarHistory        map[string][]*models.Bar
-	CurrentSetupPhase SetupPhase
-	Profile           *models.InstrumentProfile
+	// --- 📈 Candlestick Structural Properties ---
+	LatestBodySize  float64 // Absolute size of the candle body (|Close - Open|)
+	LatestLowerWick float64 // Absolute size of the lower wick
+	LatestWickRatio float64 // Lower wick size divided by total high-to-low range
+
+	// --- ⏱️ Strategy Time Constraints ---
+	MinutesSinceOpen int // Minutes elapsed since market open (9:15 AM IST)
+
+	// --- 🎯 Execution State Machine ---
+	CurrentSetupPhase SetupPhase // e.g., "NEUTRAL" or "ACTIVE_TRADE"
+
+	// --- Volatility Space ---
+	NormalizedVwapDistance float64 // Distance from VWAP scaled by ADRPct
+
+	// --- Memory Storage ---
+	BarHistory map[string][]*models.Bar  // Holds historical closed bars
+	Profile    *models.InstrumentProfile // Stores ADRPct and ADV constants
 }
 
 type Engine struct {
@@ -37,6 +53,7 @@ type Engine struct {
 
 // NewEngine now accepts your pre-loaded profiles map keyed by stock/symbol name
 func NewEngine(barLookback time.Duration, profiles map[string]*models.InstrumentProfile) *Engine {
+	// Dummy initializers assuming these exist in your repository packages
 	morningCard := NewMorningRankStrategy()
 	afternoonCard := NewAfternoonReversalStrategy()
 
@@ -50,10 +67,16 @@ func NewEngine(barLookback time.Duration, profiles map[string]*models.Instrument
 	}
 }
 
-// IngestClosedBar caches historical timeframes and prunes old data elements
+// IngestClosedBar caches historical timeframes and computes metrics upon bar close
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	if bar == nil {
 		return
+	}
+
+	// 🛑 TIME GATE: Ignore anything before the official 9:15 AM market open
+	currentTimeHM := (bar.Timestamp.Hour() * 100) + bar.Timestamp.Minute()
+	if currentTimeHM < 915 {
+		return // Silently drop pre-market auction bars
 	}
 
 	e.mu.Lock()
@@ -66,11 +89,45 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 			Symbol:            symbol,
 			BarHistory:        make(map[string][]*models.Bar),
 			CurrentSetupPhase: PhaseNeutral,
-			Profile:           e.profiles[symbol], // Fix: Hydrate profile immediately upon lazy load
+			Profile:           e.profiles[symbol], // Hydrate profile immediately upon lazy load
 		}
 		e.Registry[symbol] = state
 	}
 
+	// 1. Process Core Base Metric Assignments
+	state.LastUpdated = bar.Timestamp
+	state.LatestPrice = bar.Close
+	state.LatestDirection = bar.Analytics.Direction
+	state.LatestVolumeRank = bar.Analytics.VolumeRank
+	state.LatestPriceRank = bar.Analytics.PriceRank
+	state.LiveSessionVWAP = bar.VWAP
+
+	// 2. Compute Candle Geometric Proportions
+	totalRange := bar.High - bar.Low
+	state.LatestBodySize = math.Abs(bar.Close - bar.Open)
+
+	if totalRange > 0 {
+		candleBodyBottom := math.Min(bar.Open, bar.Close)
+		state.LatestLowerWick = candleBodyBottom - bar.Low
+		state.LatestWickRatio = state.LatestLowerWick / totalRange
+	} else {
+		state.LatestLowerWick = 0.0
+		state.LatestWickRatio = 0.0
+	}
+
+	// 3. Compute Minutes Since Open (09:15 AM IST)
+	// bar.Timestamp comes localized from BarManager in Asia/Kolkata
+	state.MinutesSinceOpen = (bar.Timestamp.Hour() * 60) + bar.Timestamp.Minute() - 555
+
+	// 4. Calculate Normalized Spatial Distance from VWAP
+	if state.LiveSessionVWAP > 0 && state.Profile != nil && state.Profile.ADRPct > 0 {
+		rawDistancePct := ((state.LatestPrice - state.LiveSessionVWAP) / state.LiveSessionVWAP) * 100
+		state.NormalizedVwapDistance = rawDistancePct / state.Profile.ADRPct
+	} else {
+		state.NormalizedVwapDistance = 0.0
+	}
+
+	// 5. Append and prune historical frames
 	tf := bar.Timeframe
 	state.BarHistory[tf] = append(state.BarHistory[tf], bar)
 
@@ -88,7 +145,7 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	}
 }
 
-// UpdateContext accepts streaming micro-ticks
+// UpdateContext updates real-time tracking metrics between bar closes
 func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -100,7 +157,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick) {
 			Symbol:            symbol,
 			BarHistory:        make(map[string][]*models.Bar),
 			CurrentSetupPhase: PhaseNeutral,
-			Profile:           e.profiles[symbol], // Fix: Hydrate profile immediately upon lazy load
+			Profile:           e.profiles[symbol], // Hydrate profile immediately upon lazy load
 		}
 		e.Registry[symbol] = state
 	}
@@ -108,10 +165,13 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick) {
 	rawTick := enrichedTick.Raw
 	state.LatestPrice = rawTick.LastPrice
 	state.LastUpdated = rawTick.Timestamp
-	state.LatestDirection = enrichedTick.Enrichment.Direction
-	state.LatestVolumeRank = enrichedTick.Enrichment.VolumeRank
-	state.LatestPriceRank = enrichedTick.Enrichment.PriceRank
 	state.LiveSessionVWAP = rawTick.AverageTradedPrice
+
+	// Live context calculations between bar closes
+	if state.LiveSessionVWAP > 0 && state.Profile != nil && state.Profile.ADRPct > 0 {
+		rawDistancePct := ((state.LatestPrice - state.LiveSessionVWAP) / state.LiveSessionVWAP) * 100
+		state.NormalizedVwapDistance = rawDistancePct / state.Profile.ADRPct
+	}
 }
 
 // GenerateSignal checks inventory states and routes data down to your router rules
