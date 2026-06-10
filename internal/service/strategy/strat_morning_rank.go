@@ -52,10 +52,9 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 	}
 
 	analytics := latestClosedBar.Analytics
-	isInstitutionalShock := analytics.VolumeRank >= 7
-	isPriceExpanding := analytics.PriceRank >= 7
+	isPriceExpanding := analytics.PriceRank >= 6
 
-	if isInstitutionalShock && isPriceExpanding {
+	if isPriceExpanding {
 		totalRange := latestClosedBar.High - latestClosedBar.Low
 		if totalRange <= 0.0001 {
 			return "HOLD"
