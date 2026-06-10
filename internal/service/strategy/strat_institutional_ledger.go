@@ -5,40 +5,51 @@ import (
 )
 
 type InstitutionalLedgerStrategy struct {
-	AdrScaleMultiplier float64 // 0.05 = Pullback envelope is 5% of the asset's total ADRPct
-	WipeoutThreshold   float64 // 0.60 = Exit if counter-volume hits 60% of setup volume
+	VwapBufferPct    float64 // Pullback execution envelope (0.0015 = 0.15% cushion zone around VWAP)
+	WipeoutThreshold float64 // Critical volume balance cutoff (0.60 = Exit if counter-volume hits 60% of setup volume)
 }
 
+// NewInstitutionalLedgerStrategy instantiates our professional institutional volume-ledger strategy.
 func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
 	return &InstitutionalLedgerStrategy{
-		AdrScaleMultiplier: 0.05,
-		WipeoutThreshold:   0.60,
+		VwapBufferPct:    0.0015,
+		WipeoutThreshold: 0.60,
 	}
 }
 
 func (s *InstitutionalLedgerStrategy) Name() string { return "Institutional_Ledger_VWAP_Acceptance" }
 
-// CheckEntry evaluates entry signals when position structure is completely FLAT
 func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string {
-	// Structural Gate: Wait for 3 continuous closes to establish a baseline trend floor
+	// 1. Structural Validation Gate
 	if !state.IsVwapAcceptanceConfirmed {
 		return "HOLD"
 	}
 
-	// --- 🟢 LONG STRATEGY TRACK (Gap Up Sessions) ---
+	// --- 🟢 LONG SETUP DIRECTIONAL CHECK ---
 	if state.IsGapUp && state.ConsecutiveClosesAboveVwap > 0 {
 		if state.BullishPushVolume > 0 && (state.BearishPushVolume/state.BullishPushVolume) < 0.30 {
+			// Setup Variant B: Aggressive Runaway Momentum Breakout
+			if state.LatestVolumeRank >= 7 && state.LatestPriceRank >= 7 && state.LatestPrice > state.LiveSessionVWAP {
+				return "GO_LONG"
+			}
+
+			// Setup Variant A: Signal that structural conditions are primed for a pullback entry
 			if state.LatestPrice >= state.LiveSessionVWAP {
-				return "GO_LONG" // 🔥 Fires immediately now instead of staging
+				return "SETUP_READY_LONG"
 			}
 		}
 	}
 
-	// --- 🔴 SHORT STRATEGY TRACK (Gap Down Sessions) ---
+	// --- 🔴 SHORT SETUP DIRECTIONAL CHECK ---
 	if state.IsGapDown && state.ConsecutiveClosesBelowVwap > 0 {
 		if state.BearishPushVolume > 0 && (state.BullishPushVolume/state.BearishPushVolume) < 0.30 {
+			// Setup Variant B: Aggressive Downward Breakdown
+			if state.LatestVolumeRank >= 7 && state.LatestPriceRank >= 7 && state.LatestPrice < state.LiveSessionVWAP {
+				return "GO_SHORT"
+			}
+
 			if state.LatestPrice <= state.LiveSessionVWAP {
-				return "GO_SHORT" // 🔥 Fires immediately now instead of staging
+				return "SETUP_READY_SHORT"
 			}
 		}
 	}
@@ -48,15 +59,27 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 
 // CheckExit handles continuous microstructural trend flip checks while in an active trade
 func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	// Volume Effectiveness Balance Sheet Protection Check
+	// 1. Core Price-Action Invalidation (Clean break deep past our buffer zone)
+	if currentSide == "LONG" && state.LatestPrice < (state.LiveSessionVWAP*(1.0-s.VwapBufferPct*2)) {
+		return "EXIT_LONG"
+	}
+	if currentSide == "SHORT" && state.LatestPrice > (state.LiveSessionVWAP*(1.0+s.VwapBufferPct*2)) {
+		return "EXIT_SHORT"
+	}
+
+	// 2. 🥊 Volume Effectiveness Balance Sheet Protection
+	// If the opposing team steps in and commits raw volume that eclipses our threshold, exit immediately
 	if currentSide == "LONG" && state.BullishPushVolume > 0 {
-		if (state.BearishPushVolume / state.BullishPushVolume) >= s.WipeoutThreshold {
-			return "EXIT_LONG"
+		distributionRatio := state.BearishPushVolume / state.BullishPushVolume
+		if distributionRatio >= s.WipeoutThreshold {
+			return "EXIT_LONG" // Original institutional buyers are overwhelmed or distributing out
 		}
 	}
+
 	if currentSide == "SHORT" && state.BearishPushVolume > 0 {
-		if (state.BullishPushVolume / state.BearishPushVolume) >= s.WipeoutThreshold {
-			return "EXIT_SHORT"
+		accumulationRatio := state.BullishPushVolume / state.BearishPushVolume
+		if accumulationRatio >= s.WipeoutThreshold {
+			return "EXIT_SHORT" // Shorts are actively being squeezed out by massive buyer absorption
 		}
 	}
 
@@ -67,21 +90,30 @@ func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentS
 func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
 	currentExtension := math.Abs(state.NormalizedVwapDistance)
 
+	// Lock arms only if the trade expands past 20% of its expected daily range boundary
 	if state.PeakVwapExtension < 0.20 {
 		return false
 	}
 
+	// Dynamic leash configuration based on ledger domination metrics
 	if currentSide == "LONG" && state.BullishPushVolume > 0 {
-		if (state.BearishPushVolume / state.BullishPushVolume) < 0.15 {
-			return currentExtension <= (state.PeakVwapExtension * 0.30)
-		}
-	}
-	if currentSide == "SHORT" && state.BearishPushVolume > 0 {
-		if (state.BullishPushVolume / state.BearishPushVolume) < 0.15 {
+		sellingRatio := state.BearishPushVolume / state.BullishPushVolume
+
+		if sellingRatio < 0.15 {
+			// Dominant buyers completely dictate order flow. Give the asset huge breathing space
+			// to surf through natural mid-day consolidation dips. Trail out only if 70% of extension drops.
 			return currentExtension <= (state.PeakVwapExtension * 0.30)
 		}
 	}
 
+	if currentSide == "SHORT" && state.BearishPushVolume > 0 {
+		buyingRatio := state.BullishPushVolume / state.BearishPushVolume
+		if buyingRatio < 0.15 {
+			return currentExtension <= (state.PeakVwapExtension * 0.30)
+		}
+	}
+
+	// Standard fallback trailing leash if the ledger balance sheet is closely fought (exit if 40% drops)
 	return currentExtension <= (state.PeakVwapExtension * 0.60)
 }
 
