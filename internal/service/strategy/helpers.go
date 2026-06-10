@@ -30,7 +30,7 @@ func (e *Engine) evaluateLiveEntries(state *InstrumentState) string {
 
 	setupSignal := e.ActiveStrategy.CheckEntry(state)
 	absAdrDistance := math.Abs(state.NormalizedVwapDistance)
-	adrMultiplier := 0.05 // 5% of ADR
+	adrMultiplier := 0.05
 
 	if setupSignal == "SETUP_READY_LONG" && absAdrDistance <= adrMultiplier {
 		return "GO_LONG"
@@ -48,13 +48,12 @@ func (e *Engine) evaluateLiveExits(state *InstrumentState, currentSide string, a
 	state.CurrentSetupPhase = PhaseActiveTrade
 	state.updateTrackExtension()
 
-	// ⚡ Tick-Level Invalidation Stop
+	// ⚡ Tick-Level Invalidation Wrong Side Crash Stop
 	if state.isWrongSideCrashing(currentSide, 0.05*2.0) {
 		state.EntryVwapAnchor = 0.0
 		return "EXIT_" + currentSide
 	}
 
-	// ⚡ Tick-Level Trailing Protection Exit Evaluation
 	if openTrade, tracking := e.ActiveTrades[state.Symbol]; tracking {
 		state.updateCashPeakPnL(openTrade, averagePrice, netQty)
 
@@ -89,7 +88,7 @@ func (e *Engine) executeFlatDiscovery(symbol string, state *InstrumentState) str
 			Symbol:            symbol,
 			StrategyName:      e.ActiveStrategy.Name(),
 			TradeSide:         tradeSide,
-			MinutesSinceOpen:  len(state.BarHistory["1m"]), // Historical baseline record tracker
+			MinutesSinceOpen:  len(state.BarHistory["1m"]),
 			EntryTimestamp:    state.LastUpdated,
 			EntryPrice:        state.LatestPrice,
 			EntryVwap:         state.LiveSessionVWAP,
@@ -112,7 +111,7 @@ func (e *Engine) executeActivePositionManagement(symbol string, state *Instrumen
 
 	if e.ActiveStrategy.CheckTrailingProfitLock(state, currentSide) {
 		if tracking {
-			e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "INTELLIGFIT_PROFIT_LOCK", averagePrice, netQty, marketExitTime)
+			e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "INTELLIGENT_PROFIT_LOCK", averagePrice, netQty, marketExitTime)
 		}
 		return "EXIT_" + currentSide
 	}
@@ -175,7 +174,6 @@ func (state *InstrumentState) updateBasicMetrics(bar *models.Bar) {
 	state.LatestVolumeRank = bar.Analytics.VolumeRank
 	state.LatestPriceRank = bar.Analytics.PriceRank
 
-	// Capture the first true open print of the regular day at 09:15 AM
 	if state.InitialOpenPrice == 0 && bar.Timestamp.Hour() == 9 && bar.Timestamp.Minute() >= 15 {
 		state.InitialOpenPrice = bar.Open
 	}
@@ -184,11 +182,6 @@ func (state *InstrumentState) updateBasicMetrics(bar *models.Bar) {
 func (state *InstrumentState) isBeforeMarketOpen(t time.Time) bool {
 	hm := (t.Hour() * 100) + t.Minute()
 	return hm < 915
-}
-
-func (state *InstrumentState) isBeforeSettleTime(t time.Time) bool {
-	hm := (t.Hour() * 100) + t.Minute()
-	return hm < 930
 }
 
 func (state *InstrumentState) trackVwapAcceptance(bar *models.Bar) {
@@ -208,7 +201,7 @@ func (state *InstrumentState) trackVwapAcceptance(bar *models.Bar) {
 }
 
 func (state *InstrumentState) updateVolumeLedger(bar *models.Bar) {
-	// Strictly enforce high-conviction institutional rules (Rank == 7 for both components)
+	// Strictly check for elite Rank 7/7 footprint metrics
 	if state.LatestVolumeRank == 7 && state.LatestPriceRank == 7 {
 		switch bar.Analytics.Direction {
 		case models.DirStrongBullish, models.DirBullish:
@@ -252,8 +245,7 @@ func (state *InstrumentState) updateLiveTickData(enrichedTick *models.EnrichedTi
 	state.LastUpdated = rawTick.Timestamp
 	state.LiveSessionVWAP = rawTick.AverageTradedPrice
 
-	// Capture the first regular trading tick change profile to lock session gap status
-	if !state.HasInitializedGaps && !state.isBeforeMarketOpen(rawTick.Timestamp) {
+	if !state.HasInitializedGaps && (rawTick.Timestamp.Hour()*100+rawTick.Timestamp.Minute()) >= 915 {
 		if rawTick.Change > 0.0 {
 			state.IsGapUp = true
 		} else if rawTick.Change < 0.0 {
