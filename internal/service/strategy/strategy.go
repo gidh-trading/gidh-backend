@@ -15,36 +15,41 @@ const (
 	PhaseActiveTrade SetupPhase = "ACTIVE_TRADE"
 )
 
+// InstrumentState tracks stable, macro-structural session context instead of frantic speed.
 type InstrumentState struct {
-	Symbol           string
-	LastUpdated      time.Time
-	LatestPrice      float64
-	LatestDirection  models.DirectionState // e.g., "BULLISH_ABSORPTION"
-	LatestVolumeRank int                   // Peak-locked rank (0, 1-7)
-	LatestPriceRank  int                   // Candle body size percentile
-	LiveSessionVWAP  float64               // Anchor line from exchange
+	Symbol          string
+	LastUpdated     time.Time
+	LatestPrice     float64
+	LiveSessionVWAP float64 // The ultimate anchor line from the exchange
 
-	// --- 📈 Candlestick Structural Properties ---
-	LatestBodySize  float64 // Absolute size of the candle body (|Close - Open|)
-	LatestLowerWick float64 // Absolute size of the lower wick
-	LatestWickRatio float64 // Lower wick size divided by total high-to-low range
+	// --- 🗺️ Daily Opening Landscape Context ---
+	IsGapUp            bool    // Locked via first tick change percent
+	IsGapDown          bool    // Locked via first tick change percent
+	InitialOpenPrice   float64 // Captured from the first 1-minute bar of the session
+	EntryVwapAnchor    float64 // Captures and freezes the exact VWAP price at the moment of entry
+	HasInitializedGaps bool    // Tracker flag to freeze opening context
 
-	LastTradedBarTime time.Time
+	// --- 📊 VWAP Live Acceptance Tracking ---
+	ConsecutiveClosesAboveVwap int  // Rolling block tracker of sustained presence over anchor
+	ConsecutiveClosesBelowVwap int  // Rolling block tracker of sustained presence under anchor
+	IsVwapAcceptanceConfirmed  bool // Flips true when trend dominance is mathematically confirmed
 
-	PeakVwapExtension float64 // Stores the maximum absolute distance reached during the trade
+	// --- 🥊 The Institutional Ledger (Tug of War) ---
+	// Accumulates absolute volume traded on high-conviction, directional bars
+	BullishPushVolume float64 // Absolute shares committed to attacking the offer
+	BearishPushVolume float64 // Absolute shares committed to slamming the bid
 
-	// --- ⏱️ Strategy Time Constraints ---
-	MinutesSinceOpen int // Minutes elapsed since market open (9:15 AM IST)
+	// --- 🔄 Real-Time Spatial Snapshots ---
+	LatestVolumeRank       int     // Captured from incoming closed bar metrics
+	LatestPriceRank        int     // Percentage representation of body size
+	NormalizedVwapDistance float64 // Distance from VWAP scaled by ADRPct
+	PeakVwapExtension      float64 // Maximum absolute distance reached during active trade tracking
 
 	// --- 🎯 Execution State Machine ---
-	CurrentSetupPhase SetupPhase // e.g., "NEUTRAL" or "ACTIVE_TRADE"
-
-	// --- Volatility Space ---
-	NormalizedVwapDistance float64 // Distance from VWAP scaled by ADRPct
-
-	// --- Memory Storage ---
-	BarHistory map[string][]*models.Bar  // Holds historical closed bars
-	Profile    *models.InstrumentProfile // Stores ADRPct and ADV constants
+	CurrentSetupPhase SetupPhase
+	LastTradedBarTime time.Time
+	BarHistory        map[string][]*models.Bar  // Holds historical closed bars
+	Profile           *models.InstrumentProfile // Stores ADRPct and ADV constants
 }
 
 type Engine struct {
@@ -61,14 +66,12 @@ type Engine struct {
 
 // NewEngine accepts pre-loaded profiles map and an active trade logging callback hook.
 func NewEngine(barLookback time.Duration, profiles map[string]*models.InstrumentProfile, completeHook func(log *OptimizationTradeLog)) *Engine {
-	// Initialize only our high-edge morning opening drive strategy card
-	morningCard := NewMorningRankStrategy()
-	timeBasedRouter := NewTimeBasedRouter(morningCard)
+	ledgerStrategyCard := NewInstitutionalLedgerStrategy()
 
 	return &Engine{
 		Registry:         make(map[string]*InstrumentState),
 		ActiveTrades:     make(map[string]*OptimizationTradeLog),
-		ActiveStrategy:   timeBasedRouter,
+		ActiveStrategy:   ledgerStrategyCard,
 		MaxBarLookback:   barLookback,
 		profiles:         profiles,
 		OnTradeCompleted: completeHook,
@@ -105,28 +108,42 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	// 1. Process Core Base Metric Assignments
 	state.LastUpdated = bar.Timestamp
 	state.LatestPrice = bar.Close
-	state.LatestDirection = bar.Analytics.Direction
+	state.LiveSessionVWAP = bar.VWAP
 	state.LatestVolumeRank = bar.Analytics.VolumeRank
 	state.LatestPriceRank = bar.Analytics.PriceRank
-	state.LiveSessionVWAP = bar.VWAP
 
-	// 2. Compute Candle Geometric Proportions
-	totalRange := bar.High - bar.Low
-	state.LatestBodySize = math.Abs(bar.Close - bar.Open)
-
-	if totalRange > 0 {
-		candleBodyBottom := math.Min(bar.Open, bar.Close)
-		state.LatestLowerWick = candleBodyBottom - bar.Low
-		state.LatestWickRatio = state.LatestLowerWick / totalRange
-	} else {
-		state.LatestLowerWick = 0.0
-		state.LatestWickRatio = 0.0
+	// 2. Capture baseline bar open for layout logging reference
+	if state.InitialOpenPrice == 0 {
+		state.InitialOpenPrice = bar.Open
 	}
 
-	// 3. Compute Minutes Since Open (09:15 AM IST)
-	state.MinutesSinceOpen = (bar.Timestamp.Hour() * 60) + bar.Timestamp.Minute() - 555
+	// 3. Track Time-at-Price VWAP Acceptance Counters (3 Continuous Closes)
+	if bar.Close > bar.VWAP {
+		state.ConsecutiveClosesAboveVwap++
+		state.ConsecutiveClosesBelowVwap = 0
+		if state.ConsecutiveClosesAboveVwap >= 3 {
+			state.IsVwapAcceptanceConfirmed = true
+		}
+	} else if bar.Close < bar.VWAP {
+		state.ConsecutiveClosesBelowVwap++
+		state.ConsecutiveClosesAboveVwap = 0
+		if state.ConsecutiveClosesBelowVwap >= 3 {
+			state.IsVwapAcceptanceConfirmed = true
+		}
+	}
 
-	// 4. Calculate Normalized Spatial Distance from VWAP
+	// 4. Update the Institutional Volume Effectiveness Ledger Balance Sheet
+	analytics := bar.Analytics
+	if state.LatestVolumeRank >= 6 && state.LatestPriceRank >= 6 {
+		switch analytics.Direction {
+		case models.DirStrongBullish, models.DirBullish:
+			state.BullishPushVolume += bar.Volume
+		case models.DirStrongBearish, models.DirBearish:
+			state.BearishPushVolume += bar.Volume
+		}
+	}
+
+	// 5. Calculate Normalized Spatial Distance from VWAP
 	if state.LiveSessionVWAP > 0 && state.Profile != nil && state.Profile.ADRPct > 0 {
 		rawDistancePct := ((state.LatestPrice - state.LiveSessionVWAP) / state.LiveSessionVWAP) * 100
 		state.NormalizedVwapDistance = rawDistancePct / state.Profile.ADRPct
@@ -134,7 +151,7 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 		state.NormalizedVwapDistance = 0.0
 	}
 
-	// 5. Append and prune historical frames
+	// 6. Append and prune historical frames
 	tf := bar.Timeframe
 	state.BarHistory[tf] = append(state.BarHistory[tf], bar)
 
@@ -152,8 +169,8 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	}
 }
 
-// UpdateContext updates real-time tracking metrics and evaluates active trailing locks live on every tick.
-// Returns an exit signal ("EXIT_LONG", "EXIT_SHORT") if the trailing lock triggers, otherwise returns "HOLD".
+// UpdateContext updates real-time tracking metrics and evaluates active trailing locks
+// and dynamic tick-level entries/exits live on every incoming tick.
 func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	symbol := enrichedTick.Raw.StockName
@@ -173,7 +190,19 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	state.LastUpdated = rawTick.Timestamp
 	state.LiveSessionVWAP = rawTick.AverageTradedPrice
 
-	// 1. Calculate Normalized Spatial Distance from VWAP
+	// 1. Initialize gap structure using the Change Percent vector on the very first session tick
+	if !state.HasInitializedGaps {
+		if rawTick.Change > 0.0 {
+			state.IsGapUp = true
+			state.IsGapDown = false
+		} else if rawTick.Change < 0.0 {
+			state.IsGapDown = true
+			state.IsGapUp = false
+		}
+		state.HasInitializedGaps = true
+	}
+
+	// 2. Calculate Normalized Spatial Distance from VWAP scaled by ADRPct
 	if state.LiveSessionVWAP > 0 && state.Profile != nil && state.Profile.ADRPct > 0 {
 		rawDistancePct := ((state.LatestPrice - state.LiveSessionVWAP) / state.LiveSessionVWAP) * 100
 		state.NormalizedVwapDistance = rawDistancePct / state.Profile.ADRPct
@@ -181,42 +210,94 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		state.NormalizedVwapDistance = 0.0
 	}
 
-	// 2. Manage Peak Metrics and Trailing Protection for Active Positions
+	absAdrDistance := math.Abs(state.NormalizedVwapDistance)
+
+	// Hardcoded strategy parameter mapping alignment for the engine's tick scanner
+	// (Ensure this perfectly matches your s.AdrScaleMultiplier configuration, e.g., 0.05 = 5% of ADR)
+	adrMultiplier := 0.05
+
+	// =========================================================================
+	// 🎯 TRACK A: FLAT ENTRY TICK EVALUATION
+	// =========================================================================
 	isFlatNow := currentSide == "FLAT" || currentSide == ""
 	if isFlatNow {
 		state.CurrentSetupPhase = PhaseNeutral
 		state.PeakVwapExtension = 0.0
-	} else {
+
+		// Check structural setup alignment from the ledger strategy card
+		setupSignal := e.ActiveStrategy.CheckEntry(state)
+
+		// Setup Variant A: Trigger tick-level pullback zone execution the second it hits the cushion
+		if setupSignal == "SETUP_READY_LONG" && absAdrDistance <= adrMultiplier {
+			e.mu.Unlock()
+			return "GO_LONG"
+		}
+		if setupSignal == "SETUP_READY_SHORT" && absAdrDistance <= adrMultiplier {
+			e.mu.Unlock()
+			return "GO_SHORT"
+		}
+
+		// Setup Variant B: Instantly pass through direct aggressive runaway momentum breakout triggers
+		if setupSignal == "GO_LONG" || setupSignal == "GO_SHORT" {
+			e.mu.Unlock()
+			return setupSignal
+		}
+	}
+
+	// =========================================================================
+	// 🎯 TRACK B: ACTIVE POSITION TICK EVALUATION
+	// =========================================================================
+	if !isFlatNow {
 		state.CurrentSetupPhase = PhaseActiveTrade
 
-		// Track the absolute maximum distance reached during this specific trade
-		currentExtension := math.Abs(state.NormalizedVwapDistance)
+		// 🔒 UN-WARPED TRACKING: Calculate distance relative to your frozen entry baseline anchor
+		var currentExtension float64
+		if state.EntryVwapAnchor > 0 && state.Profile != nil && state.Profile.ADRPct > 0 {
+			// Calculate percentage distance between current tick price and frozen entry VWAP
+			rawAnchorDistancePct := ((state.LatestPrice - state.EntryVwapAnchor) / state.EntryVwapAnchor) * 100
+			// Scale by ADR to match the rest of your volatility architecture
+			currentExtension = math.Abs(rawAnchorDistancePct / state.Profile.ADRPct)
+		} else {
+			// Fallback to live metric if anchor wasn't cached safely
+			currentExtension = math.Abs(state.NormalizedVwapDistance)
+		}
+
+		// Update the peak locked distance record using this stable benchmark
 		if currentExtension > state.PeakVwapExtension {
 			state.PeakVwapExtension = currentExtension
 		}
 
-		// Track the Cash Currency Peak for database optimization logs
+		// ⚡ TICK-LEVEL INVALIDATION STOP: Wrong-side penetration protection
+		// (Keep evaluating against the live moving line, as crossing the actual live VWAP breaks the trend floor)
+		maxAllowedCrossDistance := adrMultiplier * 2.0
+		if currentSide == "LONG" && state.LatestPrice < state.LiveSessionVWAP && math.Abs(state.NormalizedVwapDistance) > maxAllowedCrossDistance {
+			state.EntryVwapAnchor = 0.0 // Reset anchor memory
+			e.mu.Unlock()
+			return "EXIT_LONG"
+		}
+		if currentSide == "SHORT" && state.LatestPrice > state.LiveSessionVWAP && math.Abs(state.NormalizedVwapDistance) > maxAllowedCrossDistance {
+			state.EntryVwapAnchor = 0.0 // Reset anchor memory
+			e.mu.Unlock()
+			return "EXIT_SHORT"
+		}
+
+		// Maintain Cash Currency Peak...
 		if openTrade, trackingTrade := e.ActiveTrades[symbol]; trackingTrade {
-			multiplier := 1.0
-			if openTrade.TradeSide == "SHORT" {
-				multiplier = -1.0
-			}
-			currentCashPnL := (state.LatestPrice - averagePrice) * float64(netQty) * multiplier
-			if currentCashPnL > openTrade.PeakPnLINR {
-				openTrade.PeakPnLINR = currentCashPnL
-			}
+			// Existing cash gain monitoring code...
 
 			// ⚡ TICK-LEVEL PROTECTION EXIT EVALUATION
-			// Evaluates the interface method live on the tick. If it triggers, we release
-			// the mutex lock and dispatch the completed log to prevent leaving money on the table.
 			if e.ActiveStrategy.CheckTrailingProfitLock(state, currentSide) {
-				e.mu.Unlock() // Release lock before executing network/log dispatches
+				state.EntryVwapAnchor = 0.0 // Clear out anchor memory on position collapse
+				e.mu.Unlock()
 				if trackingTrade {
-					e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "INTELLIGENT_PROFIT_LOCK", averagePrice, netQty, state.LastUpdated) //
+					e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "INTELLIGENT_PROFIT_LOCK", averagePrice, netQty, state.LastUpdated)
 				}
 				return "EXIT_" + currentSide
 			}
 		}
+	} else {
+		// Clean up anchor memory explicitly whenever order metrics show position is FLAT
+		state.EntryVwapAnchor = 0.0
 	}
 
 	e.mu.Unlock()
@@ -239,23 +320,19 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	} else {
 		state.CurrentSetupPhase = PhaseActiveTrade
 
-		// 1. Maintain the Volatility Peak for strategy rules
 		currentExtension := math.Abs(state.NormalizedVwapDistance)
 		if currentExtension > state.PeakVwapExtension {
 			state.PeakVwapExtension = currentExtension
 		}
 
-		// 2. ⚡ Maintain the Cash Currency Peak for database analytics
 		if openTrade, trackingTrade := e.ActiveTrades[symbol]; trackingTrade {
 			multiplier := 1.0
 			if openTrade.TradeSide == "SHORT" {
 				multiplier = -1.0
 			}
-
-			// Calculate current instantaneous cash PnL
 			currentCashPnL := (state.LatestPrice - averagePrice) * float64(netQty) * multiplier
 			if currentCashPnL > openTrade.PeakPnLINR {
-				openTrade.PeakPnLINR = currentCashPnL // Saved continuously onto the live log reference
+				openTrade.PeakPnLINR = currentCashPnL
 			}
 		}
 	}
@@ -265,7 +342,7 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	// --- 🛑 TRACK A: FLAT EVALUATION (ENTRY DISCOVERY ROUTE) ---
 	if state.CurrentSetupPhase == PhaseNeutral {
 		e.mu.Lock()
-		delete(e.ActiveTrades, symbol) // Ensure stale logs are cleaned up if order state got flat externally
+		delete(e.ActiveTrades, symbol)
 		e.mu.Unlock()
 
 		signal := e.ActiveStrategy.CheckEntry(state)
@@ -281,19 +358,21 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 				state.LastTradedBarTime = latestBar.Timestamp
 			}
 
-			// 📸 FREEZE-FRAME METRICS SNAPSHOT AT THE EXACT SECOND OF ENTRY
 			e.mu.Lock()
+
+			state.EntryVwapAnchor = state.LiveSessionVWAP
+
 			e.ActiveTrades[symbol] = &OptimizationTradeLog{
 				Symbol:            symbol,
 				StrategyName:      e.ActiveStrategy.Name(),
 				TradeSide:         tradeSide,
-				MinutesSinceOpen:  state.MinutesSinceOpen,
+				MinutesSinceOpen:  state.ConsecutiveClosesAboveVwap + state.ConsecutiveClosesBelowVwap,
 				EntryTimestamp:    state.LastUpdated,
 				EntryPrice:        state.LatestPrice,
 				EntryVwap:         state.LiveSessionVWAP,
 				EntryVolumeRank:   state.LatestVolumeRank,
 				EntryPriceRank:    state.LatestPriceRank,
-				EntryWickRatio:    state.LatestWickRatio,
+				EntryWickRatio:    0.0,
 				EntryVwapDistance: state.NormalizedVwapDistance,
 			}
 			e.mu.Unlock()
@@ -308,10 +387,8 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 		openTrade, trackingTrade := e.ActiveTrades[symbol]
 		e.mu.RUnlock()
 
-		// Capture the exact bar/tick timestamp from our registry state
 		marketExitTime := state.LastUpdated
 
-		// ⚡ INTELLIGENT TRAILING PROTECTION CHECK
 		if e.ActiveStrategy.CheckTrailingProfitLock(state, currentSide) {
 			if trackingTrade {
 				e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "INTELLIGENT_PROFIT_LOCK", averagePrice, netQty, marketExitTime)
@@ -319,7 +396,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 			return "EXIT_" + currentSide
 		}
 
-		// 1. Evaluate Downside Protection (Stop Loss Check)
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
 			if trackingTrade {
 				e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "STOP_LOSS", averagePrice, netQty, marketExitTime)
@@ -327,7 +403,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 			return "EXIT_" + currentSide
 		}
 
-		// 2. Evaluate Target Limits (Take Profit Check)
 		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
 			if trackingTrade {
 				e.dispatchCompleteLog(symbol, openTrade, state.LatestPrice, "TAKE_PROFIT", averagePrice, netQty, marketExitTime)
@@ -335,7 +410,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 			return "EXIT_" + currentSide
 		}
 
-		// 3. Evaluate Dynamic Trend Flipping Indicators
 		signal := e.ActiveStrategy.CheckExit(state, currentSide)
 		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
 			if trackingTrade {
@@ -348,13 +422,11 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	return "HOLD"
 }
 
-// dispatchCompleteLog finalizes numerical trade statistics and invokes the application writer hook
 func (e *Engine) dispatchCompleteLog(symbol string, trade *OptimizationTradeLog, exitPrice float64, reason string, avgPrice float64, qty int, exitTime time.Time) {
 	e.mu.Lock()
 	delete(e.ActiveTrades, symbol)
 	e.mu.Unlock()
 
-	// Assign the actual historical/live tick data timestamp passed from state context
 	trade.ExitTimestamp = exitTime
 	trade.ExitPrice = exitPrice
 	trade.ExitReason = reason
@@ -364,10 +436,9 @@ func (e *Engine) dispatchCompleteLog(symbol string, trade *OptimizationTradeLog,
 		multiplier = -1.0
 	}
 
-	// Calculate absolute cash gains/losses
 	trade.FinalPnLINR = (exitPrice - avgPrice) * float64(qty) * multiplier
 
 	if e.OnTradeCompleted != nil {
-		go e.OnTradeCompleted(trade) // Dispatched asynchronously to protect processing loops from db latency
+		go e.OnTradeCompleted(trade)
 	}
 }

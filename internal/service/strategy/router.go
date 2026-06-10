@@ -1,26 +1,26 @@
 package strategy
 
 type TimeBasedRouter struct {
-	morningStrategy Strategy
+	ledgerStrategy Strategy
 }
 
-func NewTimeBasedRouter(morning Strategy) *TimeBasedRouter {
+// NewTimeBasedRouter instantiates the system router wrapped around a single strategy core.
+func NewTimeBasedRouter(ledger Strategy) *TimeBasedRouter {
 	return &TimeBasedRouter{
-		morningStrategy: morning,
+		ledgerStrategy: ledger,
 	}
 }
 
-func (r *TimeBasedRouter) Name() string { return "Morning_Only_Time_Router" }
+func (r *TimeBasedRouter) Name() string { return "Institutional_Ledger_PassThrough_Router" }
 
 func (r *TimeBasedRouter) selectStrategy(state *InstrumentState) Strategy {
-	// Defaults directly to the morning strategy card
-	return r.morningStrategy
+	// Directly pass through to our single institutional ledger strategy card
+	return r.ledgerStrategy
 }
 
 func (r *TimeBasedRouter) CheckEntry(state *InstrumentState) string {
-	if state.MinutesSinceOpen > 10 {
-		return "HOLD"
-	}
+	// Old 10-minute time gate restriction is completely removed.
+	// The ledger strategy handles its own structural time-at-price validation safely.
 	return r.selectStrategy(state).CheckEntry(state)
 }
 
