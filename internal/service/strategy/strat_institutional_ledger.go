@@ -28,16 +28,8 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	// --- 🟢 LONG STRATEGY TRACK (Gap Up Sessions) ---
 	if state.IsGapUp && state.ConsecutiveClosesAboveVwap > 0 {
 		if state.BullishPushVolume > 0 && (state.BearishPushVolume/state.BullishPushVolume) < 0.30 {
-
-			// Setup Variant B: Aggressive Runaway Momentum Protection
-			// Fires immediately if an elite institutional bar (Rank 7/7) punches higher
-			if state.LatestVolumeRank == 7 && state.LatestPriceRank == 7 && state.LatestPrice > state.LiveSessionVWAP {
-				return "GO_LONG"
-			}
-
-			// Setup Variant A: Signal that structural conditions are ready for a pullback
 			if state.LatestPrice >= state.LiveSessionVWAP {
-				return "SETUP_READY_LONG"
+				return "GO_LONG" // 🔥 Fires immediately now instead of staging
 			}
 		}
 	}
@@ -45,15 +37,8 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	// --- 🔴 SHORT STRATEGY TRACK (Gap Down Sessions) ---
 	if state.IsGapDown && state.ConsecutiveClosesBelowVwap > 0 {
 		if state.BearishPushVolume > 0 && (state.BullishPushVolume/state.BearishPushVolume) < 0.30 {
-
-			// Setup Variant B: Aggressive Runaway Downward Breakdown
-			if state.LatestVolumeRank == 7 && state.LatestPriceRank == 7 && state.LatestPrice < state.LiveSessionVWAP {
-				return "GO_SHORT"
-			}
-
-			// Setup Variant A: Signal that structural conditions are ready for a pullback
 			if state.LatestPrice <= state.LiveSessionVWAP {
-				return "SETUP_READY_SHORT"
+				return "GO_SHORT" // 🔥 Fires immediately now instead of staging
 			}
 		}
 	}

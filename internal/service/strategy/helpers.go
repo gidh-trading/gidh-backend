@@ -28,19 +28,13 @@ func (e *Engine) evaluateLiveEntries(state *InstrumentState) string {
 	state.CurrentSetupPhase = PhaseNeutral
 	state.PeakVwapExtension = 0.0
 
+	// Get the clean signal straight from your ledger strategy
 	setupSignal := e.ActiveStrategy.CheckEntry(state)
-	absAdrDistance := math.Abs(state.NormalizedVwapDistance)
-	adrMultiplier := 0.05
 
-	if setupSignal == "SETUP_READY_LONG" && absAdrDistance <= adrMultiplier {
-		return "GO_LONG"
-	}
-	if setupSignal == "SETUP_READY_SHORT" && absAdrDistance <= adrMultiplier {
-		return "GO_SHORT"
-	}
 	if setupSignal == "GO_LONG" || setupSignal == "GO_SHORT" {
 		return setupSignal
 	}
+
 	return "HOLD"
 }
 
@@ -67,9 +61,7 @@ func (e *Engine) evaluateLiveExits(state *InstrumentState, currentSide string, a
 }
 
 func (e *Engine) executeFlatDiscovery(symbol string, state *InstrumentState) string {
-	e.mu.Lock()
 	delete(e.ActiveTrades, symbol)
-	e.mu.Unlock()
 
 	signal := e.ActiveStrategy.CheckEntry(state)
 	if signal == "GO_LONG" || signal == "GO_SHORT" {
@@ -82,7 +74,6 @@ func (e *Engine) executeFlatDiscovery(symbol string, state *InstrumentState) str
 			state.LastTradedBarTime = state.BarHistory["1m"][len(state.BarHistory["1m"])-1].Timestamp
 		}
 
-		e.mu.Lock()
 		state.EntryVwapAnchor = state.LiveSessionVWAP
 		e.ActiveTrades[symbol] = &OptimizationTradeLog{
 			Symbol:            symbol,
@@ -96,7 +87,6 @@ func (e *Engine) executeFlatDiscovery(symbol string, state *InstrumentState) str
 			EntryPriceRank:    state.LatestPriceRank,
 			EntryVwapDistance: state.NormalizedVwapDistance,
 		}
-		e.mu.Unlock()
 		return signal
 	}
 	return "HOLD"
