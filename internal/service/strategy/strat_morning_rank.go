@@ -64,7 +64,10 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 		// --- 🟢 EVALUATE LONG BREAKOUT ---
 		if latestClosedBar.Close > stableAnchorVwap {
 			if analytics.Direction == models.DirBullish || analytics.Direction == models.DirStrongBullish {
-				if analytics.UpperWickRank <= 3 {
+				candleBodyTop := math.Max(latestClosedBar.Open, latestClosedBar.Close)
+				upperWickRatio := (latestClosedBar.High - candleBodyTop) / totalRange
+
+				if upperWickRatio < 0.15 {
 					return "GO_LONG"
 				}
 			}
@@ -73,7 +76,7 @@ func (s *MorningRankStrategy) CheckEntry(state *InstrumentState) string {
 		// --- 🔴 EVALUATE SHORT BREAKOUT ---
 		if latestClosedBar.Close < stableAnchorVwap {
 			if analytics.Direction == models.DirBearish || analytics.Direction == models.DirStrongBearish {
-				if analytics.LowerWickRank <= 3 {
+				if state.LatestWickRatio < 0.15 {
 					return "GO_SHORT"
 				}
 			}

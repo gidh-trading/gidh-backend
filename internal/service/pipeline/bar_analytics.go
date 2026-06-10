@@ -101,15 +101,16 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 	}
 
 	// Calculate physical wicks
-	var upperWick, lowerWick float64
-	if bar.Close >= bar.Open {
-		upperWick = bar.High - bar.Close
-		lowerWick = bar.Open - bar.Low
-	} else {
-		upperWick = bar.High - bar.Open
-		lowerWick = bar.Close - bar.Low
-	}
 
+	// 1. DYNAMICALLY DETECT THE BODY BOUNDARIES (Fixes the absorption inversion bug)
+	candleBodyTop := math.Max(bar.Open, bar.Close)
+	candleBodyBottom := math.Min(bar.Open, bar.Close)
+
+	// 2. CALCULATE TRUE PHYSICAL WICKS
+	upperWick := bar.High - candleBodyTop
+	lowerWick := candleBodyBottom - bar.Low
+
+	// 3. COMPUTE RATIOS CLEANLY WITHOUT IF/ELSE SKNDS
 	upperWickRatio := upperWick / candleRange
 	lowerWickRatio := lowerWick / candleRange
 
