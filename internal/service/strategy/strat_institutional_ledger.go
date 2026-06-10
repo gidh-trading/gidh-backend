@@ -26,6 +26,12 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 		return "HOLD"
 	}
 
+	// ⏱️ 03:00 PM HARD ENTRY BLOCK: Absolutely no new entries are accepted after 3:00 PM IST
+	hm := (state.LastUpdated.Hour() * 100) + state.LastUpdated.Minute()
+	if hm >= 1500 {
+		return "HOLD"
+	}
+
 	distFromVwap := math.Abs(state.LatestPrice - state.LiveSessionVWAP)
 	allowedTriggerZone := state.LiveSessionVWAP * s.VwapBufferPct
 
@@ -40,7 +46,7 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 				// Setup A: Patient Pullback directly into the VWAP support zone on thin volume
 				if distFromVwap <= allowedTriggerZone && state.LatestPrice >= state.LiveSessionVWAP {
 					if state.LatestVolumeRank <= 4 {
-						return "GO_LONG"
+						return "SETUP_READY_LONG" // Route through setup ready so UpdateContext monitors proximity
 					}
 				}
 
@@ -62,7 +68,7 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 				// Setup A: Patient Pullback up into the underbelly of VWAP resistance on thin volume
 				if distFromVwap <= allowedTriggerZone && state.LatestPrice <= state.LiveSessionVWAP {
 					if state.LatestVolumeRank <= 4 {
-						return "GO_SHORT"
+						return "SETUP_READY_SHORT"
 					}
 				}
 
@@ -79,6 +85,12 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 
 // CheckExit handles continuous microstructural trend flip checks while in an active trade
 func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentSide string) string {
+	// ⏱️ 03:00 PM HARD EXIT RULE: Force market square-off if open past 3:00 PM IST
+	hm := (state.LastUpdated.Hour() * 100) + state.LastUpdated.Minute()
+	if hm >= 1500 {
+		return "EXIT_" + currentSide
+	}
+
 	// 1. Core Price-Action Invalidation (Clean break deep past our buffer zone)
 	if currentSide == "LONG" && state.LatestPrice < (state.LiveSessionVWAP*(1.0-s.VwapBufferPct*2)) {
 		return "EXIT_LONG"
@@ -88,18 +100,17 @@ func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentS
 	}
 
 	// 2. 🥊 Volume Effectiveness Balance Sheet Protection
-	// If the opposing team steps in and commits raw volume that eclipses our threshold, exit immediately
 	if currentSide == "LONG" && state.BullishPushVolume > 0 {
 		distributionRatio := state.BearishPushVolume / state.BullishPushVolume
 		if distributionRatio >= s.WipeoutThreshold {
-			return "EXIT_LONG" // Original institutional buyers are overwhelmed or distributing out
+			return "EXIT_LONG"
 		}
 	}
 
 	if currentSide == "SHORT" && state.BearishPushVolume > 0 {
 		accumulationRatio := state.BullishPushVolume / state.BearishPushVolume
 		if accumulationRatio >= s.WipeoutThreshold {
-			return "EXIT_SHORT" // Shorts are actively being squeezed out by massive buyer absorption
+			return "EXIT_SHORT"
 		}
 	}
 
@@ -110,18 +121,13 @@ func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentS
 func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
 	currentExtension := math.Abs(state.NormalizedVwapDistance)
 
-	// Lock arms only if the trade expands past 20% of its expected daily range boundary
 	if state.PeakVwapExtension < 0.20 {
 		return false
 	}
 
-	// Dynamic leash configuration based on ledger domination metrics
 	if currentSide == "LONG" && state.BullishPushVolume > 0 {
 		sellingRatio := state.BearishPushVolume / state.BullishPushVolume
-
 		if sellingRatio < 0.15 {
-			// Dominant buyers completely dictate order flow. Give the asset huge breathing space
-			// to surf through natural mid-day consolidation dips. Trail out only if 70% of extension drops.
 			return currentExtension <= (state.PeakVwapExtension * 0.30)
 		}
 	}
@@ -133,7 +139,6 @@ func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentS
 		}
 	}
 
-	// Standard fallback trailing leash if the ledger balance sheet is closely fought (exit if 40% drops)
 	return currentExtension <= (state.PeakVwapExtension * 0.60)
 }
 
