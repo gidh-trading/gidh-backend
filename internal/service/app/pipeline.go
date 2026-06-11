@@ -18,7 +18,7 @@ type Pipeline struct {
 	lastVolRankMap  map[uint32]int // ⚡ Added for velocity tracking
 	lastTickRankMap map[uint32]int // ⚡ Added for velocity tracking
 	indexMu         sync.Mutex
-	BacktestAgent   interface {
+	AlgoAgent       interface {
 		ProcessSequentialTick(enrichedTick *models.EnrichedTick)
 	}
 }
@@ -84,8 +84,8 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 	}
 
 	// 6. Synchronous Agent Execution
-	if p.BacktestAgent != nil {
-		p.BacktestAgent.ProcessSequentialTick(enrichedTick)
+	if p.AlgoAgent != nil {
+		p.AlgoAgent.ProcessSequentialTick(enrichedTick)
 	}
 
 	return nil
