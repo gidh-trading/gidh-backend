@@ -13,7 +13,7 @@ import (
 )
 
 const (
-	MaxDailyLossAllowed   = 1000.0
+	MaxDailyLossAllowed   = 3000.0
 	InitialCapital        = 50000.0
 	MaxLeverage           = 5.0
 	MaxCapitalPerStockPct = 0.30
