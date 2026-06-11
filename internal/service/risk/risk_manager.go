@@ -16,7 +16,7 @@ const (
 	MaxDailyLossAllowed   = 1000.0
 	InitialCapital        = 50000.0
 	MaxLeverage           = 5.0
-	MaxCapitalPerStockPct = 0.50
+	MaxCapitalPerStockPct = 0.30
 	AgentEmail            = "algo.trader@gidh.tech"
 )
 

@@ -1,8 +1,53 @@
 package strategy
 
 import (
+	"gidh-backend/internal/service/models"
 	"time"
 )
+
+type SetupPhase string
+
+const (
+	PhaseNeutral     SetupPhase = "NEUTRAL"
+	PhaseActiveTrade SetupPhase = "ACTIVE_TRADE"
+)
+
+// InstrumentState tracks stable, macro-structural session context instead of frantic speed.
+type InstrumentState struct {
+	Symbol          string
+	LastUpdated     time.Time
+	LatestPrice     float64
+	LiveSessionVWAP float64 // The ultimate anchor line from the exchange
+
+	// --- 🗺️ Daily Opening Landscape Context ---
+	IsGapUp            bool    // Locked via first tick change percent
+	IsGapDown          bool    // Locked via first tick change percent
+	InitialOpenPrice   float64 // Captured from the first 1-minute bar of the session
+	EntryVwapAnchor    float64 // Captures and freezes the exact VWAP price at the moment of entry
+	HasInitializedGaps bool    // Tracker flag to freeze opening context
+
+	// --- 📊 VWAP Live Acceptance Tracking ---
+	ConsecutiveClosesAboveVwap int  // Rolling block tracker of sustained presence over anchor
+	ConsecutiveClosesBelowVwap int  // Rolling block tracker of sustained presence under anchor
+	IsVwapAcceptanceConfirmed  bool // Flips true when trend dominance is mathematically confirmed
+
+	// --- 🥊 The Institutional Ledger (Tug of War) ---
+	// Accumulates absolute volume traded on high-conviction, directional bars
+	BullishPushVolume float64 // Absolute shares committed to attacking the offer
+	BearishPushVolume float64 // Absolute shares committed to slamming the bid
+
+	// --- 🔄 Real-Time Spatial Snapshots ---
+	LatestVolumeRank       int     // Captured from incoming closed bar metrics
+	LatestPriceRank        int     // Percentage representation of body size
+	NormalizedVwapDistance float64 // Distance from VWAP scaled by ADRPct
+	PeakVwapExtension      float64 // Maximum absolute distance reached during active trade tracking
+
+	// --- 🎯 Execution State Machine ---
+	CurrentSetupPhase SetupPhase
+	LastTradedBarTime time.Time
+	BarHistory        map[string][]*models.Bar  // Holds historical closed bars
+	Profile           *models.InstrumentProfile // Stores ADRPct and ADV constants
+}
 
 // OptimizationTradeLog holds the freeze-frame microstructural variables
 // required to analyze performance parameters cleanly.
