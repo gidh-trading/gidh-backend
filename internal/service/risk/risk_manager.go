@@ -18,6 +18,9 @@ const (
 	MaxLeverage           = 5.0
 	MaxCapitalPerStockPct = 0.30
 	AgentEmail            = "algo.trader@gidh.tech"
+	// 🕒 Intraday Time Cutoffs
+	AutoSquareOffHour   = 15 // 3 PM
+	AutoSquareOffMinute = 0  // 00 minutes
 )
 
 type UIContractNotePayload struct {
@@ -56,11 +59,67 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	rawTick := enrichedTick.Raw
 	symbol := rawTick.StockName
 	key := fmt.Sprintf("%s:MIS", symbol)
+	tickTime := rawTick.Timestamp
 
 	rm.mu.Lock()
 	if rm.circuitBroken {
 		rm.mu.Unlock()
 		return
+	}
+
+	// 1. 🕒 TIME CUTOFF CHECK (3:00 PM Auto-Square Off)
+	currentHM := (tickTime.Hour() * 100) + tickTime.Minute()
+	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
+
+	if currentHM >= cutoffHM {
+		// 🔒 FIX: We ALREADY hold the lock from the top of the function. DO NOT lock again!
+		logger.Warnf("🕒 Intraday Cutoff [3:00 PM] breached. Engaging Auto-Square Off across all instruments...")
+		rm.circuitBroken = true // Lock the system from taking ANY fresh entries
+
+		// Iterate through all tracked positions and force a market close out
+		for mapKey, pos := range rm.agentPositions {
+			if pos.NetQuantity != 0 && pos.Side != "FLAT" {
+				logger.Infof("⚡ Auto-Squaring off open position for %s. Qty: %d, Side: %s", pos.Symbol, pos.NetQuantity, pos.Side)
+
+				var exitSide string
+				if pos.Side == "LONG" {
+					exitSide = "SELL"
+				} else {
+					exitSide = "BUY"
+				}
+
+				// Build and dispatch the market execution order immediately
+				exitReq := rm.buildExitOrderRequest(pos, exitSide)
+
+				// Log accounting performance data
+				totalCharges := rm.CalculateItemizedCharges(pos.NetQuantity, pos.AveragePrice)
+				rm.globalSummary.TotalCharges += totalCharges
+				rm.dailyChargesPaid += totalCharges
+
+				rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
+					Timestamp:       tickTime,
+					Side:            exitSide,
+					Symbol:          pos.Symbol, // Store actual asset token identifier
+					Exchange:        "NSE",
+					Quantity:        pos.NetQuantity,
+					AveragePrice:    rawTick.LastPrice,
+					AllocatedCharge: totalCharges,
+				})
+
+				// Sync exit cooling metrics uniformly via map key tracking
+				rm.lastExitTime[mapKey] = tickTime
+
+				// Clear memory tracking properties cleanly
+				pos.NetQuantity = 0
+				pos.Side = "FLAT"
+				pos.AveragePrice = 0.0
+
+				// Dispatch order execution over the thread pool asynchronously
+				go rm.orderManager.PlaceOrder(context.Background(), exitReq)
+			}
+		}
+		rm.mu.Unlock()
+		return // Eject immediately
 	}
 
 	pos, exists := rm.agentPositions[key]
