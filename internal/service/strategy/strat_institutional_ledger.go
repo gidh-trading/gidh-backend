@@ -1,5 +1,7 @@
 package strategy
 
+import "math"
+
 type InstitutionalLedgerStrategy struct {
 	VwapBufferPct    float64 // Pullback execution envelope (0.0015 = 0.15% cushion zone around VWAP)
 	WipeoutThreshold float64 // Critical volume balance cutoff (0.60 = Exit if counter-volume hits 60% of setup volume)
@@ -84,8 +86,33 @@ func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentS
 
 // CheckTrailingProfitLock performs intelligent volatility retracement tracking
 func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
-	return false
+	currentExtension := math.Abs(state.NormalizedVwapDistance)
 
+	// Lock arms only if the trade expands past 20% of its expected daily range boundary
+	if state.PeakVwapExtension < 0.20 {
+		return false
+	}
+
+	// Dynamic leash configuration based on ledger domination metrics
+	if currentSide == "LONG" && state.BullishPushVolume > 0 {
+		sellingRatio := state.BearishPushVolume / state.BullishPushVolume
+
+		if sellingRatio < 0.15 {
+			// Dominant buyers completely dictate order flow. Give the asset huge breathing space
+			// to surf through natural mid-day consolidation dips. Trail out only if 70% of extension drops.
+			return currentExtension <= (state.PeakVwapExtension * 0.30)
+		}
+	}
+
+	if currentSide == "SHORT" && state.BearishPushVolume > 0 {
+		buyingRatio := state.BullishPushVolume / state.BearishPushVolume
+		if buyingRatio < 0.15 {
+			return currentExtension <= (state.PeakVwapExtension * 0.30)
+		}
+	}
+
+	// Standard fallback trailing leash if the ledger balance sheet is closely fought (exit if 40% drops)
+	return currentExtension <= (state.PeakVwapExtension * 0.60)
 }
 
 func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
