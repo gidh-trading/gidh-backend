@@ -30,6 +30,7 @@ type App struct {
 	DBWriter       *writer.DBWriter
 	OrderManager   order.PositionManager
 	RiskManager    *risk.RiskManager
+	StrategyEngine *strategy.Engine
 	kiteClient     *kiteconnect.Client
 	server         *http.Server
 	wsHub          *ws.Hub
@@ -199,7 +200,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	// Step C: Initialize your engine using the compiled symbol map
-	strategyEngine := strategy.NewEngine(1*time.Hour, symbolProfiles, func(log *strategy.OptimizationTradeLog) {
+	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, func(log *strategy.OptimizationTradeLog) {
 		// 1. Output a visual stream verification log item
 		logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s | Wick Ratio: %.2f | VWAP Dist: %.4f",
 			log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryWickRatio, log.EntryVwapDistance)
@@ -233,10 +234,10 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	})
 
 	// Connect macro streaming listeners
-	barManager.MacroListener = strategyEngine
+	barManager.MacroListener = a.StrategyEngine
 
 	// Initialize standalone Risk, Capital and Broker Order Controllers
-	moneyManager := risk.NewRiskManager(a.OrderManager, strategyEngine)
+	moneyManager := risk.NewRiskManager(a.OrderManager, a.StrategyEngine)
 	a.Pipeline.AlgoAgent = moneyManager
 	a.RiskManager = moneyManager
 
@@ -272,6 +273,13 @@ func (a *App) Start(ctx context.Context) error {
 			logger.Fatalf("Server error: %v", err)
 		}
 	}()
+
+	if a.Config.Mode == "live" {
+		if err := a.WarmupEngineState(ctx); err != nil {
+			logger.Errorf("Critical execution halt: Warmup engine layer failed: %v", err)
+			return err
+		}
+	}
 
 	if a.StreamManager != nil {
 		return a.StreamManager.Start()

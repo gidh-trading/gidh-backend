@@ -83,16 +83,26 @@ func (e *Engine) updateVolumeLedger(state *InstrumentState, bar *models.Bar) {
 	}
 }
 
-func (e *Engine) initializeGapContext(state *InstrumentState, change float64) {
-	if !state.HasInitializedGaps {
-		if change > 0.0 {
-			state.IsGapUp = true
-			state.IsGapDown = false
-		} else if change < 0.0 {
-			state.IsGapDown = true
-			state.IsGapUp = false
-		}
-		state.HasInitializedGaps = true
+func (e *Engine) initializeGapContext(state *InstrumentState, firstBar *models.Bar) {
+	if state.HasInitializedGaps {
+		return
+	}
+
+	barHM := (firstBar.Timestamp.Hour() * 100) + firstBar.Timestamp.Minute()
+	if barHM > 916 {
+		return
+	}
+
+	state.InitialOpenPrice = firstBar.Open
+	state.HasInitializedGaps = true
+
+	// ⚠️ FIX: Update property reference from .Change to .ChangePct
+	if firstBar.ChangePct > 0.0 {
+		state.IsGapUp = true
+		state.IsGapDown = false
+	} else if firstBar.ChangePct < 0.0 {
+		state.IsGapDown = true
+		state.IsGapUp = false
 	}
 }
 

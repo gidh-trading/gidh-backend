@@ -44,6 +44,10 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 
 	state := e.getOrInitializeState(bar.StockName)
 
+	if !state.HasInitializedGaps {
+		e.initializeGapContext(state, bar)
+	}
+
 	e.updateCoreBarMetrics(state, bar)
 	e.trackVwapAcceptance(state, bar)
 	e.updateVolumeLedger(state, bar)
@@ -61,7 +65,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	state := e.getOrInitializeState(symbol)
 
 	e.updateCoreTickMetrics(state, enrichedTick.Raw)
-	e.initializeGapContext(state, enrichedTick.Raw.Change)
 
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
 
