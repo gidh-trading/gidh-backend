@@ -25,4 +25,5 @@ type PositionManager interface {
 	GetAllPositions() []models.Position
 	ClearPositions()
 	ReconstituteState(orders []models.OrderBookEntry, positions []models.Position)
+	GetActualBrokerQuantity(symbol string) int
 }

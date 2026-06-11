@@ -474,3 +474,9 @@ func (pm *PaperPositionManager) ReconstituteState(orders []models.OrderBookEntry
 		}
 	}
 }
+
+// GetActualBrokerQuantity provides interface alignment compliance for simulation runtimes.
+// Since paper mode has no external broker, it simply returns 0 as a default.
+func (pm *PaperPositionManager) GetActualBrokerQuantity(symbol string) int {
+	return 0
+}
