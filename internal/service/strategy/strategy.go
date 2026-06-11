@@ -66,6 +66,23 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	e.updateCoreTickMetrics(state, enrichedTick.Raw)
 
+	if !state.HasInitializedGaps {
+		// Only calculate gaps if it is the true opening market window
+		tickTime := enrichedTick.Raw.Timestamp
+		marketHM := (tickTime.Hour() * 100) + tickTime.Minute()
+
+		if marketHM == 915 { // Strictly between 09:15:00 and 09:15:59 AM
+			state.HasInitializedGaps = true
+			if enrichedTick.Raw.Change > 0.0 {
+				state.IsGapUp = true
+				state.IsGapDown = false
+			} else if enrichedTick.Raw.Change < 0.0 {
+				state.IsGapDown = true
+				state.IsGapUp = false
+			}
+		}
+	}
+
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
 
 	// Hardcoded strategy parameters

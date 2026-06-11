@@ -69,42 +69,13 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		rm.agentPositions[key] = pos
 	}
 
-	brokerQty := rm.orderManager.GetActualBrokerQuantity(symbol)
-
-	if pos.NetQuantity != brokerQty {
-		// Scenario A: Position was manually closed out on the terminal completely (brokerQty == 0)
-		if brokerQty == 0 && pos.NetQuantity != 0 {
-			logger.Warnf("⚠️ [Risk Sync] Manual terminal square-off detected for %s. Reconstituting performance ledger...", symbol)
-
-			// 1. Compute trade differential PnL using the immediate real-time tick price execution
-			var manualTradePnL float64
-			qtyFloat := float64(pos.NetQuantity)
-
-			if pos.Side == "LONG" {
-				manualTradePnL = qtyFloat * (rawTick.LastPrice - pos.AveragePrice)
-			} else if pos.Side == "SHORT" {
-				manualTradePnL = qtyFloat * (pos.AveragePrice - rawTick.LastPrice)
-			}
-
-			// 2. Lock the real profit/loss value cleanly into your daily realized session buffer
-			rm.dailyRealized += manualTradePnL
-			logger.Infof("🎯 [Risk Sync] Realized position PnL locked from manual exit: %.2f INR. Adjusted Realized: %.2f INR", manualTradePnL, rm.dailyRealized)
-
-			// 3. Clear RAM context properties safely so live trailing ticks stop calculating phantom metrics
-			pos.NetQuantity = 0
-			pos.Side = "FLAT"
-			pos.AveragePrice = 0.0
-
-			// Scenario B: Partial execution, partial manual fill, or a silent order fill match occurred
-		} else if brokerQty == 0 && pos.Side != "FLAT" {
-			pos.NetQuantity = 0
-			pos.Side = "FLAT"
-			pos.AveragePrice = 0.0
-		} else {
-			// Adapt system records smoothly to match manual adjustments (e.g., manually scaling down size)
-			logger.Warnf("⚠️ [Risk Sync] Position mismatch detected for %s. RAM: %d, Broker: %d. Forcing memory synchronization...", symbol, pos.NetQuantity, brokerQty)
-			pos.NetQuantity = brokerQty
-		}
+	// ⚡ STATE RECOVERY: MANUAL INTERVENTION & OVER-THE-AIR LIMIT FILL SAFETY SYNC
+	// If you manually squared off the asset, or a resting order filled silently,
+	// pos.NetQuantity will be 0, but our tracking memory might still show "LONG" or "SHORT".
+	// We force a localized memory sync here to prevent stale signals or trade collisions.
+	if pos.NetQuantity == 0 && pos.Side != "FLAT" {
+		pos.Side = "FLAT"
+		pos.AveragePrice = 0.0
 	}
 
 	// Account-Level Global Drawdown Circuit Breaker

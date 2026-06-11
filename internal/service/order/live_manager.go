@@ -789,21 +789,3 @@ func (lm *LiveOrderManager) calculateTrueAveragePrice(symbol string, netQuantity
 	}
 	return totalValue / float64(gatheredQty)
 }
-
-// GetActualBrokerQuantity queries the current confirmed open size for an active asset.
-// It leverages internal memory maps that are updated in real-time via broker execution feeds.
-func (lm *LiveOrderManager) GetActualBrokerQuantity(symbol string) int {
-	lm.mu.RLock()
-	defer lm.mu.RUnlock()
-
-	symbolKey := strings.ToUpper(symbol)
-
-	// Default intraday product format matching your application layout routing rules
-	key := fmt.Sprintf("%s:MIS", symbolKey)
-
-	if pos, exists := lm.activePositions[key]; exists {
-		return pos.NetQuantity
-	}
-
-	return 0
-}
