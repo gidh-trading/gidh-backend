@@ -13,40 +13,45 @@ const (
 )
 
 // InstrumentState tracks stable, macro-structural session context instead of frantic speed.
+// internal/service/strategy/model.go
+
 type InstrumentState struct {
 	Symbol          string
 	LastUpdated     time.Time
 	LatestPrice     float64
-	LiveSessionVWAP float64 // The ultimate anchor line from the exchange
+	LiveSessionVWAP float64
 
 	// --- 🗺️ Daily Opening Landscape Context ---
-	IsGapUp            bool    // Locked via first tick change percent
-	IsGapDown          bool    // Locked via first tick change percent
-	InitialOpenPrice   float64 // Captured from the first 1-minute bar of the session
-	EntryVwapAnchor    float64 // Captures and freezes the exact VWAP price at the moment of entry
-	HasInitializedGaps bool    // Tracker flag to freeze opening context
+	IsGapUp            bool
+	IsGapDown          bool
+	InitialOpenPrice   float64
+	EntryVwapAnchor    float64
+	HasInitializedGaps bool
 
 	// --- 📊 VWAP Live Acceptance Tracking ---
-	ConsecutiveClosesAboveVwap int  // Rolling block tracker of sustained presence over anchor
-	ConsecutiveClosesBelowVwap int  // Rolling block tracker of sustained presence under anchor
-	IsVwapAcceptanceConfirmed  bool // Flips true when trend dominance is mathematically confirmed
+	ConsecutiveClosesAboveVwap int
+	ConsecutiveClosesBelowVwap int
+	IsVwapAcceptanceConfirmed  bool
 
 	// --- 🥊 The Institutional Ledger (Tug of War) ---
-	// Accumulates absolute volume traded on high-conviction, directional bars
-	BullishPushVolume float64 // Absolute shares committed to attacking the offer
-	BearishPushVolume float64 // Absolute shares committed to slamming the bid
+	BullishPushVolume float64
+	BearishPushVolume float64
 
 	// --- 🔄 Real-Time Spatial Snapshots ---
-	LatestVolumeRank       int     // Captured from incoming closed bar metrics
-	LatestPriceRank        int     // Percentage representation of body size
-	NormalizedVwapDistance float64 // Distance from VWAP scaled by ADRPct
-	PeakVwapExtension      float64 // Maximum absolute distance reached during active trade tracking
+	LatestVolumeRank       int
+	LatestPriceRank        int
+	LatestEfficiency       float64 // ⚡ Added: Measures PriceRank / VolumeRank
+	PreviousVolumeRank     int     // ⚡ Added: Retains previous closed bar volume rank
+	PreviousPriceRank      int     // ⚡ Added: Retains previous closed bar price rank
+	PreviousEfficiency     float64 // ⚡ Added: Retains previous closed bar efficiency
+	NormalizedVwapDistance float64
+	PeakVwapExtension      float64
 
 	// --- 🎯 Execution State Machine ---
 	CurrentSetupPhase SetupPhase
 	LastTradedBarTime time.Time
-	BarHistory        map[string][]*models.Bar  // Holds historical closed bars
-	Profile           *models.InstrumentProfile // Stores ADRPct and ADV constants
+	BarHistory        map[string][]*models.Bar
+	Profile           *models.InstrumentProfile
 }
 
 // OptimizationTradeLog holds the freeze-frame microstructural variables

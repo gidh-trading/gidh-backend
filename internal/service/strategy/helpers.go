@@ -38,11 +38,24 @@ func (e *Engine) getOrInitializeState(symbol string) *InstrumentState {
 // =========================================================================
 
 func (e *Engine) updateCoreBarMetrics(state *InstrumentState, bar *models.Bar) {
+	// 1. Shift current state into previous historical tracking positions
+	state.PreviousVolumeRank = state.LatestVolumeRank
+	state.PreviousPriceRank = state.LatestPriceRank
+	state.PreviousEfficiency = state.LatestEfficiency
+
+	// 2. Ingest fresh closed bar data
 	state.LastUpdated = bar.Timestamp
 	state.LatestPrice = bar.Close
 	state.LiveSessionVWAP = bar.VWAP
 	state.LatestVolumeRank = bar.Analytics.VolumeRank
 	state.LatestPriceRank = bar.Analytics.PriceRank
+
+	// 3. Compute microstructural efficiency (PriceRank / VolumeRank)
+	if state.LatestVolumeRank > 0 {
+		state.LatestEfficiency = float64(state.LatestPriceRank) / float64(state.LatestVolumeRank)
+	} else {
+		state.LatestEfficiency = 0.0
+	}
 
 	if state.InitialOpenPrice == 0 {
 		state.InitialOpenPrice = bar.Open

@@ -199,47 +199,51 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
-	// Step C: Initialize your engine using the compiled symbol map
-	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, func(log *strategy.OptimizationTradeLog) {
-		// 1. Output a visual stream verification log item
-		logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s | Wick Ratio: %.2f | VWAP Dist: %.4f",
-			log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryWickRatio, log.EntryVwapDistance)
+	if a.Config.Mode != "live" {
+		// Step C: Initialize your engine using the compiled symbol map
+		a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, func(log *strategy.OptimizationTradeLog) {
+			// 1. Output a visual stream verification log item
+			logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s | Wick Ratio: %.2f | VWAP Dist: %.4f",
+				log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryWickRatio, log.EntryVwapDistance)
 
-		// 2. Write straight down into our persistent TimescaleDB relational logs table
-		if a.pool != nil {
-			err := db.LogStrategyOptimizationTrade(
-				context.Background(),
-				a.pool,
-				log.Symbol,
-				log.StrategyName,
-				log.TradeSide,
-				log.MinutesSinceOpen,
-				log.EntryTimestamp,
-				log.EntryPrice,
-				log.EntryVwap,
-				log.EntryVolumeRank,
-				log.EntryPriceRank,
-				log.EntryWickRatio,
-				log.EntryVwapDistance,
-				log.ExitTimestamp,
-				log.ExitPrice,
-				log.ExitReason,
-				log.FinalPnLINR,
-				log.PeakPnLINR,
-			)
-			if err != nil {
-				logger.Errorf("Failed to persist strategy optimization metrics chunk for %s: %v", log.Symbol, err)
+			// 2. Write straight down into our persistent TimescaleDB relational logs table
+			if a.pool != nil {
+				err := db.LogStrategyOptimizationTrade(
+					context.Background(),
+					a.pool,
+					log.Symbol,
+					log.StrategyName,
+					log.TradeSide,
+					log.MinutesSinceOpen,
+					log.EntryTimestamp,
+					log.EntryPrice,
+					log.EntryVwap,
+					log.EntryVolumeRank,
+					log.EntryPriceRank,
+					log.EntryWickRatio,
+					log.EntryVwapDistance,
+					log.ExitTimestamp,
+					log.ExitPrice,
+					log.ExitReason,
+					log.FinalPnLINR,
+					log.PeakPnLINR,
+				)
+				if err != nil {
+					logger.Errorf("Failed to persist strategy optimization metrics chunk for %s: %v", log.Symbol, err)
+				}
 			}
-		}
-	})
+		})
 
-	// Connect macro streaming listeners
-	barManager.MacroListener = a.StrategyEngine
+		// Connect macro streaming listeners
+		barManager.MacroListener = a.StrategyEngine
 
-	// Initialize standalone Risk, Capital and Broker Order Controllers
-	moneyManager := risk.NewRiskManager(a.OrderManager, a.StrategyEngine)
-	a.Pipeline.AlgoAgent = moneyManager
-	a.RiskManager = moneyManager
+		// Initialize standalone Risk, Capital and Broker Order Controllers
+		moneyManager := risk.NewRiskManager(a.OrderManager, a.StrategyEngine)
+		a.Pipeline.AlgoAgent = moneyManager
+		a.RiskManager = moneyManager
+	} else {
+		logger.Infof("[System Initialization] Operating in %s mode. Algorithmic Agent deactivated.", a.Config.Mode)
+	}
 
 	a.activePipe = a.Pipeline
 
