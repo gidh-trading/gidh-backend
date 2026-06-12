@@ -42,10 +42,11 @@ func (e *Engine) updateCoreBarMetrics(state *InstrumentState, bar *models.Bar) {
 	state.LatestPrice = bar.Close
 	state.LiveSessionVWAP = bar.VWAP
 	state.LatestVolumeRank = bar.Analytics.VolumeRank
+	state.LatestChangePct = bar.ChangePct
 	state.LatestPriceRank = bar.Analytics.PriceRank
 
 	// 🎯 Continuous Efficiency Update Rule
-	if state.LatestVolumeRank >= 75 {
+	if state.LatestVolumeRank >= 6 {
 		// Fresh institutional volume: Calculate new efficiency baseline
 		candleSign := 0.0
 		if bar.Close > bar.Open {

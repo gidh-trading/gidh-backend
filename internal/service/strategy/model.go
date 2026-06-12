@@ -20,10 +20,6 @@ type InstrumentState struct {
 	LatestPrice     float64
 	LiveSessionVWAP float64
 
-	// --- The 09:15 - 09:30 AM Opening Range Limits ---
-	OpeningRangeHigh float64
-	OpeningRangeLow  float64
-
 	// --- VWAP Regime Counters ---
 	ConsecutiveClosesAboveVwap int
 	ConsecutiveClosesBelowVwap int
@@ -31,6 +27,7 @@ type InstrumentState struct {
 	// --- The Single Continuous Efficiency Tracker ---
 	LatestPriceRank  int
 	LatestVolumeRank int
+	LatestChangePct  float64
 	Efficiency       float64 // (PriceRank / VolumeRank) * CandleSign
 
 	// --- Trade Tracking & Historical Buffers ---

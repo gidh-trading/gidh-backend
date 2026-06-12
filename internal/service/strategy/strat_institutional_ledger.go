@@ -24,18 +24,18 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 
 	// --- 🟢 LONG ENTRY TRIGGER GATE ---
 	// Price must spend 3 consecutive minutes above VWAP
-	if state.ConsecutiveClosesAboveVwap >= 3 {
+	if state.ConsecutiveClosesAboveVwap >= 2 && state.LatestChangePct > 1.0 {
 		// Rule: Breakout past 9:30 ceiling, extreme volume injection, and fresh non-decayed efficiency
-		if state.LatestPrice > state.OpeningRangeHigh && state.LatestVolumeRank >= 90 && state.Efficiency >= 1.0 {
+		if state.LatestVolumeRank >= 6 && state.Efficiency >= 0.8 {
 			return "GO_LONG"
 		}
 	}
 
 	// --- 🔴 SHORT ENTRY TRIGGER GATE ---
 	// Price must spend 3 consecutive minutes below VWAP
-	if state.ConsecutiveClosesBelowVwap >= 3 {
+	if state.ConsecutiveClosesBelowVwap >= 2 && state.LatestChangePct < 1.0 {
 		// Rule: Breakdown past 9:30 floor, extreme volume injection, and fresh non-decayed efficiency
-		if state.LatestPrice < state.OpeningRangeLow && state.LatestVolumeRank >= 90 && state.Efficiency <= -1.0 {
+		if state.LatestVolumeRank >= 6 && state.Efficiency <= -0.8 {
 			return "GO_SHORT"
 		}
 	}
@@ -54,10 +54,10 @@ func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentS
 	}
 
 	// 2. Dynamic Directional Cross-Pollution Guard
-	if currentSide == "LONG" && state.Efficiency <= -1.0 {
+	if currentSide == "LONG" && state.Efficiency <= -0.8 {
 		return "EXIT_LONG"
 	}
-	if currentSide == "SHORT" && state.Efficiency >= 1.0 {
+	if currentSide == "SHORT" && state.Efficiency >= 0.8 {
 		return "EXIT_SHORT"
 	}
 
