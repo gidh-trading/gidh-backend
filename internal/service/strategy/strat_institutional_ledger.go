@@ -1,54 +1,42 @@
 package strategy
 
-import "math"
-
 type InstitutionalLedgerStrategy struct {
-	VwapBufferPct    float64 // Pullback execution envelope (0.0015 = 0.15% cushion zone around VWAP)
-	WipeoutThreshold float64 // Critical volume balance cutoff (0.60 = Exit if counter-volume hits 60% of setup volume)
+	VwapBufferPct float64 // Pullback execution cushion zone (0.0015 = 0.15% cushion around VWAP)
 }
 
-// NewInstitutionalLedgerStrategy instantiates our professional institutional volume-ledger strategy.
+// NewInstitutionalLedgerStrategy instantiates our streamlined volume-ledger strategy.
 func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
 	return &InstitutionalLedgerStrategy{
-		VwapBufferPct:    0.0015,
-		WipeoutThreshold: 0.60,
+		VwapBufferPct: 0.0015, //
 	}
 }
 
-func (s *InstitutionalLedgerStrategy) Name() string { return "Institutional_Ledger_VWAP_Acceptance" }
+func (s *InstitutionalLedgerStrategy) Name() string {
+	return "Institutional_Ledger_VWAP_Acceptance" //
+}
 
+// CheckEntry evaluates the active breakout and time-decayed signed efficiency rules.
 func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string {
-	// 1. Structural Validation Gate
-	if !state.IsVwapAcceptanceConfirmed {
+	// 1. Core Chronological Lock Gate: Block entry if we already traded this exact bar minute
+	if !state.LastTradedBarTime.IsZero() && state.LastUpdated.Equal(state.LastTradedBarTime) {
 		return "HOLD"
 	}
 
-	// --- 🟢 LONG SETUP DIRECTIONAL CHECK ---
-	if state.IsGapUp && state.ConsecutiveClosesAboveVwap > 0 {
-		if state.BullishPushVolume > 0 && (state.BearishPushVolume/state.BullishPushVolume) < 0.30 {
-			// Setup Variant B: Aggressive Runaway Momentum Breakout
-			if state.LatestVolumeRank >= 7 && state.LatestPriceRank >= 7 && state.LatestPrice > state.LiveSessionVWAP {
-				return "GO_LONG"
-			}
-
-			// Setup Variant A: Signal that structural conditions are primed for a pullback entry
-			if state.LatestPrice >= state.LiveSessionVWAP {
-				return "SETUP_READY_LONG"
-			}
+	// --- 🟢 LONG ENTRY TRIGGER GATE ---
+	// Price must spend 3 consecutive minutes above VWAP
+	if state.ConsecutiveClosesAboveVwap >= 3 {
+		// Rule: Breakout past 9:30 ceiling, extreme volume injection, and fresh non-decayed efficiency
+		if state.LatestPrice > state.OpeningRangeHigh && state.LatestVolumeRank >= 90 && state.Efficiency >= 1.0 {
+			return "GO_LONG"
 		}
 	}
 
-	// --- 🔴 SHORT SETUP DIRECTIONAL CHECK ---
-	if state.IsGapDown && state.ConsecutiveClosesBelowVwap > 0 {
-		if state.BearishPushVolume > 0 && (state.BullishPushVolume/state.BearishPushVolume) < 0.30 {
-			// Setup Variant B: Aggressive Downward Breakdown
-			if state.LatestVolumeRank >= 7 && state.LatestPriceRank >= 7 && state.LatestPrice < state.LiveSessionVWAP {
-				return "GO_SHORT"
-			}
-
-			if state.LatestPrice <= state.LiveSessionVWAP {
-				return "SETUP_READY_SHORT"
-			}
+	// --- 🔴 SHORT ENTRY TRIGGER GATE ---
+	// Price must spend 3 consecutive minutes below VWAP
+	if state.ConsecutiveClosesBelowVwap >= 3 {
+		// Rule: Breakdown past 9:30 floor, extreme volume injection, and fresh non-decayed efficiency
+		if state.LatestPrice < state.OpeningRangeLow && state.LatestVolumeRank >= 90 && state.Efficiency <= -1.0 {
+			return "GO_SHORT"
 		}
 	}
 
@@ -57,67 +45,49 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 
 // CheckExit handles continuous microstructural trend flip checks while in an active trade
 func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	// 1. Core Price-Action Invalidation (Clean break deep past our buffer zone)
-	if currentSide == "LONG" && state.LatestPrice < (state.LiveSessionVWAP*(1.0-s.VwapBufferPct*2)) {
+	// 1. Core Price-Action Invalidation (Clean structural break deep past our VWAP buffer zone)
+	if currentSide == "LONG" && state.LatestPrice < (state.LiveSessionVWAP*(1.0-s.VwapBufferPct*2)) { //
+		return "EXIT_LONG" //
+	}
+	if currentSide == "SHORT" && state.LatestPrice > (state.LiveSessionVWAP*(1.0+s.VwapBufferPct*2)) { //
+		return "EXIT_SHORT" //
+	}
+
+	// 2. Dynamic Directional Cross-Pollution Guard
+	if currentSide == "LONG" && state.Efficiency <= -1.0 {
 		return "EXIT_LONG"
 	}
-	if currentSide == "SHORT" && state.LatestPrice > (state.LiveSessionVWAP*(1.0+s.VwapBufferPct*2)) {
+	if currentSide == "SHORT" && state.Efficiency >= 1.0 {
 		return "EXIT_SHORT"
 	}
 
-	// 2. 🥊 Volume Effectiveness Balance Sheet Protection
-	// If the opposing team steps in and commits raw volume that eclipses our threshold, exit immediately
-	if currentSide == "LONG" && state.BullishPushVolume > 0 {
-		distributionRatio := state.BearishPushVolume / state.BullishPushVolume
-		if distributionRatio >= s.WipeoutThreshold {
-			return "EXIT_LONG" // Original institutional buyers are overwhelmed or distributing out
-		}
-	}
-
-	if currentSide == "SHORT" && state.BearishPushVolume > 0 {
-		accumulationRatio := state.BullishPushVolume / state.BearishPushVolume
-		if accumulationRatio >= s.WipeoutThreshold {
-			return "EXIT_SHORT" // Shorts are actively being squeezed out by massive buyer absorption
-		}
-	}
-
-	return "HOLD"
+	return "HOLD" //
 }
 
-// CheckTrailingProfitLock performs intelligent volatility retracement tracking
-func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
-	currentExtension := math.Abs(state.NormalizedVwapDistance)
-
-	// Lock arms only if the trade expands past 20% of its expected daily range boundary
-	if state.PeakVwapExtension < 0.20 {
-		return false
-	}
-
-	// Dynamic leash configuration based on ledger domination metrics
-	if currentSide == "LONG" && state.BullishPushVolume > 0 {
-		sellingRatio := state.BearishPushVolume / state.BullishPushVolume
-
-		if sellingRatio < 0.15 {
-			// Dominant buyers completely dictate order flow. Give the asset huge breathing space
-			// to surf through natural mid-day consolidation dips. Trail out only if 70% of extension drops.
-			return currentExtension <= (state.PeakVwapExtension * 0.30)
-		}
-	}
-
-	if currentSide == "SHORT" && state.BearishPushVolume > 0 {
-		buyingRatio := state.BullishPushVolume / state.BearishPushVolume
-		if buyingRatio < 0.15 {
-			return currentExtension <= (state.PeakVwapExtension * 0.30)
-		}
-	}
-
-	// Standard fallback trailing leash if the ledger balance sheet is closely fought (exit if 40% drops)
-	return currentExtension <= (state.PeakVwapExtension * 0.60)
+// CheckTrailingProfitLock handles trailing retracements.
+// 🟢 Bypassed for now to prioritize your fixed INR target.
+func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool { //
+	return false //
 }
 
-func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	return false
+// CheckTakeProfit triggers an immediate exit the moment cash PnL hits or exceeds 500 INR
+func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool { //
+	if netQty <= 0 || averagePrice <= 0 { //
+		return false //
+	}
+
+	// Calculate current gross cash profit in INR
+	priceDelta := state.LatestPrice - averagePrice //
+	multiplier := 1.0                              //
+	if currentSide == "SHORT" {                    //
+		multiplier = -1.0 //
+	}
+	currentPnLINR := priceDelta * float64(netQty) * multiplier //
+
+	return currentPnLINR >= 500.0 //
 }
-func (s *InstitutionalLedgerStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	return false
+
+// CheckStopLoss handles fixed risk protection.
+func (s *InstitutionalLedgerStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool { //
+	return false //
 }

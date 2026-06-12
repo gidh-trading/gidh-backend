@@ -20,97 +20,104 @@ type Engine struct {
 }
 
 // NewEngine accepts pre-loaded profiles map and an active trade logging callback hook.
-func NewEngine(barLookback time.Duration, profiles map[string]*models.InstrumentProfile, completeHook func(log *OptimizationTradeLog)) *Engine {
-	ledgerStrategyCard := NewInstitutionalLedgerStrategy()
+func NewEngine(barLookback time.Duration, profiles map[string]*models.InstrumentProfile, completeHook func(log *OptimizationTradeLog)) *Engine { //
+	ledgerStrategyCard := NewInstitutionalLedgerStrategy() //
+	timeRouterWrapper := NewTimeBasedRouter(ledgerStrategyCard)
 
-	return &Engine{
-		Registry:         make(map[string]*InstrumentState),
-		ActiveTrades:     make(map[string]*OptimizationTradeLog),
-		ActiveStrategy:   ledgerStrategyCard,
-		MaxBarLookback:   barLookback,
-		profiles:         profiles,
-		OnTradeCompleted: completeHook,
-	}
+	return &Engine{ //
+		Registry:         make(map[string]*InstrumentState),      //
+		ActiveTrades:     make(map[string]*OptimizationTradeLog), //
+		ActiveStrategy:   timeRouterWrapper,                      //
+		MaxBarLookback:   barLookback,                            //
+		profiles:         profiles,                               //
+		OnTradeCompleted: completeHook,                           //
+	} //
 }
 
 // IngestClosedBar caches historical timeframes and computes metrics upon bar close
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
-	if e.isBeforeMarketOpen(bar) {
+	if e.isBeforeMarketOpen(bar) { //
 		return
 	}
 
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	state := e.getOrInitializeState(bar.StockName)
+	state := e.getOrInitializeState(bar.StockName) //
 
-	if !state.HasInitializedGaps {
-		e.initializeGapContext(state, bar)
+	// 1. 🛡️ MORNING HOOD FILTER: Track boundaries strictly without polluting active state variables
+	currentTimeHM := (bar.Timestamp.Hour() * 100) + bar.Timestamp.Minute()
+	if currentTimeHM <= 930 {
+		if state.OpeningRangeHigh == 0 || bar.High > state.OpeningRangeHigh {
+			state.OpeningRangeHigh = bar.High
+		}
+		if state.OpeningRangeLow == 0 || bar.Low < state.OpeningRangeLow {
+			state.OpeningRangeLow = bar.Low
+		}
+		// Hard stop to protect the sequential counters and efficiency metrics from morning noise
+		return
 	}
 
-	e.updateCoreBarMetrics(state, bar)
-	e.trackVwapAcceptance(state, bar)
-	e.updateVolumeLedger(state, bar)
+	// 2. POST-09:30 AM: Safe, clean-slate metric bookkeeping executions
+	e.updateCoreBarMetrics(state, bar) // Updates metrics and calculates the unified signed efficiency
+	e.trackVwapAcceptance(state, bar)  // Increments consecutive counters cleanly
 
-	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
+	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile) //
 
-	e.appendAndPruneHistory(state, bar)
+	e.appendAndPruneHistory(state, bar) //
 }
 
 // UpdateContext updates real-time tracking metrics and evaluates active trailing locks
 // and dynamic tick-level entries/exits live on every incoming tick.
-func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
-	e.mu.Lock()
-	symbol := enrichedTick.Raw.StockName
-	state := e.getOrInitializeState(symbol)
+func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string { //
+	e.mu.Lock()                             //
+	symbol := enrichedTick.Raw.StockName    //
+	state := e.getOrInitializeState(symbol) //
 
-	e.updateCoreTickMetrics(state, enrichedTick.Raw)
+	e.updateCoreTickMetrics(state, enrichedTick.Raw) //
 
-	if !state.HasInitializedGaps {
-		// Only calculate gaps if it is the true opening market window
-		tickTime := enrichedTick.Raw.Timestamp
-		marketHM := (tickTime.Hour() * 100) + tickTime.Minute()
-
-		if marketHM == 915 { // Strictly between 09:15:00 and 09:15:59 AM
-			state.HasInitializedGaps = true
-			if enrichedTick.Raw.Change > 0.0 {
-				state.IsGapUp = true
-				state.IsGapDown = false
-			} else if enrichedTick.Raw.Change < 0.0 {
-				state.IsGapDown = true
-				state.IsGapUp = false
-			}
-		}
-	}
-
-	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
-
-	// Hardcoded strategy parameters
-	adrMultiplier := 0.05
-	isFlatNow := currentSide == "FLAT" || currentSide == ""
-
-	if isFlatNow {
-		return e.evaluateFlatTickEntry(state, adrMultiplier)
-	}
-
-	return e.evaluateActiveTickPosition(state, symbol, currentSide, averagePrice, netQty, adrMultiplier)
-}
-
-// GenerateSignal handles execution tracking and logs freeze-frame microstructural metrics
-func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
-	e.mu.Lock()
-	state, exists := e.Registry[symbol]
-	if !exists || e.ActiveStrategy == nil {
+	// Hard-lock tick execution routing entirely during the opening range window
+	tickTime := enrichedTick.Raw.Timestamp
+	marketHM := (tickTime.Hour() * 100) + tickTime.Minute()
+	if marketHM <= 930 {
 		e.mu.Unlock()
 		return "HOLD"
 	}
 
-	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
-	e.mu.Unlock()
+	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile) //
 
-	if state.CurrentSetupPhase == PhaseNeutral {
-		return e.processNeutralSignalRoute(symbol, state)
+	// Hardcoded strategy parameters
+	adrMultiplier := 0.05                                   //
+	isFlatNow := currentSide == "FLAT" || currentSide == "" //
+
+	if isFlatNow { //
+		return e.evaluateFlatTickEntry(state, adrMultiplier) //
+	} //
+
+	return e.evaluateActiveTickPosition(state, symbol, currentSide, averagePrice, netQty, adrMultiplier) //
+}
+
+// GenerateSignal handles execution tracking and logs freeze-frame microstructural metrics
+func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string { //
+	e.mu.Lock()                             //
+	state, exists := e.Registry[symbol]     //
+	if !exists || e.ActiveStrategy == nil { //
+		e.mu.Unlock() //
+		return "HOLD" //
+	} //
+
+	// Safety check: Explicitly ignore signaling routines if the bar cache falls within the opening room limits
+	if state.LastUpdated.Hour() == 9 && state.LastUpdated.Minute() <= 30 {
+		e.mu.Unlock()
+		return "HOLD"
 	}
 
-	return e.processActiveSignalRoute(symbol, state, currentSide, averagePrice, netQty)
+	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty) //
+	e.mu.Unlock()                                                              //
+
+	if state.CurrentSetupPhase == PhaseNeutral { //
+		return e.processNeutralSignalRoute(symbol, state) //
+	} //
+
+	return e.processActiveSignalRoute(symbol, state, currentSide, averagePrice, netQty) //
 }

@@ -5,6 +5,7 @@ import (
 	"time"
 )
 
+// SetupPhase defines the state machine flags for active execution tracking
 type SetupPhase string
 
 const (
@@ -12,46 +13,34 @@ const (
 	PhaseActiveTrade SetupPhase = "ACTIVE_TRADE"
 )
 
-// InstrumentState tracks stable, macro-structural session context instead of frantic speed.
-// internal/service/strategy/model.go
-
 type InstrumentState struct {
+	// --- Core Identity & Current Snapshots ---
 	Symbol          string
 	LastUpdated     time.Time
 	LatestPrice     float64
 	LiveSessionVWAP float64
 
-	// --- 🗺️ Daily Opening Landscape Context ---
-	IsGapUp            bool
-	IsGapDown          bool
-	InitialOpenPrice   float64
-	EntryVwapAnchor    float64
-	HasInitializedGaps bool
+	// --- The 09:15 - 09:30 AM Opening Range Limits ---
+	OpeningRangeHigh float64
+	OpeningRangeLow  float64
 
-	// --- 📊 VWAP Live Acceptance Tracking ---
+	// --- VWAP Regime Counters ---
 	ConsecutiveClosesAboveVwap int
 	ConsecutiveClosesBelowVwap int
-	IsVwapAcceptanceConfirmed  bool
 
-	// --- 🥊 The Institutional Ledger (Tug of War) ---
-	BullishPushVolume float64
-	BearishPushVolume float64
+	// --- The Single Continuous Efficiency Tracker ---
+	LatestPriceRank  int
+	LatestVolumeRank int
+	Efficiency       float64 // (PriceRank / VolumeRank) * CandleSign
 
-	// --- 🔄 Real-Time Spatial Snapshots ---
-	LatestVolumeRank       int
-	LatestPriceRank        int
-	LatestEfficiency       float64 // ⚡ Added: Measures PriceRank / VolumeRank
-	PreviousVolumeRank     int     // ⚡ Added: Retains previous closed bar volume rank
-	PreviousPriceRank      int     // ⚡ Added: Retains previous closed bar price rank
-	PreviousEfficiency     float64 // ⚡ Added: Retains previous closed bar efficiency
+	// --- Trade Tracking & Historical Buffers ---
+	CurrentSetupPhase      SetupPhase
+	LastTradedBarTime      time.Time // 🔒 The Chronological Execution Lock
+	EntryVwapAnchor        float64
 	NormalizedVwapDistance float64
 	PeakVwapExtension      float64
-
-	// --- 🎯 Execution State Machine ---
-	CurrentSetupPhase SetupPhase
-	LastTradedBarTime time.Time
-	BarHistory        map[string][]*models.Bar
-	Profile           *models.InstrumentProfile
+	BarHistory             map[string][]*models.Bar
+	Profile                *models.InstrumentProfile
 }
 
 // OptimizationTradeLog holds the freeze-frame microstructural variables

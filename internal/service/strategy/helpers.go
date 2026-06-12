@@ -38,27 +38,37 @@ func (e *Engine) getOrInitializeState(symbol string) *InstrumentState {
 // =========================================================================
 
 func (e *Engine) updateCoreBarMetrics(state *InstrumentState, bar *models.Bar) {
-	// 1. Shift current state into previous historical tracking positions
-	state.PreviousVolumeRank = state.LatestVolumeRank
-	state.PreviousPriceRank = state.LatestPriceRank
-	state.PreviousEfficiency = state.LatestEfficiency
-
-	// 2. Ingest fresh closed bar data
 	state.LastUpdated = bar.Timestamp
 	state.LatestPrice = bar.Close
 	state.LiveSessionVWAP = bar.VWAP
 	state.LatestVolumeRank = bar.Analytics.VolumeRank
 	state.LatestPriceRank = bar.Analytics.PriceRank
 
-	// 3. Compute microstructural efficiency (PriceRank / VolumeRank)
-	if state.LatestVolumeRank > 0 {
-		state.LatestEfficiency = float64(state.LatestPriceRank) / float64(state.LatestVolumeRank)
-	} else {
-		state.LatestEfficiency = 0.0
-	}
+	// 🎯 Continuous Efficiency Update Rule
+	if state.LatestVolumeRank >= 75 {
+		// Fresh institutional volume: Calculate new efficiency baseline
+		candleSign := 0.0
+		if bar.Close > bar.Open {
+			candleSign = 1.0
+		} else if bar.Close < bar.Open {
+			candleSign = -1.0
+		}
 
-	if state.InitialOpenPrice == 0 {
-		state.InitialOpenPrice = bar.Open
+		volDenominator := float64(state.LatestVolumeRank)
+		if volDenominator <= 0 {
+			volDenominator = 1.0
+		}
+
+		state.Efficiency = (float64(state.LatestPriceRank) / volDenominator) * candleSign
+	} else {
+		// 📉 DECAY ENGINE: Volume dropped below P75. Melt down the old footprint by 10%
+		const decayFactor = 0.90
+		state.Efficiency = state.Efficiency * decayFactor
+
+		// Optional: Clean up micro-decimals close to zero to prevent floating point residue
+		if math.Abs(state.Efficiency) < 0.01 {
+			state.Efficiency = 0.0
+		}
 	}
 }
 
@@ -72,50 +82,12 @@ func (e *Engine) trackVwapAcceptance(state *InstrumentState, bar *models.Bar) {
 	if bar.Close > bar.VWAP {
 		state.ConsecutiveClosesAboveVwap++
 		state.ConsecutiveClosesBelowVwap = 0
-		if state.ConsecutiveClosesAboveVwap >= 3 {
-			state.IsVwapAcceptanceConfirmed = true
-		}
 	} else if bar.Close < bar.VWAP {
 		state.ConsecutiveClosesBelowVwap++
 		state.ConsecutiveClosesAboveVwap = 0
-		if state.ConsecutiveClosesBelowVwap >= 3 {
-			state.IsVwapAcceptanceConfirmed = true
-		}
-	}
-}
-
-func (e *Engine) updateVolumeLedger(state *InstrumentState, bar *models.Bar) {
-	analytics := bar.Analytics
-	if state.LatestVolumeRank >= 6 && state.LatestPriceRank >= 6 {
-		switch analytics.Direction {
-		case models.DirStrongBullish, models.DirBullish:
-			state.BullishPushVolume += bar.Volume
-		case models.DirStrongBearish, models.DirBearish:
-			state.BearishPushVolume += bar.Volume
-		}
-	}
-}
-
-func (e *Engine) initializeGapContext(state *InstrumentState, firstBar *models.Bar) {
-	if state.HasInitializedGaps {
-		return
-	}
-
-	barHM := (firstBar.Timestamp.Hour() * 100) + firstBar.Timestamp.Minute()
-	if barHM > 916 {
-		return
-	}
-
-	state.InitialOpenPrice = firstBar.Open
-	state.HasInitializedGaps = true
-
-	// ⚠️ FIX: Update property reference from .Change to .ChangePct
-	if firstBar.ChangePct > 0.0 {
-		state.IsGapUp = true
-		state.IsGapDown = false
-	} else if firstBar.ChangePct < 0.0 {
-		state.IsGapDown = true
-		state.IsGapUp = false
+	} else {
+		state.ConsecutiveClosesAboveVwap = 0
+		state.ConsecutiveClosesBelowVwap = 0
 	}
 }
 
