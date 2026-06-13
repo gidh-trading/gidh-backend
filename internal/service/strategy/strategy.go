@@ -47,7 +47,7 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 
 	// 1. 🛡️ MORNING HOOD FILTER: Track boundaries strictly without polluting active state variables
 	currentTimeHM := (bar.Timestamp.Hour() * 100) + bar.Timestamp.Minute()
-	if currentTimeHM <= 915 {
+	if currentTimeHM <= 930 {
 		// Hard stop to protect the sequential counters and efficiency metrics from morning noise
 		return
 	}
@@ -100,8 +100,8 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 		return "HOLD"
 	}
 
-	// Safety check: Explicitly ignore signaling routines if the bar cache falls within the opening room limits
-	if state.LastUpdated.Hour() == 9 && state.LastUpdated.Minute() <= 15 {
+	currentTimeHM := (state.LastUpdated.Hour() * 100) + state.LastUpdated.Minute()
+	if currentTimeHM <= 930 {
 		e.mu.Unlock()
 		return "HOLD"
 	}

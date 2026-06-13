@@ -30,6 +30,11 @@ type InstrumentState struct {
 	LatestChangePct  float64
 	Efficiency       float64 // (PriceRank / VolumeRank) * CandleSign
 
+	OpeningRangeHigh   float64 // 09:15-09:30 structural barrier
+	OpeningRangeLow    float64 // 09:15-09:30 structural barrier
+	OpeningRangeLocked bool
+	VwapCrossCount     int // Measures structural chop intensity
+
 	// --- Trade Tracking & Historical Buffers ---
 	CurrentSetupPhase      SetupPhase
 	LastTradedBarTime      time.Time // 🔒 The Chronological Execution Lock

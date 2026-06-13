@@ -45,7 +45,22 @@ func (e *Engine) updateCoreBarMetrics(state *InstrumentState, bar *models.Bar) {
 	state.LatestChangePct = bar.ChangePct
 	state.LatestPriceRank = bar.Analytics.PriceRank
 
-	// 🎯 Continuous Efficiency Update Rule
+	currentTimeHM := (bar.Timestamp.Hour() * 100) + bar.Timestamp.Minute()
+	if currentTimeHM <= 930 {
+		if state.OpeningRangeHigh == 0 || bar.High > state.OpeningRangeHigh {
+			state.OpeningRangeHigh = bar.High
+		}
+		if state.OpeningRangeLow == 0 || bar.Low < state.OpeningRangeLow {
+			state.OpeningRangeLow = bar.Low
+		}
+	}
+
+	isCross := (bar.Open > bar.VWAP && bar.Close < bar.VWAP) || (bar.Open < bar.VWAP && bar.Close > bar.VWAP)
+	if isCross {
+		state.VwapCrossCount++
+	}
+
+	// 🎯 Continuous Efficiency Update
 	if state.LatestVolumeRank >= 6 {
 		// Fresh institutional volume: Calculate new efficiency baseline
 		candleSign := 0.0
