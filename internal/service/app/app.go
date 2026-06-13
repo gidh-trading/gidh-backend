@@ -179,7 +179,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, dnaMap, profilesMap)
 
 	// 4. Initialize the decoupled Bar Manager
-	barManager := pipeline.NewBarManager(a.DBWriter, a.wsHub, profilesMap, dnaMap)
+	barManager := pipeline.NewBarManager(a.wsHub, profilesMap, dnaMap)
 
 	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
 
@@ -201,7 +201,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 
 	if a.Config.Mode != "live" {
 		// Step C: Initialize your engine using the compiled symbol map
-		a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, func(log *strategy.OptimizationTradeLog) {
+		a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, a.DBWriter, func(log *strategy.OptimizationTradeLog) {
 			// 1. Output a visual stream verification log item
 			logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s | Wick Ratio: %.2f | VWAP Dist: %.4f",
 				log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryWickRatio, log.EntryVwapDistance)

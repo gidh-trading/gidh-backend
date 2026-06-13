@@ -6,7 +6,6 @@ import (
 	"time"
 
 	"gidh-backend/internal/service/models"
-	"gidh-backend/internal/service/writer"
 	"gidh-backend/internal/service/ws"
 )
 
@@ -20,7 +19,6 @@ type BarManager struct {
 	profiles        map[uint32]*models.InstrumentProfile
 	dnaMap          map[uint32]*models.MarketDNA
 	mu              sync.RWMutex
-	writer          *writer.DBWriter
 	wsHub           *ws.Hub
 	analyticsEngine *BarAnalyticsEngine
 	MacroListener   interface{ IngestClosedBar(bar *models.Bar) }
@@ -30,7 +28,7 @@ type candleState struct {
 	bar *models.Bar
 }
 
-func NewBarManager(w *writer.DBWriter, hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile, rawDnaMap map[uint32]*models.MarketDNA) *BarManager {
+func NewBarManager(hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile, rawDnaMap map[uint32]*models.MarketDNA) *BarManager {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 	return &BarManager{
 		loc:             loc,
@@ -41,7 +39,6 @@ func NewBarManager(w *writer.DBWriter, hub *ws.Hub, profiles map[uint32]*models.
 		state15m:        make(map[uint32]*candleState),
 		profiles:        profiles,
 		dnaMap:          rawDnaMap,
-		writer:          w,
 		wsHub:           hub,
 		analyticsEngine: NewBarAnalyticsEngine(rawDnaMap),
 	}
@@ -227,10 +224,6 @@ func (bm *BarManager) updateTimeframe(
 				"type": "bar",
 				"data": closedBar,
 			})
-		}
-
-		if bm.writer != nil {
-			bm.writer.AddBar(*closedBar)
 		}
 
 		if bm.MacroListener != nil {

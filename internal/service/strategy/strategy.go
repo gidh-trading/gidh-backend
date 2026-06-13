@@ -5,6 +5,12 @@ import (
 	"time"
 
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/writer"
+)
+
+const (
+	DecayConstant   = 0.90
+	TriggerLookback = 3
 )
 
 type Engine struct {
@@ -13,14 +19,20 @@ type Engine struct {
 	ActiveStrategy Strategy
 	MaxBarLookback time.Duration
 	profiles       map[string]*models.InstrumentProfile
+	dbWriter       *writer.DBWriter // 🏛️ DBWriter holds direct primary orchestration assignment here now
 
 	// --- 📊 Optimization Logger Integrations ---
 	ActiveTrades     map[string]*OptimizationTradeLog
-	OnTradeCompleted func(log *OptimizationTradeLog) // Hook for database saving / backtest logs
+	OnTradeCompleted func(log *OptimizationTradeLog)
 }
 
-// NewEngine accepts pre-loaded profiles map and an active trade logging callback hook.
-func NewEngine(barLookback time.Duration, profiles map[string]*models.InstrumentProfile, completeHook func(log *OptimizationTradeLog)) *Engine {
+// NewEngine accepts pre-loaded profiles map, trade logging callback hooks, and the dbWriter package.
+func NewEngine(
+	barLookback time.Duration,
+	profiles map[string]*models.InstrumentProfile,
+	dbW *writer.DBWriter,
+	completeHook func(log *OptimizationTradeLog),
+) *Engine {
 	ledgerStrategyCard := NewInstitutionalLedgerStrategy()
 	timeRouterWrapper := NewTimeBasedRouter(ledgerStrategyCard)
 
@@ -30,6 +42,7 @@ func NewEngine(barLookback time.Duration, profiles map[string]*models.Instrument
 		ActiveStrategy:   timeRouterWrapper,
 		MaxBarLookback:   barLookback,
 		profiles:         profiles,
+		dbWriter:         dbW,
 		OnTradeCompleted: completeHook,
 	}
 }
@@ -45,24 +58,39 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 
 	state := e.getOrInitializeState(bar.StockName)
 
-	// 1. 🛡️ MORNING HOOD FILTER: Track boundaries strictly without polluting active state variables
+	// 1. 🛡️ MORNING HOOD FILTER: Protect structural sequential configurations from raw context pollution
 	currentTimeHM := (bar.Timestamp.Hour() * 100) + bar.Timestamp.Minute()
 	if currentTimeHM <= 930 {
-		// Hard stop to protect the sequential counters and efficiency metrics from morning noise
 		return
 	}
 
-	// 2. POST-09:20 AM: Safe, clean-slate metric bookkeeping executions
-	e.updateCoreBarMetrics(state, bar) // Updates metrics and calculates the unified signed efficiency
-	e.trackVwapAcceptance(state, bar)  // Increments consecutive counters cleanly
+	// 2. Compute Core Parameters
+	e.updateCoreBarMetrics(state, bar)
+	e.trackVwapAcceptance(state, bar)
+
+	// 3. 🧠 Process Modular Continuous Decay Ledger Assignments
+	e.ProcessClosedBarLedger(state, bar)
+
+	// 4. 📊 Populate the Enhanced Efficiency Fields inside Bar Objects for Dashboard Visualization
+	bar.Analytics.Efficiency = state.Efficiency
+	bar.Analytics.BullEfficient = state.Ledger.BullEfficient
+	bar.Analytics.BearEfficient = state.Ledger.BearEfficient
+	bar.Analytics.BullAbsorption = state.Ledger.BullAbsorption
+	bar.Analytics.BearAbsorption = state.Ledger.BearAbsorption
+	bar.Analytics.BullVacuum = state.Ledger.BullVacuum
+	bar.Analytics.BearVacuum = state.Ledger.BearVacuum
 
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
 
 	e.appendAndPruneHistory(state, bar)
+
+	// 5. 💾 Commit the Instrumented Candle Directly into Database Batch Buffer
+	if e.dbWriter != nil {
+		e.dbWriter.AddBar(*bar)
+	}
 }
 
-// UpdateContext updates real-time tracking metrics and evaluates active trailing locks
-// and dynamic tick-level entries/exits live on every incoming tick.
+// UpdateContext updates real-time tracking metrics and evaluates live tick parameters
 func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	symbol := enrichedTick.Raw.StockName
@@ -70,7 +98,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	e.updateCoreTickMetrics(state, enrichedTick.Raw)
 
-	// Hard-lock tick execution routing entirely during the opening range window
 	tickTime := enrichedTick.Raw.Timestamp
 	marketHM := (tickTime.Hour() * 100) + tickTime.Minute()
 	if marketHM <= 915 {
@@ -80,7 +107,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
 
-	// Hardcoded strategy parameters
 	adrMultiplier := 0.05
 	isFlatNow := currentSide == "FLAT" || currentSide == ""
 
