@@ -12,8 +12,7 @@ import (
 )
 
 const (
-	DecayConstant   = 0.90
-	TriggerLookback = 3
+	EfficiencySlopeLookback = 4 // Lookback window to calculate the linear regression line
 )
 
 type Engine struct {
@@ -60,6 +59,7 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.updateCoreBarMetrics(state, bar)
 	e.trackVwapAcceptance(state, bar)
 
+	// Update running percentage of time spent above VWAP
 	state.TotalSessionBars++
 	if bar.Close > bar.VWAP {
 		aboveCount := (state.TimePctAboveVwap * float64(state.TotalSessionBars-1)) + 1.0
@@ -69,8 +69,22 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 		state.TimePctAboveVwap = aboveCount / float64(state.TotalSessionBars)
 	}
 
+	// 1. Process ledger calculations first to derive raw underlying dynamics
 	e.ProcessClosedBarLedger(state, bar)
 
+	// 2. Compute Net Efficiency and roll it into the history buffer
+	state.NetEfficiency = bar.Analytics.NetEfficiency
+	state.NetEfficiencyHistory = append(state.NetEfficiencyHistory, state.NetEfficiency)
+
+	// Prune history slice to prevent memory exhaustion
+	if len(state.NetEfficiencyHistory) > EfficiencySlopeLookback {
+		state.NetEfficiencyHistory = state.NetEfficiencyHistory[1:]
+	}
+
+	// Calculate current Slope trend over the window
+	state.NetEfficiencySlope = CalculateLinearRegressionSlope(state.NetEfficiencyHistory)
+
+	// Track Peak PnL for active optimization metrics
 	if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists {
 		var currentUnrealized float64
 		if tradeLog.TradeSide == "LONG" {
@@ -83,9 +97,9 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 		}
 	}
 
-	bar.Analytics.Efficiency = state.Efficiency
-	bar.Analytics.BullEfficient = state.Ledger.BullEfficient
-	bar.Analytics.BearEfficient = state.Ledger.BearEfficient
+	// 3. Assign cleaned metrics to analytics framework containers
+	bar.Analytics.NetEfficiency = state.NetEfficiency
+	bar.Analytics.NetEfficiencySlope = state.NetEfficiencySlope
 
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
 	e.appendAndPruneHistory(state, bar)
@@ -111,7 +125,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		if isFlatNow {
 			signal := e.ActiveStrategy.CheckEntry(state)
 			if signal == "GO_LONG" || signal == "GO_SHORT" {
-				// SOURCE OF TRUTH ENTRY LOGGING
 				e.LogOptimizationEntry(symbol, signal, state)
 			}
 			return signal
@@ -119,7 +132,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 		signal := e.ActiveStrategy.CheckExit(state, currentSide)
 		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
-			// SOURCE OF TRUTH EXIT LOGGING
 			e.LogOptimizationExit(symbol, signal, state)
 		}
 		return signal
@@ -140,8 +152,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
 	e.mu.Unlock()
 
-	// 🛡️ FIX: Bypassed re-evaluation logging hooks inside GenerateSignal entirely.
-	// UpdateContext is now the exclusive owner of active trade logging parameters.
 	isFlatNow := currentSide == "FLAT" || currentSide == ""
 	if isFlatNow {
 		return e.ActiveStrategy.CheckEntry(state)
@@ -175,8 +185,6 @@ func (e *Engine) LogOptimizationEntry(symbol string, signal string, state *Instr
 		EntryTimestamp:    time.Now(),
 		EntryPrice:        state.LatestPrice,
 		EntryVwap:         state.LiveSessionVWAP,
-		EntryVolumeRank:   state.LatestVolumeRank,
-		EntryPriceRank:    state.LatestPriceRank,
 		EntryVwapDistance: state.NormalizedVwapDistance,
 		CreatedAt:         time.Now(),
 	}
@@ -184,7 +192,7 @@ func (e *Engine) LogOptimizationEntry(symbol string, signal string, state *Instr
 	e.ActiveTrades[symbol] = log
 }
 
-// LogOptimizationExit compiles realization analytics and saves records via a direct database connection pool transaction
+// LogOptimizationExit compiles realization analytics and saves records via a direct database transaction
 func (e *Engine) LogOptimizationExit(symbol string, signal string, state *InstrumentState) {
 	e.mu.Lock()
 	tradeLog, exists := e.ActiveTrades[symbol]
@@ -212,11 +220,11 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
+		// Pass clean zero values/placeholders for deleted micro-metrics inside the DB writer contract
 		err := db.LogStrategyOptimizationTrade(
 			ctx, pool, logRecord.Symbol, logRecord.StrategyName, logRecord.TradeSide,
 			logRecord.MinutesSinceOpen, logRecord.EntryTimestamp, logRecord.EntryPrice,
-			logRecord.EntryVwap, logRecord.EntryVolumeRank, logRecord.EntryPriceRank,
-			logRecord.EntryWickRatio, logRecord.EntryVwapDistance, logRecord.ExitTimestamp,
+			logRecord.EntryVwap, 0, 0, 0.0, logRecord.EntryVwapDistance, logRecord.ExitTimestamp,
 			logRecord.ExitPrice, logRecord.ExitReason, logRecord.FinalPnLINR, logRecord.PeakPnLINR,
 		)
 		if err != nil {
@@ -227,4 +235,30 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 	if e.OnTradeCompleted != nil {
 		e.OnTradeCompleted(tradeLog)
 	}
+}
+
+// --- 🛠️ REGRESSION UTILITY HELPERS ---
+
+// CalculateLinearRegressionSlope returns the slope of historical data points over frames
+func CalculateLinearRegressionSlope(values []float64) float64 {
+	n := float64(len(values))
+	if n < 2 {
+		return 0.0 // Requires at least two points to establish a line
+	}
+
+	var sumX, sumY, sumXY, sumXX float64
+	for i, y := range values {
+		x := float64(i)
+		sumX += x
+		sumY += y
+		sumXY += x * y
+		sumXX += x * x
+	}
+
+	denominator := (n * sumXX) - (sumX * sumX)
+	if denominator == 0 {
+		return 0.0
+	}
+
+	return (n*sumXY - sumX*sumY) / denominator
 }

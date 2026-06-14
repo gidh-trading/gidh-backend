@@ -13,36 +13,7 @@ const (
 	PhaseActiveTrade SetupPhase = "ACTIVE_TRADE"
 )
 
-// LedgerState categorizes the structural footprint left by institutional participants on a closed bar.
-type LedgerState string
-
-const (
-	StateEfficientBull  LedgerState = "EFFICIENT_BULL"
-	StateEfficientBear  LedgerState = "EFFICIENT_BEAR"
-	StateBullAbsorption LedgerState = "BULLISH_ABSORPTION"
-	StateBearAbsorption LedgerState = "BEARISH_ABSORPTION"
-	StateBullVacuum     LedgerState = "BULLISH_VACUUM"
-	StateBearVacuum     LedgerState = "BEARISH_VACUUM"
-	StateUndetermined   LedgerState = "UNDETERMINED"
-)
-
-// InstitutionalLedger tracks cumulative institutional pressure via continuous decay (Memory Context).
-type InstitutionalLedger struct {
-	BullEfficient  float64   `json:"bull_efficient"`
-	BearEfficient  float64   `json:"bear_efficient"`
-	BullAbsorption float64   `json:"bull_absorption"`
-	BearAbsorption float64   `json:"bear_absorption"`
-	BullVacuum     float64   `json:"bull_vacuum"`
-	BearVacuum     float64   `json:"bear_vacuum"`
-	LastUpdated    time.Time `json:"last_updated"`
-}
-
-// MicroContext preserves a pristine sequence of immediate past bar behaviors (Tactical Trigger).
-type MicroContext struct {
-	RecentStates []LedgerState `json:"recent_states"` // Sliced rolling window bound to TriggerLookback (e.g., last 3 bars)
-}
-
-// InstrumentState represents the runtime context engine for an individual asset.
+// InstrumentState represents the ultra-lean runtime context engine for an individual asset.
 type InstrumentState struct {
 	// --- Core Identity & Current Snapshots ---
 	Symbol          string    `json:"symbol"`
@@ -50,35 +21,26 @@ type InstrumentState struct {
 	LatestPrice     float64   `json:"latest_price"`
 	LiveSessionVWAP float64   `json:"live_session_vwap"`
 
-	// --- VWAP Regime Counters ---
+	// --- VWAP Regime Counters & Core Metric Vectors ---
 	ConsecutiveClosesAboveVwap int     `json:"consecutive_closes_above_vwap"`
 	ConsecutiveClosesBelowVwap int     `json:"consecutive_closes_below_vwap"`
 	TimePctAboveVwap           float64 `json:"time_pct_above_vwap"`
+	NormalizedVwapDistance     float64 `json:"normalized_vwap_distance"`
 	TotalSessionBars           int     `json:"total_session_bars"`
-	
-	// --- The Single Continuous Efficiency Tracker ---
-	LatestPriceRank  int     `json:"latest_price_rank"`
-	LatestVolumeRank int     `json:"latest_volume_rank"`
-	LatestChangePct  float64 `json:"latest_change_pct"`
-	Efficiency       float64 `json:"efficiency"` // (PriceRank / VolumeRank) * CandleSign
+	LatestChangePct            float64 `json:"latest_change_pct"`
 
-	OpeningRangeHigh   float64 `json:"opening_range_high"` // 09:15-09:30 structural barrier
-	OpeningRangeLow    float64 `json:"opening_range_low"`  // 09:15-09:30 structural barrier
-	OpeningRangeLocked bool    `json:"opening_range_locked"`
-	VwapCrossCount     int     `json:"vwap_cross_count"` // Measures structural chop intensity
-
-	// --- 📊 NEW STRUCTURAL MEMORY & TRIGGER BLOCKS ---
-	Ledger         InstitutionalLedger `json:"ledger"`
-	TriggerContext MicroContext        `json:"trigger_context"`
+	// --- 📊 Simplified Microstructural Core Indicators ---
+	NetEfficiency        float64   `json:"net_efficiency"`         // Consolidated pure institutional net footprints
+	NetEfficiencySlope   float64   `json:"net_efficiency_slope"`   // Linear regression rate of change over recent history
+	NetEfficiencyHistory []float64 `json:"net_efficiency_history"` // Cached trailing rolling window used for slope calculations
 
 	// --- Trade Tracking & Historical Buffers ---
-	CurrentSetupPhase      SetupPhase                `json:"current_setup_phase"`
-	LastTradedBarTime      time.Time                 `json:"last_traded_bar_time"` // 🔒 The Chronological Execution Lock
-	EntryVwapAnchor        float64                   `json:"entry_vwap_anchor"`
-	NormalizedVwapDistance float64                   `json:"normalized_vwap_distance"`
-	PeakVwapExtension      float64                   `json:"peak_vwap_extension"`
-	BarHistory             map[string][]*models.Bar  `json:"bar_history"`
-	Profile                *models.InstrumentProfile `json:"profile"`
+	CurrentSetupPhase SetupPhase                `json:"current_setup_phase"`
+	LastTradedBarTime time.Time                 `json:"last_traded_bar_time"` // 🔒 The Chronological Execution Lock
+	EntryVwapAnchor   float64                   `json:"entry_vwap_anchor"`
+	PeakVwapExtension float64                   `json:"peak_vwap_extension"`
+	BarHistory        map[string][]*models.Bar  `json:"bar_history"`
+	Profile           *models.InstrumentProfile `json:"profile"`
 }
 
 // OptimizationTradeLog holds the freeze-frame microstructural variables

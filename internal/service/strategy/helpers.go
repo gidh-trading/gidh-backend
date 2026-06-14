@@ -7,131 +7,30 @@ import (
 	"gidh-backend/internal/service/models"
 )
 
-// ProcessClosedBarLedger applies structural calculations and updates the persistent decayed registers.
+// ProcessClosedBarLedger applies structural calculations and updates the persistent indicators
 func (e *Engine) ProcessClosedBarLedger(state *InstrumentState, bar *models.Bar) {
-	// 1. Decay existing registers smoothly (No dropout cliffs)
-	state.Ledger.BullEfficient *= DecayConstant
-	state.Ledger.BearEfficient *= DecayConstant
-	state.Ledger.BullAbsorption *= DecayConstant
-	state.Ledger.BearAbsorption *= DecayConstant
-	state.Ledger.BullVacuum *= DecayConstant
-	state.Ledger.BearVacuum *= DecayConstant
+	// 1. If your upstream pipeline passes pre-calculated analytics, protect it here.
+	// Otherwise, calculate the raw net efficiency for this single bar context.
+	if bar.Analytics.NetEfficiency == 0 {
+		// Fallback baseline calculation using price vs volume metrics
+		energy := float64(bar.Analytics.VolumeRank * bar.Analytics.PriceRank)
+		delta := bar.Analytics.PriceRank - bar.Analytics.VolumeRank
 
-	// 2. Derive delta edge and full energy footprint using internal analytics ranks
-	energy := float64(bar.Analytics.VolumeRank * bar.Analytics.PriceRank)
-	delta := bar.Analytics.PriceRank - bar.Analytics.VolumeRank
-
-	var currentState LedgerState = StateUndetermined
-
-	// 3. Classify and allocate raw energy values based on Auction Framework directions
-	switch bar.Analytics.Direction {
-	case models.DirStrongBullish, models.DirBullish:
-		if math.Abs(float64(delta)) <= 1 {
-			currentState = StateEfficientBull
-			state.Ledger.BullEfficient += energy
-		} else if delta > 1 {
-			currentState = StateBullVacuum
-			state.Ledger.BullVacuum += energy
-		}
-
-	case models.DirStrongBearish, models.DirBearish:
-		if math.Abs(float64(delta)) <= 1 {
-			currentState = StateEfficientBear
-			state.Ledger.BearEfficient += energy
-		} else if delta > 1 {
-			currentState = StateBearVacuum
-			state.Ledger.BearVacuum += energy
-		}
-
-	case models.DirBullishAbsorption:
-		currentState = StateBullAbsorption
-		state.Ledger.BullAbsorption += energy
-
-	case models.DirBearishAbsorption:
-		currentState = StateBearAbsorption
-		state.Ledger.BearAbsorption += energy
-	}
-
-	state.Ledger.LastUpdated = bar.Timestamp
-
-	// 4. Update the MicroContext Tactical Trigger Array
-	state.TriggerContext.RecentStates = append(state.TriggerContext.RecentStates, currentState)
-
-	// Clamp rolling slice length to the constant TriggerLookback parameters
-	if len(state.TriggerContext.RecentStates) > TriggerLookback {
-		state.TriggerContext.RecentStates = state.TriggerContext.RecentStates[1:]
-	}
-}
-
-func (e *Engine) updateCoreBarMetrics(state *InstrumentState, bar *models.Bar) {
-	state.LatestPrice = bar.Close
-	state.LiveSessionVWAP = bar.VWAP
-	state.LatestPriceRank = bar.Analytics.PriceRank
-	state.LatestVolumeRank = bar.Analytics.VolumeRank
-	state.LastUpdated = bar.Timestamp
-
-	if bar.Analytics.VolumeRank > 0 {
-		sign := 1.0
-		if bar.Close < bar.Open {
+		// Establish structural sign allocation base
+		sign := 0.0
+		if bar.Analytics.Direction == models.DirStrongBullish || bar.Analytics.Direction == models.DirBullish {
+			sign = 1.0
+		} else if bar.Analytics.Direction == models.DirStrongBearish || bar.Analytics.Direction == models.DirBearish {
 			sign = -1.0
 		}
-		state.Efficiency = (float64(bar.Analytics.PriceRank) / float64(bar.Analytics.VolumeRank)) * sign
+
+		// Close tracking alignment parameters
+		if math.Abs(float64(delta)) <= 1 {
+			bar.Analytics.NetEfficiency = energy * sign
+		} else {
+			bar.Analytics.NetEfficiency = (energy * 0.5) * sign // Reduce impact of vacuum/chase bars
+		}
 	}
-}
-
-func (e *Engine) trackVwapAcceptance(state *InstrumentState, bar *models.Bar) {
-	if bar.Close > bar.VWAP {
-		state.ConsecutiveClosesAboveVwap++
-		state.ConsecutiveClosesBelowVwap = 0
-	} else if bar.Close < bar.VWAP {
-		state.ConsecutiveClosesBelowVwap++
-		state.ConsecutiveClosesAboveVwap = 0
-	} else {
-		state.ConsecutiveClosesAboveVwap = 0
-		state.ConsecutiveClosesBelowVwap = 0
-	}
-}
-
-func (e *Engine) calculateNormalizedDistance(price, vwap float64, profile *models.InstrumentProfile) float64 {
-	if vwap == 0 {
-		return 0
-	}
-	return (price - vwap) / vwap
-}
-
-func (e *Engine) appendAndPruneHistory(state *InstrumentState, bar *models.Bar) {
-	state.BarHistory[state.Symbol] = append(state.BarHistory[state.Symbol], bar)
-	if len(state.BarHistory[state.Symbol]) > 100 {
-		state.BarHistory[state.Symbol] = state.BarHistory[state.Symbol][1:]
-	}
-}
-
-func (e *Engine) updateCoreTickMetrics(state *InstrumentState, tick models.TickData) {
-	state.LatestPrice = tick.LastPrice
-	state.LastUpdated = tick.Timestamp
-}
-
-func (e *Engine) evaluateFlatTickEntry(state *InstrumentState, adrMult float64) string {
-	return "HOLD"
-}
-
-func (e *Engine) evaluateActiveTickPosition(state *InstrumentState, symbol, side string, avgPrice float64, qty int, adrMult float64) string {
-	return "HOLD"
-}
-
-func (e *Engine) updateSignalPhaseAndExtensions(state *InstrumentState, side string, avgPrice float64, qty int) {
-	if qty == 0 {
-		state.CurrentSetupPhase = PhaseNeutral
-	} else {
-		state.CurrentSetupPhase = PhaseActiveTrade
-	}
-}
-
-func (e *Engine) processNeutralSignalRoute(symbol string, state *InstrumentState) string {
-	if e.ActiveStrategy != nil {
-		return e.ActiveStrategy.CheckEntry(state)
-	}
-	return "HOLD"
 }
 
 func (e *Engine) processActiveSignalRoute(symbol string, state *InstrumentState, side string, avgPrice float64, qty int) string {
@@ -150,12 +49,12 @@ func (e *Engine) getOrInitializeState(symbol string) *InstrumentState {
 	state, exists := e.Registry[symbol]
 	if !exists {
 		state = &InstrumentState{
-			Symbol:            symbol,
-			CurrentSetupPhase: PhaseNeutral,
-			BarHistory:        make(map[string][]*models.Bar),
-			TriggerContext: MicroContext{
-				RecentStates: make([]LedgerState, 0, TriggerLookback),
-			},
+			Symbol:               symbol,
+			CurrentSetupPhase:    PhaseNeutral,
+			BarHistory:           make(map[string][]*models.Bar),
+			NetEfficiencyHistory: make([]float64, 0, 10), // Lightweight rolling sequence buffer allocation
+			NetEfficiency:        0.0,
+			NetEfficiencySlope:   0.0,
 		}
 		if profile, ok := e.profiles[symbol]; ok {
 			state.Profile = profile
@@ -163,4 +62,77 @@ func (e *Engine) getOrInitializeState(symbol string) *InstrumentState {
 		e.Registry[symbol] = state
 	}
 	return state
+}
+
+func (e *Engine) updateCoreBarMetrics(state *InstrumentState, bar *models.Bar) {
+	state.LatestPrice = bar.Close
+	state.LiveSessionVWAP = bar.VWAP
+	state.LastUpdated = bar.Timestamp
+}
+
+func (e *Engine) updateCoreTickMetrics(state *InstrumentState, tick models.TickData) {
+	state.LatestPrice = tick.LastPrice
+	state.LastUpdated = tick.Timestamp
+}
+
+func (e *Engine) trackVwapAcceptance(state *InstrumentState, bar *models.Bar) {
+	if bar.Close > bar.VWAP {
+		state.ConsecutiveClosesAboveVwap++
+		state.ConsecutiveClosesBelowVwap = 0
+	} else if bar.Close < bar.VWAP {
+		state.ConsecutiveClosesBelowVwap++
+		state.ConsecutiveClosesAboveVwap = 0
+	} else {
+		state.ConsecutiveClosesAboveVwap = 0
+		state.ConsecutiveClosesBelowVwap = 0
+	}
+}
+
+// calculateNormalizedDistance maps structural deviations against ADRPct expected boundary frameworks
+func (e *Engine) calculateNormalizedDistance(price float64, vwap float64, profile *models.InstrumentProfile) float64 {
+	if vwap == 0 || profile == nil || profile.ADRPct == 0 {
+		return 0.0
+	}
+
+	// Convert asset daily percentage expectation to localized pricing currency values
+	// e.g., standard baseline expected currency variance threshold
+	expectedDailyVarianceRange := vwap * (profile.ADRPct / 100.0)
+	if expectedDailyVarianceRange == 0 {
+		return 0.0
+	}
+
+	// Returns normalized contextual variance band ratios relative to basic index anchors
+	return (price - vwap) / expectedDailyVarianceRange
+}
+
+func (e *Engine) appendAndPruneHistory(state *InstrumentState, bar *models.Bar) {
+	timeframe := bar.Timeframe
+	state.BarHistory[timeframe] = append(state.BarHistory[timeframe], bar)
+
+	// Trim trailing tail blocks to strictly avoid memory leak accumulation profiles
+	maxBars := int(e.MaxBarLookback / time.Minute)
+	if maxBars <= 0 {
+		maxBars = 100 // Safe operational fall-back
+	}
+	if len(state.BarHistory[timeframe]) > maxBars {
+		state.BarHistory[timeframe] = state.BarHistory[timeframe][1:]
+	}
+}
+
+func (e *Engine) updateSignalPhaseAndExtensions(state *InstrumentState, currentSide string, averagePrice float64, netQty int) {
+	if currentSide == "FLAT" || currentSide == "" || netQty == 0 {
+		state.CurrentSetupPhase = PhaseNeutral
+		state.EntryVwapAnchor = 0.0
+		state.PeakVwapExtension = 0.0
+	} else {
+		state.CurrentSetupPhase = PhaseActiveTrade
+		if state.EntryVwapAnchor == 0 {
+			state.EntryVwapAnchor = state.LiveSessionVWAP
+		}
+
+		dist := math.Abs(state.NormalizedVwapDistance)
+		if dist > state.PeakVwapExtension {
+			state.PeakVwapExtension = dist
+		}
+	}
 }
