@@ -106,9 +106,12 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	}
 
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
-
 	adrMultiplier := 0.05
 	isFlatNow := currentSide == "FLAT" || currentSide == ""
+
+	// Unlock right before routing out to validation evaluations
+	// to ensure downstream execution can safely call GenerateSignal if needed
+	e.mu.Unlock()
 
 	if isFlatNow {
 		return e.evaluateFlatTickEntry(state, adrMultiplier)
