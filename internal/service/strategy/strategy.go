@@ -1,11 +1,14 @@
 package strategy
 
 import (
+	"context"
 	"sync"
 	"time"
 
+	"gidh-backend/internal/service/db"
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
+	"gidh-backend/pkg/logger"
 )
 
 const (
@@ -19,7 +22,7 @@ type Engine struct {
 	ActiveStrategy Strategy
 	MaxBarLookback time.Duration
 	profiles       map[string]*models.InstrumentProfile
-	dbWriter       *writer.DBWriter // 🏛️ DBWriter holds direct primary orchestration assignment here now
+	dbWriter       *writer.DBWriter
 
 	// --- 📊 Optimization Logger Integrations ---
 	ActiveTrades     map[string]*OptimizationTradeLog
@@ -49,88 +52,97 @@ func NewEngine(
 
 // IngestClosedBar caches historical timeframes and computes metrics upon bar close
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
-	if e.isBeforeMarketOpen(bar) {
-		return
-	}
-
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
 	state := e.getOrInitializeState(bar.StockName)
 
-	// 1. 🛡️ MORNING HOOD FILTER: Protect structural sequential configurations from raw context pollution
-	currentTimeHM := (bar.Timestamp.Hour() * 100) + bar.Timestamp.Minute()
-	if currentTimeHM <= 930 {
-		return
-	}
-
-	// 2. Compute Core Parameters
 	e.updateCoreBarMetrics(state, bar)
 	e.trackVwapAcceptance(state, bar)
 
-	// 3. 🧠 Process Modular Continuous Decay Ledger Assignments
+	state.TotalSessionBars++
+	if bar.Close > bar.VWAP {
+		aboveCount := (state.TimePctAboveVwap * float64(state.TotalSessionBars-1)) + 1.0
+		state.TimePctAboveVwap = aboveCount / float64(state.TotalSessionBars)
+	} else {
+		aboveCount := (state.TimePctAboveVwap * float64(state.TotalSessionBars-1))
+		state.TimePctAboveVwap = aboveCount / float64(state.TotalSessionBars)
+	}
+
 	e.ProcessClosedBarLedger(state, bar)
 
-	// 4. 📊 Populate the Enhanced Efficiency Fields inside Bar Objects for Dashboard Visualization
+	// Update peak tracking performance parameters
+	if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists {
+		var currentUnrealized float64
+		if tradeLog.TradeSide == "LONG" {
+			currentUnrealized = (bar.Close - tradeLog.EntryPrice)
+		} else if tradeLog.TradeSide == "SHORT" {
+			currentUnrealized = (tradeLog.EntryPrice - bar.Close)
+		}
+		if currentUnrealized > tradeLog.PeakPnLINR {
+			tradeLog.PeakPnLINR = currentUnrealized
+		}
+	}
+
 	bar.Analytics.Efficiency = state.Efficiency
 	bar.Analytics.BullEfficient = state.Ledger.BullEfficient
 	bar.Analytics.BearEfficient = state.Ledger.BearEfficient
-	bar.Analytics.BullAbsorption = state.Ledger.BullAbsorption
-	bar.Analytics.BearAbsorption = state.Ledger.BearAbsorption
-	bar.Analytics.BullVacuum = state.Ledger.BullVacuum
-	bar.Analytics.BearVacuum = state.Ledger.BearVacuum
 
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
-
 	e.appendAndPruneHistory(state, bar)
 
-	// 5. 💾 Commit the Instrumented Candle Directly into Database Batch Buffer
 	if e.dbWriter != nil {
 		e.dbWriter.AddBar(*bar)
 	}
 }
 
-// UpdateContext updates real-time tracking metrics and evaluates live tick parameters
+// UpdateContext acts as the EXCLUSIVE SOLE OWNER of trade lifecycle tracking and order routing evaluation
 func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	symbol := enrichedTick.Raw.StockName
 	state := e.getOrInitializeState(symbol)
 
 	e.updateCoreTickMetrics(state, enrichedTick.Raw)
-
-	tickTime := enrichedTick.Raw.Timestamp
-	marketHM := (tickTime.Hour() * 100) + tickTime.Minute()
-	if marketHM <= 915 {
-		e.mu.Unlock()
-		return "HOLD"
-	}
-
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
-	adrMultiplier := 0.05
-	isFlatNow := currentSide == "FLAT" || currentSide == ""
 
-	// Unlock right before routing out to validation evaluations
-	// to ensure downstream execution can safely call GenerateSignal if needed
+	isFlatNow := currentSide == "FLAT" || currentSide == ""
 	e.mu.Unlock()
 
-	if isFlatNow {
-		return e.evaluateFlatTickEntry(state, adrMultiplier)
+	if e.ActiveStrategy != nil {
+		if isFlatNow {
+			signal := e.ActiveStrategy.CheckEntry(state)
+			if signal == "GO_LONG" || signal == "GO_SHORT" {
+				e.LogOptimizationEntry(symbol, signal, state)
+			}
+			return signal
+		}
+
+		// If in an active position, evaluate dynamic trailing profit locks or strategy trend flips
+		signal := e.ActiveStrategy.CheckExit(state, currentSide)
+
+		// Fallback check: If strategy interface registers a trailing lock protection event, execute exit
+		if signal == "HOLD" && e.ActiveStrategy.CheckTrailingProfitLock(state, currentSide) {
+			if currentSide == "LONG" {
+				signal = "EXIT_LONG"
+			} else {
+				signal = "EXIT_SHORT"
+			}
+		}
+
+		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
+			e.LogOptimizationExit(symbol, signal, state)
+		}
+		return signal
 	}
 
-	return e.evaluateActiveTickPosition(state, symbol, currentSide, averagePrice, netQty, adrMultiplier)
+	return "HOLD"
 }
 
-// GenerateSignal handles execution tracking and logs freeze-frame microstructural metrics
+// GenerateSignal handles execution tracking without re-evaluating strategy signals
 func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	state, exists := e.Registry[symbol]
-	if !exists || e.ActiveStrategy == nil {
-		e.mu.Unlock()
-		return "HOLD"
-	}
-
-	currentTimeHM := (state.LastUpdated.Hour() * 100) + state.LastUpdated.Minute()
-	if currentTimeHM <= 930 {
+	if !exists {
 		e.mu.Unlock()
 		return "HOLD"
 	}
@@ -138,9 +150,87 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
 	e.mu.Unlock()
 
-	if state.CurrentSetupPhase == PhaseNeutral {
-		return e.processNeutralSignalRoute(symbol, state)
+	// 🛡️ CRITICAL FIX: Generates direct routing pass-through without firing logging hooks.
+	// This completely maps out and stops the duplicated ghost logs seen across your database tables.
+	return "HOLD"
+}
+
+// LogOptimizationEntry snapshots critical microstructural properties on signal execution
+func (e *Engine) LogOptimizationEntry(symbol string, signal string, state *InstrumentState) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if _, exists := e.ActiveTrades[symbol]; exists {
+		return
 	}
 
-	return e.processActiveSignalRoute(symbol, state, currentSide, averagePrice, netQty)
+	tradeSide := "LONG"
+	if signal == "GO_SHORT" {
+		tradeSide = "SHORT"
+	}
+
+	strategyName := "Institutional_Ledger"
+	if e.ActiveStrategy != nil {
+		strategyName = e.ActiveStrategy.Name()
+	}
+
+	log := &OptimizationTradeLog{
+		Symbol:            symbol,
+		StrategyName:      strategyName,
+		TradeSide:         tradeSide,
+		EntryTimestamp:    time.Now(),
+		EntryPrice:        state.LatestPrice,
+		EntryVwap:         state.LiveSessionVWAP,
+		EntryVolumeRank:   state.LatestVolumeRank,
+		EntryPriceRank:    state.LatestPriceRank,
+		EntryVwapDistance: state.NormalizedVwapDistance,
+		CreatedAt:         time.Now(),
+	}
+
+	e.ActiveTrades[symbol] = log
+}
+
+// LogOptimizationExit compiles realization analytics and saves records via a direct database connection pool transaction
+func (e *Engine) LogOptimizationExit(symbol string, signal string, state *InstrumentState) {
+	e.mu.Lock()
+	tradeLog, exists := e.ActiveTrades[symbol]
+	if !exists {
+		e.mu.Unlock()
+		return
+	}
+	delete(e.ActiveTrades, symbol)
+	e.mu.Unlock()
+
+	tradeLog.ExitTimestamp = time.Now()
+	tradeLog.ExitPrice = state.LatestPrice
+	tradeLog.ExitReason = signal
+
+	var finalPnL float64
+	if tradeLog.TradeSide == "LONG" {
+		finalPnL = tradeLog.ExitPrice - tradeLog.EntryPrice
+	} else {
+		finalPnL = tradeLog.EntryPrice - tradeLog.ExitPrice
+	}
+	tradeLog.FinalPnLINR = finalPnL
+
+	go func(logRecord *OptimizationTradeLog) {
+		pool := db.GetPool()
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err := db.LogStrategyOptimizationTrade(
+			ctx, pool, logRecord.Symbol, logRecord.StrategyName, logRecord.TradeSide,
+			logRecord.MinutesSinceOpen, logRecord.EntryTimestamp, logRecord.EntryPrice,
+			logRecord.EntryVwap, logRecord.EntryVolumeRank, logRecord.EntryPriceRank,
+			logRecord.EntryWickRatio, logRecord.EntryVwapDistance, logRecord.ExitTimestamp,
+			logRecord.ExitPrice, logRecord.ExitReason, logRecord.FinalPnLINR, logRecord.PeakPnLINR,
+		)
+		if err != nil {
+			logger.Errorf("🚨 Optimization Engine direct write failed for %s: %v", logRecord.Symbol, err)
+		}
+	}(tradeLog)
+
+	if e.OnTradeCompleted != nil {
+		e.OnTradeCompleted(tradeLog)
+	}
 }

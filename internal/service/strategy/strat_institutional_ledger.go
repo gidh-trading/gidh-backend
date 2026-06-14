@@ -1,101 +1,120 @@
 package strategy
 
 type InstitutionalLedgerStrategy struct {
-	VwapBufferPct float64 // Pullback execution cushion zone (0.0015 = 0.15% cushion around VWAP)
+	VwapBufferPct float64
 }
 
-// NewInstitutionalLedgerStrategy instantiates our streamlined volume-ledger strategy.
 func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
 	return &InstitutionalLedgerStrategy{
-		VwapBufferPct: 0.0015, //
+		VwapBufferPct: 0.0012, // Lowered base threshold for tight value optimization
 	}
 }
 
 func (s *InstitutionalLedgerStrategy) Name() string {
-	return "Institutional_Ledger_VWAP_Acceptance" //
+	return "Institutional_Ledger_Alpha_Tuned"
 }
 
-// CheckEntry evaluates the active breakout and time-decayed signed efficiency rules.
+// CheckEntry evaluates pure institutional footprints with strict anti-chasing locks.
 func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string {
-
-	// 🚨 ANTI-CHOP DEFENSE MECHANISM
-	// If it keeps whip-sawing across VWAP, the setup is mathematically broken
-	//if state.VwapCrossCount > 4 {
-	//	return "HOLD"
-	//}
-
-	// Ensure our structural metrics are warmed up and established
-	//if state.OpeningRangeHigh == 0 {
-	//	return "HOLD"
-	//}
-
-	// 1. Core Chronological Lock Gate: Block entry if we already traded this exact bar minute
+	// 1. 🔒 CHRONOLOGICAL LOCK GATE
 	if !state.LastTradedBarTime.IsZero() && state.LastUpdated.Equal(state.LastTradedBarTime) {
 		return "HOLD"
 	}
 
-	// --- 🟢 STRUCTURAL LONG ENTRY TRIGGER ---
-	if state.ConsecutiveClosesAboveVwap >= 3 { // Upgraded confirmation barrier
-		if state.Ledger.BullEfficient-state.Ledger.BearEfficient > 30 {
-			return "GO_LONG"
-		}
+	// 2. 🛡️ ANTI-CHOP DEFENSE GATE
+	if state.VwapCrossCount > 3 { // Tightened from 4 to cut down noise trading
+		return "HOLD"
+	}
 
+	netEfficiency := state.Ledger.BullEfficient - state.Ledger.BearEfficient
+
+	// --- 🟢 STRUCTURAL LONG ENTRY TRIGGER ---
+	if state.ConsecutiveClosesAboveVwap >= 3 {
+		if netEfficiency > 8 && netEfficiency < 30 { // Bounded tighter to avoid chasing peaks
+
+			// Only buy if we are close to the VWAP anchor (Value Entry)
+			if state.NormalizedVwapDistance > 0 && state.NormalizedVwapDistance < 1.5 {
+				if state.TimePctAboveVwap > 0.35 && state.TimePctAboveVwap < 0.75 {
+					return "GO_LONG"
+				}
+			}
+		}
 	}
 
 	// --- 🔴 STRUCTURAL SHORT ENTRY TRIGGER ---
-	if state.ConsecutiveClosesBelowVwap >= 3 { // Upgraded confirmation barrier
-		if state.Ledger.BullEfficient-state.Ledger.BearEfficient < -30 {
-			return "GO_SHORT"
+	if state.ConsecutiveClosesBelowVwap >= 3 {
+		if netEfficiency < -8 && netEfficiency > -30 {
+
+			// Only short if we are near the breakdown value anchor
+			if state.NormalizedVwapDistance < 0 && state.NormalizedVwapDistance > -1.5 {
+				if state.TimePctAboveVwap < 0.25 {
+					return "GO_SHORT"
+				}
+			}
 		}
-
 	}
 
 	return "HOLD"
 }
 
-// CheckExit handles continuous microstructural trend flip checks while in an active trade
+// CheckExit protects performance by implementing an immediate Microstructural Profit Lock
 func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	// 1. Core Price-Action Invalidation (VWAP Invalidation Cushion remains)
-	if currentSide == "LONG" && state.LatestPrice < (state.LiveSessionVWAP*(1.0-s.VwapBufferPct)) {
-		return "EXIT_LONG"
-	}
-	if currentSide == "SHORT" && state.LatestPrice > (state.LiveSessionVWAP*(1.0+s.VwapBufferPct)) {
-		return "EXIT_SHORT"
+	netEfficiency := state.Ledger.BullEfficient - state.Ledger.BearEfficient
+
+	// Dynamically adjust the cushion based on the stock's price rank to avoid fast stop-outs
+	dynamicCushion := s.VwapBufferPct
+	if state.LatestPriceRank > 5 {
+		dynamicCushion = s.VwapBufferPct * 1.5 // Expand buffer slightly for higher-velocity names
 	}
 
-	// 2. ⏳ ADVANCED SPEED-DECAY EXIT RULE
-	// If efficiency goes flat (near 0) while volume stays low, the institutional push has evaporated.
-	// Don't wait for a crash—exit the trade early to lock in structural rotation.
-	if currentSide == "LONG" && state.Efficiency < 0.2 && state.LatestVolumeRank < 5 {
-		return "EXIT_LONG"
-	}
-	if currentSide == "SHORT" && state.Efficiency > -0.2 && state.LatestVolumeRank < 5 {
-		return "EXIT_SHORT"
+	if currentSide == "LONG" {
+		// 1. Core Price-Action Invalidation
+		if state.LatestPrice < (state.LiveSessionVWAP * (1.0 - dynamicCushion)) {
+			return "EXIT_LONG"
+		}
+		// 2. Momentum Evaporation Filter
+		if netEfficiency <= -2 {
+			return "EXIT_LONG"
+		}
+		// 3. Volatility Extension Climax Cap
+		if state.NormalizedVwapDistance > 2.8 { // Lowered from 3.5 to lock gains earlier
+			return "EXIT_LONG"
+		}
 	}
 
-	// 3. Dynamic Directional Cross-Pollution Guard
-	if currentSide == "LONG" && state.Efficiency <= -0.6 { // Tightened from -0.8
-		return "EXIT_LONG"
-	}
-	if currentSide == "SHORT" && state.Efficiency >= 0.6 { // Tightened from 0.8
-		return "EXIT_SHORT"
+	if currentSide == "SHORT" {
+		// 1. Core Price-Action Invalidation
+		if state.LatestPrice > (state.LiveSessionVWAP * (1.0 + dynamicCushion)) {
+			return "EXIT_SHORT"
+		}
+		// 2. Momentum Evaporation Filter
+		if netEfficiency >= 2 {
+			return "EXIT_SHORT"
+		}
+		// 3. Volatility Extension Climax Cap
+		if state.NormalizedVwapDistance < -2.8 {
+			return "EXIT_SHORT"
+		}
 	}
 
 	return "HOLD"
 }
 
-// CheckTrailingProfitLock handles trailing retracements.
-// 🟢 Bypassed for now to prioritize your fixed INR target.
+// CheckTrailingProfitLock forces an exit if the strategy starts giving back open profits
 func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
+	// If a position has printed significant structural extension, lock it down
+	if currentSide == "LONG" && state.NormalizedVwapDistance > 1.8 && state.Efficiency < 0.1 {
+		return true // Force execution trailing lock
+	}
+	if currentSide == "SHORT" && state.NormalizedVwapDistance < -1.8 && state.Efficiency > -0.1 {
+		return true
+	}
 	return false
 }
 
-// CheckTakeProfit triggers an immediate exit the moment cash PnL hits or exceeds 500 INR
-func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool { //
+func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	return false
 }
-
-// CheckStopLoss handles fixed risk protection using the instrument's ADR profile
 func (s *InstitutionalLedgerStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	return false
 }

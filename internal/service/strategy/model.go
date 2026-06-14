@@ -51,9 +51,11 @@ type InstrumentState struct {
 	LiveSessionVWAP float64   `json:"live_session_vwap"`
 
 	// --- VWAP Regime Counters ---
-	ConsecutiveClosesAboveVwap int `json:"consecutive_closes_above_vwap"`
-	ConsecutiveClosesBelowVwap int `json:"consecutive_closes_below_vwap"`
-
+	ConsecutiveClosesAboveVwap int     `json:"consecutive_closes_above_vwap"`
+	ConsecutiveClosesBelowVwap int     `json:"consecutive_closes_below_vwap"`
+	TimePctAboveVwap           float64 `json:"time_pct_above_vwap"`
+	TotalSessionBars           int     `json:"total_session_bars"`
+	
 	// --- The Single Continuous Efficiency Tracker ---
 	LatestPriceRank  int     `json:"latest_price_rank"`
 	LatestVolumeRank int     `json:"latest_volume_rank"`
