@@ -36,8 +36,6 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 
 	// --- 🟢 STRUCTURAL LONG ENTRY TRIGGER ---
 	if state.ConsecutiveClosesAboveVwap >= 3 { // Upgraded confirmation barrier
-		// Condition: Price must break the 09:30 morning resistance ceiling
-		// Condition: Order volume check paired with un-decayed trend momentum footprint
 		if state.Ledger.BullEfficient-state.Ledger.BearEfficient > 30 {
 			return "GO_LONG"
 		}
@@ -46,7 +44,6 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 
 	// --- 🔴 STRUCTURAL SHORT ENTRY TRIGGER ---
 	if state.ConsecutiveClosesBelowVwap >= 3 { // Upgraded confirmation barrier
-		// Condition: Price must puncture under the 09:30 morning floor line
 		if state.Ledger.BullEfficient-state.Ledger.BearEfficient < -30 {
 			return "GO_SHORT"
 		}
