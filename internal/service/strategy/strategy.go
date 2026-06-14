@@ -71,7 +71,6 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 
 	e.ProcessClosedBarLedger(state, bar)
 
-	// Update peak tracking performance parameters
 	if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists {
 		var currentUnrealized float64
 		if tradeLog.TradeSide == "LONG" {
@@ -96,7 +95,7 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	}
 }
 
-// UpdateContext acts as the EXCLUSIVE SOLE OWNER of trade lifecycle tracking and order routing evaluation
+// UpdateContext updates real-time tracking metrics and evaluates live tick parameters
 func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	symbol := enrichedTick.Raw.StockName
@@ -112,24 +111,15 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		if isFlatNow {
 			signal := e.ActiveStrategy.CheckEntry(state)
 			if signal == "GO_LONG" || signal == "GO_SHORT" {
+				// SOURCE OF TRUTH ENTRY LOGGING
 				e.LogOptimizationEntry(symbol, signal, state)
 			}
 			return signal
 		}
 
-		// If in an active position, evaluate dynamic trailing profit locks or strategy trend flips
 		signal := e.ActiveStrategy.CheckExit(state, currentSide)
-
-		// Fallback check: If strategy interface registers a trailing lock protection event, execute exit
-		if signal == "HOLD" && e.ActiveStrategy.CheckTrailingProfitLock(state, currentSide) {
-			if currentSide == "LONG" {
-				signal = "EXIT_LONG"
-			} else {
-				signal = "EXIT_SHORT"
-			}
-		}
-
 		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
+			// SOURCE OF TRUTH EXIT LOGGING
 			e.LogOptimizationExit(symbol, signal, state)
 		}
 		return signal
@@ -138,11 +128,11 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	return "HOLD"
 }
 
-// GenerateSignal handles execution tracking without re-evaluating strategy signals
+// GenerateSignal handles execution tracking and logs freeze-frame microstructural metrics
 func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	state, exists := e.Registry[symbol]
-	if !exists {
+	if !exists || e.ActiveStrategy == nil {
 		e.mu.Unlock()
 		return "HOLD"
 	}
@@ -150,9 +140,13 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
 	e.mu.Unlock()
 
-	// 🛡️ CRITICAL FIX: Generates direct routing pass-through without firing logging hooks.
-	// This completely maps out and stops the duplicated ghost logs seen across your database tables.
-	return "HOLD"
+	// 🛡️ FIX: Bypassed re-evaluation logging hooks inside GenerateSignal entirely.
+	// UpdateContext is now the exclusive owner of active trade logging parameters.
+	isFlatNow := currentSide == "FLAT" || currentSide == ""
+	if isFlatNow {
+		return e.ActiveStrategy.CheckEntry(state)
+	}
+	return e.ActiveStrategy.CheckExit(state, currentSide)
 }
 
 // LogOptimizationEntry snapshots critical microstructural properties on signal execution
