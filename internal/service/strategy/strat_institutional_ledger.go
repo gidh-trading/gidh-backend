@@ -20,14 +20,14 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 
 	// 🚨 ANTI-CHOP DEFENSE MECHANISM
 	// If it keeps whip-sawing across VWAP, the setup is mathematically broken
-	if state.VwapCrossCount > 4 {
-		return "HOLD"
-	}
+	//if state.VwapCrossCount > 4 {
+	//	return "HOLD"
+	//}
 
 	// Ensure our structural metrics are warmed up and established
-	if state.OpeningRangeHigh == 0 {
-		return "HOLD"
-	}
+	//if state.OpeningRangeHigh == 0 {
+	//	return "HOLD"
+	//}
 
 	// 1. Core Chronological Lock Gate: Block entry if we already traded this exact bar minute
 	if !state.LastTradedBarTime.IsZero() && state.LastUpdated.Equal(state.LastTradedBarTime) {
@@ -37,22 +37,20 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	// --- 🟢 STRUCTURAL LONG ENTRY TRIGGER ---
 	if state.ConsecutiveClosesAboveVwap >= 3 { // Upgraded confirmation barrier
 		// Condition: Price must break the 09:30 morning resistance ceiling
-		if state.LatestPrice > state.OpeningRangeHigh {
-			// Condition: Order volume check paired with un-decayed trend momentum footprint
-			if state.LatestVolumeRank >= 6 && state.Efficiency >= 0.8 {
-				return "GO_LONG"
-			}
+		// Condition: Order volume check paired with un-decayed trend momentum footprint
+		if state.Ledger.BullEfficient-state.Ledger.BearEfficient > 30 {
+			return "GO_LONG"
 		}
+
 	}
 
 	// --- 🔴 STRUCTURAL SHORT ENTRY TRIGGER ---
 	if state.ConsecutiveClosesBelowVwap >= 3 { // Upgraded confirmation barrier
 		// Condition: Price must puncture under the 09:30 morning floor line
-		if state.LatestPrice < state.OpeningRangeLow {
-			if state.LatestVolumeRank >= 6 && state.Efficiency <= -0.8 {
-				return "GO_SHORT"
-			}
+		if state.Ledger.BullEfficient-state.Ledger.BearEfficient < -30 {
+			return "GO_SHORT"
 		}
+
 	}
 
 	return "HOLD"
