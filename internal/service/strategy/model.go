@@ -5,7 +5,6 @@ import (
 	"time"
 )
 
-// SetupPhase defines the state machine flags for active execution tracking.
 type SetupPhase string
 
 const (
@@ -13,7 +12,12 @@ const (
 	PhaseActiveTrade SetupPhase = "ACTIVE_TRADE"
 )
 
-// InstrumentState represents the ultra-lean runtime context engine for an individual asset.
+type InstitutionalLedger struct {
+	BullEfficient float64   `json:"bull_efficient"`
+	BearEfficient float64   `json:"bear_efficient"`
+	LastUpdated   time.Time `json:"last_updated"`
+}
+
 type InstrumentState struct {
 	// --- Core Identity & Current Snapshots ---
 	Symbol          string    `json:"symbol"`
@@ -29,22 +33,26 @@ type InstrumentState struct {
 	TotalSessionBars           int     `json:"total_session_bars"`
 	LatestChangePct            float64 `json:"latest_change_pct"`
 
-	// --- 📊 Simplified Microstructural Core Indicators ---
-	NetEfficiency        float64   `json:"net_efficiency"`         // Consolidated pure institutional net footprints
-	NetEfficiencySlope   float64   `json:"net_efficiency_slope"`   // Linear regression rate of change over recent history
-	NetEfficiencyHistory []float64 `json:"net_efficiency_history"` // Cached trailing rolling window used for slope calculations
+	// --- Asset Context Ranks ---
+	LatestPriceRank  int `json:"latest_price_rank"`
+	LatestVolumeRank int `json:"latest_volume_rank"`
+
+	// --- 📊 Expanded Memory Fields (Fixes Bug #1 & #2) ---
+	Ledger               InstitutionalLedger `json:"ledger"`
+	NetEfficiency        float64             `json:"net_efficiency"`         // [-150 to 150 Scale]
+	NetEfficiencySlope   float64             `json:"net_efficiency_slope"`   // 10-bar Trend Quality line
+	NetEfficiencyHistory []float64           `json:"net_efficiency_history"` // Cached trailing row buffer for slope
+	PeakEfficiency       float64             `json:"peak_efficiency"`        // 🔒 Safely isolated peak cache container
 
 	// --- Trade Tracking & Historical Buffers ---
 	CurrentSetupPhase SetupPhase                `json:"current_setup_phase"`
-	LastTradedBarTime time.Time                 `json:"last_traded_bar_time"` // 🔒 The Chronological Execution Lock
+	LastTradedBarTime time.Time                 `json:"last_traded_bar_time"`
 	EntryVwapAnchor   float64                   `json:"entry_vwap_anchor"`
-	PeakVwapExtension float64                   `json:"peak_vwap_extension"`
 	BarHistory        map[string][]*models.Bar  `json:"bar_history"`
 	Profile           *models.InstrumentProfile `json:"profile"`
 }
 
-// OptimizationTradeLog holds the freeze-frame microstructural variables
-// required to analyze performance parameters cleanly.
+// OptimizationTradeLog fully updated with Missing Metrics (Fixes Bug #8)
 type OptimizationTradeLog struct {
 	ID                int       `json:"id" db:"id"`
 	Symbol            string    `json:"symbol" db:"symbol"`
@@ -54,13 +62,16 @@ type OptimizationTradeLog struct {
 	EntryTimestamp    time.Time `json:"entry_timestamp" db:"entry_timestamp"`
 	EntryPrice        float64   `json:"entry_price" db:"entry_price"`
 	EntryVwap         float64   `json:"entry_vwap" db:"entry_vwap"`
-	EntryVolumeRank   int       `json:"entry_volume_rank" db:"entry_volume_rank"`
-	EntryPriceRank    int       `json:"entry_price_rank" db:"entry_price_rank"`
-	EntryWickRatio    float64   `json:"entry_wick_ratio" db:"entry_wick_ratio"`
 	EntryVwapDistance float64   `json:"entry_vwap_distance" db:"entry_vwap_distance"`
 
-	// 📸 Peak Capture Metrics
-	PeakPnLINR float64 `json:"peak_pnl_inr" db:"peak_pnl_inr"` // ⚡ Captures maximum unrealized INR printed
+	// Analytics Snapshots
+	EntryEfficiency float64 `json:"entry_efficiency" db:"entry_efficiency"`
+	EntryDelta      float64 `json:"entry_delta" db:"entry_delta"`
+	EntrySlope      float64 `json:"entry_slope" db:"entry_slope"`
+	EntryVolumeRank int     `json:"entry_volume_rank" db:"entry_volume_rank"`
+
+	PeakPnLINR             float64 `json:"peak_pnl_inr" db:"peak_pnl_inr"`
+	EfficiencyCaptureRatio float64 `json:"efficiency_capture_ratio" db:"efficiency_capture_ratio"` // 📈 Added optimization vector
 
 	ExitTimestamp time.Time `json:"exit_timestamp" db:"exit_timestamp"`
 	ExitPrice     float64   `json:"exit_price" db:"exit_price"`

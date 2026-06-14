@@ -46,7 +46,8 @@ func (c *Client) readPump() {
 		}
 
 		if string(message) == `{"action":"ping"}` {
-			c.conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"pong"}`))
+			// FIX: Do not write directly to c.conn here. Send to the channel instead!
+			c.send <- []byte(`{"type":"pong"}`)
 			continue
 		}
 

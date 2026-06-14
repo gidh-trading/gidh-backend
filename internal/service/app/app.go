@@ -203,12 +203,12 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		// Step C: Initialize your engine using the compiled symbol map
 		a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, a.DBWriter, func(log *strategy.OptimizationTradeLog) {
 			// 1. Output a visual stream verification log item
-			logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s | Wick Ratio: %.2f | VWAP Dist: %.4f",
-				log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryWickRatio, log.EntryVwapDistance)
+			logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s |  VWAP Dist: %.4f",
+				log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryVwapDistance)
 
 			// 2. Write straight down into our persistent TimescaleDB relational logs table
 			if a.pool != nil {
-				err := db.LogStrategyOptimizationTrade(
+				err := db.LogStrategyOptimizationTradeExpanded(
 					context.Background(),
 					a.pool,
 					log.Symbol,
@@ -219,14 +219,16 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 					log.EntryPrice,
 					log.EntryVwap,
 					log.EntryVolumeRank,
-					log.EntryPriceRank,
-					log.EntryWickRatio,
+					log.EntryEfficiency,
+					log.EntryDelta,
+					log.EntrySlope,
 					log.EntryVwapDistance,
 					log.ExitTimestamp,
 					log.ExitPrice,
 					log.ExitReason,
 					log.FinalPnLINR,
 					log.PeakPnLINR,
+					log.EfficiencyCaptureRatio,
 				)
 				if err != nil {
 					logger.Errorf("Failed to persist strategy optimization metrics chunk for %s: %v", log.Symbol, err)

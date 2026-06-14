@@ -6,7 +6,7 @@ type InstitutionalLedgerStrategy struct {
 
 func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
 	return &InstitutionalLedgerStrategy{
-		VwapBufferPct: 0.0012, // Base threshold for value optimization bounds
+		VwapBufferPct: 0.0012, // Baseline value buffer
 	}
 }
 
@@ -14,39 +14,57 @@ func (s *InstitutionalLedgerStrategy) Name() string {
 	return "Institutional_Ledger_Alpha_Tuned"
 }
 
-// CheckEntry evaluates pure institutional acceleration with strict value parameters.
 func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string {
-	// 1. 🔒 CHRONOLOGICAL LOCK GATE
 	if !state.LastTradedBarTime.IsZero() && state.LastUpdated.Equal(state.LastTradedBarTime) {
 		return "HOLD"
 	}
 
-	// --- 🟢 STRUCTURAL LONG ENTRY TRIGGER ---
-	if state.ConsecutiveClosesAboveVwap >= 3 {
-		// Verify raw efficiency bounds
-		if state.NetEfficiency > 8 && state.NetEfficiency < 30 {
-			// Confirm positive directional momentum acceleration
-			if state.NetEfficiencySlope > 0.5 {
-				// Value entry confirmation: price is safely close to the VWAP anchor
-				if state.NormalizedVwapDistance > 0 && state.NormalizedVwapDistance < 1.5 {
-					if state.TimePctAboveVwap > 0.35 && state.TimePctAboveVwap < 0.75 {
-						return "GO_LONG"
+	historyLength := len(state.NetEfficiencyHistory)
+	if historyLength < 4 {
+		return "HOLD"
+	}
+
+	currentEff := state.NetEfficiency
+	previousEff := state.NetEfficiencyHistory[historyLength-2]
+
+	// 3-Bar historical evaluation window (Fixes Bug #2)
+	trailing3AvgEff := (state.NetEfficiencyHistory[historyLength-4] +
+		state.NetEfficiencyHistory[historyLength-3] +
+		previousEff) / 3.0
+
+	// --- 🟢 VERSION 1 HIGH-CONVICTION LONG TRIGGER ---
+	if state.LatestVolumeRank >= 6 { // 1. Volume >= P90
+		if currentEff > 50.0 { // 2. Efficiency > +50
+			if trailing3AvgEff > 0.0 { // 3. Trailing 3-bar average efficiency > 0
+
+				// 🛠️ FIX Bug #3: Expansion verification threshold applied (effDelta > 15)
+				effDelta := currentEff - previousEff
+				if effDelta > 15.0 {
+
+					// 🚀 Session Acceptance Layer (Filter #7)
+					if state.NormalizedVwapDistance > 0 && state.NormalizedVwapDistance < 1.5 {
+						if state.TimePctAboveVwap > 0.35 {
+							return "GO_LONG"
+						}
 					}
 				}
 			}
 		}
 	}
 
-	// --- 🔴 STRUCTURAL SHORT ENTRY TRIGGER ---
-	if state.ConsecutiveClosesBelowVwap >= 3 {
-		// Verify raw efficiency bounds
-		if state.NetEfficiency < -8 && state.NetEfficiency > -30 {
-			// Confirm negative directional momentum acceleration
-			if state.NetEfficiencySlope < -0.5 {
-				// Value entry confirmation: price is near breakdown value anchors
-				if state.NormalizedVwapDistance < 0 && state.NormalizedVwapDistance > -1.5 {
-					if state.TimePctAboveVwap < 0.25 {
-						return "GO_SHORT"
+	// --- 🔴 VERSION 1 HIGH-CONVICTION SHORT TRIGGER ---
+	if state.LatestVolumeRank >= 6 { // 1. Volume >= P90
+		if currentEff < -50.0 { // 2. Efficiency < -50
+			if trailing3AvgEff < 0.0 { // 3. Trailing 3-bar average efficiency < 0
+
+				// 🛠️ FIX Bug #3: Expansion breakdown verification threshold applied (effDelta < -15)
+				effDelta := currentEff - previousEff
+				if effDelta < -15.0 {
+
+					if state.NormalizedVwapDistance < 0 && state.NormalizedVwapDistance > -1.5 {
+						if state.TimePctAboveVwap < 0.25 {
+							return "GO_SHORT"
+						}
 					}
 				}
 			}
@@ -56,39 +74,48 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	return "HOLD"
 }
 
-// CheckExit implements a microstructural Profit & Invalidation Lock based on ADRPct volatility
 func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	// Dynamically scale cushions based on ADRPct metadata to prevent micro-stops on high-velocity setups
 	dynamicCushion := s.VwapBufferPct
 	if state.Profile != nil && state.Profile.ADRPct > 4.0 {
-		dynamicCushion = s.VwapBufferPct * 1.5 // Expand buffer slightly for higher ADR names
+		dynamicCushion = s.VwapBufferPct * 1.5
 	}
 
+	currentEff := state.NetEfficiency
+
 	if currentSide == "LONG" {
-		// 1. Core Price-Action Invalidation (VWAP Violation Cushion)
+		// Exit Pillar 1: Pure Trend Failure Invalidation (Fixes Bug #4 & #5 - No more Zero cross overlap conflict)
 		if state.LatestPrice < (state.LiveSessionVWAP * (1.0 - dynamicCushion)) {
-			return "EXIT_LONG"
+			return "EXIT_LONG" // "VWAP Failure"
 		}
-		// 2. Momentum Evaporation Filter (Absolute Reversal OR Aggressive Negative Deceleration)
-		if state.NetEfficiency <= -2 || state.NetEfficiencySlope < -2.0 {
-			return "EXIT_LONG"
+
+		// Exit Pillar 2: 🛡️ Peak Efficiency Half-Life Decay Trailing Mechanism (Fixes Bug #5 & #6)
+		// Read-only logic: Engine is the exclusive manager of state.PeakEfficiency mutations
+		if state.PeakEfficiency > 50.0 {
+			decayThreshold := state.PeakEfficiency * 0.50
+			if currentEff < decayThreshold {
+				return "EXIT_LONG" // "Peak Efficiency Decay"
+			}
 		}
-		// 3. Volatility Extension Climax Cap (Overextended Z-Score anchor target reached)
+
 		if state.NormalizedVwapDistance > 2.8 {
-			return "EXIT_LONG"
+			return "EXIT_LONG" // "Volatility Extension Climax"
 		}
 	}
 
 	if currentSide == "SHORT" {
-		// 1. Core Price-Action Invalidation (VWAP Violation Cushion)
+		// Exit Pillar 1: Pure Trend Failure Invalidation
 		if state.LatestPrice > (state.LiveSessionVWAP * (1.0 + dynamicCushion)) {
-			return "EXIT_SHORT"
+			return "EXIT_SHORT" // "VWAP Failure"
 		}
-		// 2. Momentum Evaporation Filter (Absolute Reversal OR Aggressive Positive Re-acceleration)
-		if state.NetEfficiency >= 2 || state.NetEfficiencySlope > 2.0 {
-			return "EXIT_SHORT"
+
+		// Exit Pillar 2: 🛡️ Peak Efficiency Half-Life Decay Trailing Mechanism
+		if state.PeakEfficiency > 50.0 {
+			decayThreshold := state.PeakEfficiency * 0.50
+			if currentEff > -decayThreshold {
+				return "EXIT_SHORT" // "Peak Efficiency Decay"
+			}
 		}
-		// 3. Volatility Extension Climax Cap
+
 		if state.NormalizedVwapDistance < -2.8 {
 			return "EXIT_SHORT"
 		}
@@ -97,22 +124,12 @@ func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentS
 	return "HOLD"
 }
 
-// CheckTrailingProfitLock forces an exit if the strategy starts giving back open profits
 func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
-	// If a position has printed significant structural extension, lock down gains on exhaustion
-	if currentSide == "LONG" && state.NormalizedVwapDistance > 1.8 && state.NetEfficiencySlope < -0.1 {
-		return true
-	}
-	if currentSide == "SHORT" && state.NormalizedVwapDistance < -1.8 && state.NetEfficiencySlope > 0.1 {
-		return true
-	}
 	return false
 }
-
 func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	return false
 }
-
 func (s *InstitutionalLedgerStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	return false
 }
