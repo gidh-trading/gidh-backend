@@ -33,6 +33,10 @@ type InstrumentState struct {
 	TotalSessionBars           int     `json:"total_session_bars"`
 	LatestChangePct            float64 `json:"latest_change_pct"`
 
+	// --- 📈 Dynamic Position PnL Fields ---
+	CurrentPnL float64 `json:"current_pnl"`
+	PeakPnL    float64 `json:"peak_pnl"`
+
 	// --- Asset Context Ranks ---
 	LatestPriceRank  int `json:"latest_price_rank"`
 	LatestVolumeRank int `json:"latest_volume_rank"`

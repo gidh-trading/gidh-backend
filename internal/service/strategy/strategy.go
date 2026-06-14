@@ -76,7 +76,7 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 
 	state.NetEfficiencySlope = CalculateLinearRegressionSlope(state.NetEfficiencyHistory)
 
-	// Update active trade peak variables exclusively at bar close
+	// --- 📈 PNL & EFFICIENCY METRIC TRACING ON BAR CLOSE ---
 	if state.CurrentSetupPhase == PhaseActiveTrade {
 		if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists {
 			var currentUnrealized float64
@@ -85,8 +85,14 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 			} else if tradeLog.TradeSide == "SHORT" {
 				currentUnrealized = (tradeLog.EntryPrice - bar.Close)
 			}
-			if currentUnrealized > tradeLog.PeakPnLINR {
-				tradeLog.PeakPnLINR = currentUnrealized
+
+			state.CurrentPnL = currentUnrealized
+			if state.CurrentPnL > state.PeakPnL {
+				state.PeakPnL = state.CurrentPnL
+			}
+
+			if state.PeakPnL > tradeLog.PeakPnLINR {
+				tradeLog.PeakPnLINR = state.PeakPnL
 			}
 
 			if tradeLog.TradeSide == "LONG" {
@@ -100,6 +106,9 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 				}
 			}
 		}
+	} else {
+		state.CurrentPnL = 0.0
+		state.PeakPnL = 0.0
 	}
 
 	bar.Analytics.NetEfficiency = state.NetEfficiency
@@ -107,23 +116,27 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
 
-	// --- 🛡️ FIX CHURN: EVALUATE STRUCTURAL EXITS EXCLUSIVELY AT BAR CLOSE ---
-	// If an active trade is open, check if microstructural decay or overextensions warrant an exit
+	// --- 🛡️ EVALUATE STRUCTURAL EXITS AND TAKE PROFITS AT BAR CLOSE ---
 	if state.CurrentSetupPhase == PhaseActiveTrade && e.ActiveStrategy != nil {
-		// Temporary side lookup mock matching internal engine side properties
 		currentSide := "LONG"
 		if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists && tradeLog.TradeSide == "SHORT" {
 			currentSide = "SHORT"
 		}
 
-		signal := e.ActiveStrategy.CheckExit(state, currentSide)
-		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
-			e.mu.Unlock() // Unlock before log persistence workers execute
-			e.LogOptimizationExit(bar.StockName, signal, state)
+		// Decay rules are fully safe to evaluate at Bar Close
+		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, state.LatestPrice, 1) {
+			e.mu.Unlock()
+			e.LogOptimizationExit(bar.StockName, "TAKE_PROFIT_BAR_CLOSE", state)
 			e.mu.Lock()
+		} else {
+			signal := e.ActiveStrategy.CheckExit(state, currentSide)
+			if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
+				e.mu.Unlock()
+				e.LogOptimizationExit(bar.StockName, signal, state)
+				e.mu.Lock()
+			}
 		}
 	}
-	// ------------------------------------------------------------------------
 
 	e.appendAndPruneHistory(state, bar)
 	e.mu.Unlock()
@@ -142,21 +155,72 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	e.updateCoreTickMetrics(state, enrichedTick.Raw)
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
 
-	isFlatNow := currentSide == "FLAT" || currentSide == ""
+	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
 
+	// Sync persistent trades if Engine maps disagree with broker sides
+	if !isFlatNow && state.CurrentSetupPhase != PhaseActiveTrade {
+		state.CurrentSetupPhase = PhaseActiveTrade
+	}
+
+	// --- 📈 REAL-TIME TICK PNL TRACING ---
+	if !isFlatNow {
+		var currentUnrealized float64
+		if currentSide == "LONG" {
+			currentUnrealized = (state.LatestPrice - averagePrice)
+		} else if currentSide == "SHORT" {
+			currentUnrealized = (averagePrice - state.LatestPrice)
+		}
+
+		state.CurrentPnL = currentUnrealized
+		if state.CurrentPnL > state.PeakPnL {
+			state.PeakPnL = state.CurrentPnL
+		}
+
+		if tradeLog, exists := e.ActiveTrades[symbol]; exists {
+			if state.PeakPnL > tradeLog.PeakPnLINR {
+				tradeLog.PeakPnLINR = state.PeakPnL
+			}
+		}
+	} else {
+		state.CurrentPnL = 0.0
+		state.PeakPnL = 0.0
+	}
+
+	// --- 🟢 ENTRY EXECUTION WITH CONCURRENCY LOCKS ---
 	if isFlatNow && e.ActiveStrategy != nil {
+		// Hard blocking priority 1 duplication checks
+		if _, duplicateActive := e.ActiveTrades[symbol]; duplicateActive {
+			e.mu.Unlock()
+			return "HOLD"
+		}
+
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
+			// Pre-emptively flip state phase *before* shedding context locks to eliminate race conditions
+			state.CurrentSetupPhase = PhaseActiveTrade
 			e.mu.Unlock()
 			e.LogOptimizationEntry(symbol, signal, state)
 			return signal
 		}
 	} else if !isFlatNow && e.ActiveStrategy != nil {
-		// Ticks are ONLY allowed to verify core price invalidations (e.g., crossing VWAP corridors)
-		// Microstructural decay filters are skipped here and deferred to IngestClosedBar
+		// --- 🔴 RISK TICK MANAGEMENT ---
+		tradeLog, tradeExists := e.ActiveTrades[symbol]
+
+		// 🛠️ FIX SUFFOCATION: Only evaluate take profit decay vectors on ticks IF
+		// the trade has lasted at least 60 seconds (or a meaningful duration).
+		// Otherwise, noise flitters instantly destroy the execution strategy.
+		if tradeExists && time.Since(tradeLog.EntryTimestamp) > 1*time.Minute {
+			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+				e.mu.Unlock()
+				e.LogOptimizationExit(symbol, "TAKE_PROFIT_TRAILING_TICK", state)
+				return "EXIT_" + currentSide
+			}
+		}
+
+		// Structural trend breaks (VWAP failures) skip the time filter for protection
 		signal := e.ActiveStrategy.CheckExit(state, currentSide)
 		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
-			// Only allow tick exit if it's a critical price break, otherwise defer to bar close
+			// Hard price boundaries crossed
 			if state.LatestPrice < (state.LiveSessionVWAP*0.995) || state.LatestPrice > (state.LiveSessionVWAP*1.005) {
 				e.mu.Unlock()
 				e.LogOptimizationExit(symbol, signal, state)
@@ -179,12 +243,37 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	}
 
 	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
+
+	if currentSide != "FLAT" && currentSide != "" {
+		if currentSide == "LONG" {
+			state.CurrentPnL = (state.LatestPrice - averagePrice)
+		} else {
+			state.CurrentPnL = (averagePrice - state.LatestPrice)
+		}
+		if state.CurrentPnL > state.PeakPnL {
+			state.PeakPnL = state.CurrentPnL
+		}
+	}
+
+	// Double check duplication registers here
+	_, duplicateActive := e.ActiveTrades[symbol]
 	e.mu.Unlock()
 
 	isFlatNow := currentSide == "FLAT" || currentSide == ""
 	if isFlatNow {
+		if duplicateActive {
+			return "HOLD"
+		}
 		return e.ActiveStrategy.CheckEntry(state)
 	}
+
+	// Delegate metric evaluations safely
+	if tradeLog, exists := e.ActiveTrades[symbol]; exists && time.Since(tradeLog.EntryTimestamp) > 1*time.Minute {
+		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+			return "EXIT_" + currentSide
+		}
+	}
+
 	return e.ActiveStrategy.CheckExit(state, currentSide)
 }
 
@@ -193,7 +282,7 @@ func (e *Engine) LogOptimizationEntry(symbol string, signal string, state *Instr
 	defer e.mu.Unlock()
 
 	if _, exists := e.ActiveTrades[symbol]; exists {
-		return // Block entry duplication
+		return
 	}
 
 	tradeSide := "LONG"
@@ -207,6 +296,8 @@ func (e *Engine) LogOptimizationEntry(symbol string, signal string, state *Instr
 	}
 
 	state.PeakEfficiency = 0.0
+	state.CurrentPnL = 0.0
+	state.PeakPnL = 0.0
 	state.CurrentSetupPhase = PhaseActiveTrade
 
 	historyLength := len(state.NetEfficiencyHistory)
@@ -243,6 +334,8 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 	delete(e.ActiveTrades, symbol)
 	state.CurrentSetupPhase = PhaseNeutral
 	state.PeakEfficiency = 0.0
+	state.CurrentPnL = 0.0
+	state.PeakPnL = 0.0
 	e.mu.Unlock()
 
 	tradeLog.ExitTimestamp = time.Now()
@@ -257,13 +350,12 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 	}
 	tradeLog.FinalPnLINR = finalPnL
 
-	// Compute Optimization Metric Capture Ratio immediately
 	if tradeLog.PeakPnLINR > 0 {
 		tradeLog.EfficiencyCaptureRatio = finalPnL / tradeLog.PeakPnLINR
 	} else if tradeLog.PeakPnLINR == 0 && finalPnL == 0 {
 		tradeLog.EfficiencyCaptureRatio = 1.0
 	} else {
-		tradeLog.EfficiencyCaptureRatio = -1.0 // Signifies negative drift from flat lines
+		tradeLog.EfficiencyCaptureRatio = -1.0
 	}
 
 	go func(logRecord *OptimizationTradeLog) {
