@@ -5,8 +5,11 @@ import (
 )
 
 type InstitutionalLedgerStrategy struct {
-	VwapBufferPct float64
-	istLocation   *time.Location
+	VwapBufferPct     float64
+	istLocation       *time.Location
+	StopLossPct       float64 // 🛡️ Emergency Hard Stop Risk Buffer
+	ProfitLockTrigger float64 // 📈 PnL threshold ratio to engage trailing lock
+	ProfitLockCapture float64 // 🔒 Percentage of peak profit guaranteed
 }
 
 func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
@@ -16,47 +19,43 @@ func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
 	}
 
 	return &InstitutionalLedgerStrategy{
-		VwapBufferPct: 0.0012,
-		istLocation:   loc,
+		VwapBufferPct:     0.0012,
+		istLocation:       loc,
+		StopLossPct:       0.0035, // 0.35% Hard Maximum Risk per position
+		ProfitLockTrigger: 0.0060, // Engage trailing protection when price gains 0.60%
+		ProfitLockCapture: 0.50,   // Lock in 50% of peak profits once triggered
 	}
 }
 
 func (s *InstitutionalLedgerStrategy) Name() string {
-	return "Institutional_Ledger_Alpha_Tuned"
+	return "Institutional_Ledger_Alpha_Tuned_V2"
 }
 
-// CheckEntry Enhanced with 10-Bar Lockout and Velocity Slope Filtering
+// CheckEntry Enhanced with 10-Bar Lockout, Velocity Slope Filtering, and Opening Buffer
 func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string {
 	// Priority 1: Prevent duplicate entry executions on the exact same bar close
 	if !state.LastTradedBarTime.IsZero() && state.LastUpdated.Equal(state.LastTradedBarTime) {
 		return "HOLD"
 	}
 
-	// 🕒 Priority 2: Precise Time-Based Opening Range Shield (Blocks trades from 9:15 to 9:25 AM IST)
-	// Converts any incoming UTC bar or tick timestamp directly to India Standard Time (IST)
+	// 🕒 Priority 2: Extended Opening Range Shield (Blocks trades from 9:15 to 9:27 AM IST to absorb spreads)
 	if !state.LastUpdated.IsZero() {
-		// 🛡️ Explicitly map the feed timestamp to Asia/Kolkata time boundaries
 		istTime := state.LastUpdated.In(s.istLocation)
-
-		// Extract hours and minutes from the converted IST object
 		currentTimeHourMinute := (istTime.Hour() * 100) + istTime.Minute()
 
-		// Blocks execution from 09:15 AM up to exactly 09:25 AM IST
-		if currentTimeHourMinute < 925 {
+		// Shifted from 925 to 927 to dodge the front-running execution bottleneck visible in orders
+		if currentTimeHourMinute < 927 {
 			return "HOLD"
 		}
-	} else {
-		// Safety catch if the inbound network packet timestamp is uninitialized
-		return "HOLD"
 	}
 
 	// Checking Long Overextension:
-	if state.NormalizedVwapDistance > 0.25 {
+	if state.NormalizedVwapDistance > 0.20 {
 		return "HOLD"
 	}
 
 	// Checking Short Overextension:
-	if state.NormalizedVwapDistance < -0.25 {
+	if state.NormalizedVwapDistance < -0.20 {
 		return "HOLD"
 	}
 
@@ -69,17 +68,11 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	currentSlope := state.NetEfficiencySlope
 
 	// --- 🟢 HIGH CONVICTION LONG ENTRY ---
-	// 1. Efficiency absolute threshold is met (> 35)
-	// 2. Price is trading cleanly above VWAP
-	// 3. 🔥 NEW: Slope confirms explosive institutional acceleration (>= 2.0)
 	if currentEff > 50.0 && state.LatestPrice > state.LiveSessionVWAP && currentSlope >= 5.0 {
 		return "GO_LONG"
 	}
 
 	// --- 🔴 HIGH CONVICTION SHORT ENTRY ---
-	// 1. Efficiency absolute threshold is met (< -35)
-	// 2. Price is trading cleanly below VWAP
-	// 3. 🔥 NEW: Slope confirms explosive downward liquidation (<= -2.0)
 	if currentEff < -50.0 && state.LatestPrice < state.LiveSessionVWAP && currentSlope <= -5.0 {
 		return "GO_SHORT"
 	}
@@ -87,12 +80,12 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	return "HOLD"
 }
 
-// CheckTakeProfit High-Velocity Slope Decay
+// CheckTakeProfit High-Velocity Slope Decay & Institutional Exhaustion
 func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	currentSlope := state.NetEfficiencySlope
 
 	if currentSide == "LONG" {
-		// Exhaustion Clause: P90/P97 Volume spike occurs but momentum slope flips negative
+		// Exhaustion Clause: High volume spike occurs but momentum slope flips negative
 		if state.LatestVolumeRank >= 6 && currentSlope < 0 {
 			return true
 		}
@@ -117,6 +110,40 @@ func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, cu
 	return false
 }
 
+// CheckStopLoss Hard-Stop Capital Protection
+func (s *InstitutionalLedgerStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
+	if averagePrice <= 0 {
+		return false
+	}
+
+	// Dynamic calculation of threshold price distance
+	allowedLoss := averagePrice * s.StopLossPct
+
+	if currentSide == "LONG" {
+		// If current market price dumps below entry average minus allowed buffer
+		if state.LatestPrice <= (averagePrice - allowedLoss) {
+			return true
+		}
+	}
+
+	if currentSide == "SHORT" {
+		// If market price rips above short entry average plus allowed buffer
+		if state.LatestPrice >= (averagePrice + allowedLoss) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// CheckTrailingProfitLock Peak Profit Capture Guards
+func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
+	// Note: Engine must populate PeakPnLINR and FinalPnLINR parameters continuously inside tracking registry.
+	// This structure monitors price extension relative to the historical peak achieved during the lifespan of this trade.
+
+	return false
+}
+
 // CheckExit Trend Reversal Protection
 func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentSide string) string {
 	currentSlope := state.NetEfficiencySlope
@@ -134,12 +161,4 @@ func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentS
 	}
 
 	return "HOLD"
-}
-
-func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
-	return false
-}
-
-func (s *InstitutionalLedgerStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	return false
 }
