@@ -28,8 +28,8 @@ func (r *TimeBasedRouter) CheckExit(state *InstrumentState, currentSide string) 
 	return r.selectStrategy(state).CheckExit(state, currentSide)
 }
 
-func (r *TimeBasedRouter) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
-	return r.selectStrategy(state).CheckTrailingProfitLock(state, currentSide)
+func (r *TimeBasedRouter) CheckTrailingProfitLock(state *InstrumentState, currentSide string, averagePrice float64) bool {
+	return r.selectStrategy(state).CheckTrailingProfitLock(state, currentSide, averagePrice)
 }
 
 func (r *TimeBasedRouter) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {

@@ -1,15 +1,12 @@
 package strategy
 
 import (
-	"context"
 	"math"
 	"sync"
 	"time"
 
-	"gidh-backend/internal/service/db"
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
-	"gidh-backend/pkg/logger"
 )
 
 const (
@@ -140,11 +137,22 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	// --- 🛡️ EVALUATE STRUCTURAL EXITS AND TAKE PROFITS AT BAR CLOSE ---
 	if state.CurrentSetupPhase == PhaseActiveTrade && e.ActiveStrategy != nil {
 		currentSide := "LONG"
-		if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists && tradeLog.TradeSide == "SHORT" {
-			currentSide = "SHORT"
+		var avgPrice float64
+		if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists {
+			if tradeLog.TradeSide == "SHORT" {
+				currentSide = "SHORT"
+			}
+			avgPrice = tradeLog.EntryPrice
+		} else {
+			avgPrice = state.LatestPrice
 		}
 
-		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, state.LatestPrice, 1) {
+		// ✅ FIX 2: Stop Loss evaluation integrated
+		if e.ActiveStrategy.CheckStopLoss(state, currentSide, avgPrice, 1) {
+			e.mu.Unlock()
+			e.LogOptimizationExit(bar.StockName, "STOP_LOSS", state)
+			e.mu.Lock()
+		} else if e.ActiveStrategy.CheckTakeProfit(state, currentSide, avgPrice, 1) {
 			e.mu.Unlock()
 			e.LogOptimizationExit(bar.StockName, "TAKE_PROFIT_BAR_CLOSE", state)
 			e.mu.Lock()
@@ -208,8 +216,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	// --- 🟢 ENTRY EXECUTION WITH CONCURRENCY LOCKS ---
 	if isFlatNow && e.ActiveStrategy != nil {
-		// FIX: Hard-abort execution if an active trade entry log is already tracked in our memory pool.
-		// This intercepts microsecond multi-tick cascading signals before executing redundant actions.
 		if _, duplicateActive := e.ActiveTrades[symbol]; duplicateActive {
 			e.mu.Unlock()
 			return "HOLD"
@@ -219,15 +225,22 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			state.CurrentSetupPhase = PhaseActiveTrade
 
-			// Unlock briefly to let LogOptimizationEntry acquire its internal lock safely,
-			// preventing deadlock while executing logging operations.
+			// ✅ FIX 1: Safely write entry while lock is maintained using locked variant
+			e.logOptimizationEntryLocked(symbol, signal, state)
+
 			e.mu.Unlock()
-			e.LogOptimizationEntry(symbol, signal, state)
 			return signal
 		}
 	} else if !isFlatNow && e.ActiveStrategy != nil {
 		// --- 🔴 RISK TICK MANAGEMENT ---
 		tradeLog, tradeExists := e.ActiveTrades[symbol]
+
+		// ✅ FIX 2: Check Stop Loss on every live tick to prevent catastrophic bleed
+		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+			e.mu.Unlock()
+			e.LogOptimizationExit(symbol, "STOP_LOSS", state)
+			return "EXIT_" + currentSide
+		}
 
 		if tradeExists && time.Since(tradeLog.EntryTimestamp) > 1*time.Minute {
 			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
@@ -239,11 +252,10 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 		signal := e.ActiveStrategy.CheckExit(state, currentSide)
 		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
-			if state.LatestPrice < (state.LiveSessionVWAP*0.995) || state.LatestPrice > (state.LiveSessionVWAP*1.005) {
-				e.mu.Unlock()
-				e.LogOptimizationExit(symbol, signal, state)
-				return signal
-			}
+			// ✅ FIX 4: Removed the restrictive VWAP blocker. Exit triggers purely on signal logic.
+			e.mu.Unlock()
+			e.LogOptimizationExit(symbol, signal, state)
+			return signal
 		}
 	}
 
@@ -255,7 +267,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	e.mu.Lock()
 	state, exists := e.Registry[symbol]
 
-	// Ensure the engine states are cleanly mapped
 	if !exists || e.ActiveStrategy == nil {
 		e.mu.Unlock()
 		return "HOLD"
@@ -263,7 +274,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 
 	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
 
-	// Update live unrealized pricing profiles
 	if currentSide != "FLAT" && currentSide != "" && netQty > 0 {
 		if currentSide == "LONG" {
 			state.CurrentPnL = (state.LatestPrice - averagePrice)
@@ -277,14 +287,16 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 
 	e.mu.Unlock()
 
-	// Clean entry/exit evaluations matching Risk Manager positions
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 	if isFlatNow {
-		// Clean pass directly into your strategy card checks
 		return e.ActiveStrategy.CheckEntry(state)
 	}
 
-	// Active management checks
+	// ✅ FIX 2: Include Stop Loss within generator signal block
+	if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+		return "EXIT_" + currentSide
+	}
+
 	if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
 		return "EXIT_" + currentSide
 	}
@@ -292,10 +304,15 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	return e.ActiveStrategy.CheckExit(state, currentSide)
 }
 
+// LogOptimizationEntry Wraps the locked entry tracking function for external calls
 func (e *Engine) LogOptimizationEntry(symbol string, signal string, state *InstrumentState) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	e.logOptimizationEntryLocked(symbol, signal, state)
+}
 
+// logOptimizationEntryLocked Internally safely records trade entries while Engine Mutex is held
+func (e *Engine) logOptimizationEntryLocked(symbol string, signal string, state *InstrumentState) {
 	if _, exists := e.ActiveTrades[symbol]; exists {
 		return
 	}
@@ -343,15 +360,12 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 	e.mu.Lock()
 	tradeLog, exists := e.ActiveTrades[symbol]
 	if !exists {
-		// 🛡️ Safe Concurrency Intercept:
-		// If another concurrent thread (e.g., IngestClosedBar or UpdateContext)
-		// already handled this exit signal, abort instantly.
+		// 🛡️ Safe Concurrency Intercept
 		e.mu.Unlock()
 		return
 	}
 
 	// Synchronously delete the active trade record inside the active lock boundary.
-	// This makes sure the very next concurrent thread hits `!exists` above and exits.
 	delete(e.ActiveTrades, symbol)
 
 	// Clean up position state metrics synchronously
@@ -382,26 +396,9 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 		tradeLog.EfficiencyCaptureRatio = -1.0
 	}
 
-	// Dispatch historical accounting metrics asynchronously over the worker pool
-	go func(logRecord *OptimizationTradeLog) {
-		pool := db.GetPool()
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-
-		err := db.LogStrategyOptimizationTradeExpanded(
-			ctx, pool, logRecord.Symbol, logRecord.StrategyName, logRecord.TradeSide,
-			logRecord.MinutesSinceOpen, logRecord.EntryTimestamp, logRecord.EntryPrice,
-			logRecord.EntryVwap, logRecord.EntryVolumeRank, logRecord.EntryEfficiency,
-			logRecord.EntryDelta, logRecord.EntrySlope, logRecord.EntryVwapDistance,
-			logRecord.ExitTimestamp, logRecord.ExitPrice, logRecord.ExitReason,
-			logRecord.FinalPnLINR, logRecord.PeakPnLINR, logRecord.EfficiencyCaptureRatio,
-		)
-		if err != nil {
-			logger.Errorf("🚨 Optimization Engine direct write failed for %s: %v", logRecord.Symbol, err)
-		}
-	}(tradeLog)
-
-	// Single unified execution hook pass-through
+	// ✅ FIX: Removed the concurrent db.LogStrategyOptimizationTradeExpanded goroutine.
+	// The double-write occurred because e.OnTradeCompleted also handles saving the order.
+	// Relying on the single pass-through hook ensures perfect synchronicity.
 	if e.OnTradeCompleted != nil {
 		e.OnTradeCompleted(tradeLog)
 	}

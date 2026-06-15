@@ -11,7 +11,7 @@ type InstitutionalLedgerStrategy struct {
 	StopLossPct          float64
 	ProfitLockTrigger    float64
 	ProfitLockCapture    float64
-	MinTimePctVwapRegime float64 // 📊 Minimum session percentage above/below VWAP to confirm directional regime
+	MinTimePctVwapRegime float64
 
 	stateMutex        sync.RWMutex
 	lastExecutedEntry map[string]time.Time
@@ -26,62 +26,55 @@ func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
 	return &InstitutionalLedgerStrategy{
 		VwapBufferPct:        0.0012,
 		istLocation:          loc,
-		StopLossPct:          0.0035,
-		ProfitLockTrigger:    0.0060,
-		ProfitLockCapture:    0.50,
+		StopLossPct:          0.0045, // Loosened stop loss slightly to 0.45% to survive noise
+		ProfitLockTrigger:    0.0075, // Trigger trail at 0.75% profit
+		ProfitLockCapture:    0.60,   // Lock in 60% of peak
 		MinTimePctVwapRegime: 0.70,
 		lastExecutedEntry:    make(map[string]time.Time),
 	}
 }
 
 func (s *InstitutionalLedgerStrategy) Name() string {
-	return "Institutional_Ledger_Alpha_Tuned_V2"
+	return "Institutional_Ledger_Alpha_Tuned_V3"
 }
 
-// CheckEntry Enhanced with 10-Bar Lockout, Velocity Slope Filtering, and Opening Buffer
+// CheckEntry Enhanced with Cooldowns and Velocity slope filtering
 func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string {
-	// Priority 1: Prevent duplicate entry executions on the exact same bar close
 	if !state.LastTradedBarTime.IsZero() && state.LastUpdated.Equal(state.LastTradedBarTime) {
 		return "HOLD"
 	}
 
-	// 🕒 Priority 2: Extended Opening Range Shield (Blocks trades from 9:15 to 9:27 AM IST to absorb spreads)
+	// ✅ FIX: Cooldown Timer. Prevent re-entering the same stock within 15 minutes of the last trade
+	s.stateMutex.RLock()
+	lastEntryTime, hasTraded := s.lastExecutedEntry[state.Symbol]
+	s.stateMutex.RUnlock()
+
+	if hasTraded && state.LastUpdated.Sub(lastEntryTime) < 15*time.Minute {
+		return "HOLD"
+	}
+
 	if !state.LastUpdated.IsZero() {
 		istTime := state.LastUpdated.In(s.istLocation)
 		currentTimeHourMinute := (istTime.Hour() * 100) + istTime.Minute()
 
-		// Shifted from 925 to 927 to dodge the front-running execution bottleneck visible in orders
 		if currentTimeHourMinute < 931 {
 			return "HOLD"
 		}
 	}
 
-	// Checking Long Overextension:
-	if state.NormalizedVwapDistance > 0.20 {
+	if state.NormalizedVwapDistance > 0.20 || state.NormalizedVwapDistance < -0.20 {
 		return "HOLD"
 	}
 
-	// Checking Short Overextension:
-	if state.NormalizedVwapDistance < -0.20 {
-		return "HOLD"
-	}
-
-	// Safety: Ensure VWAP data exists from the incoming feed
-	if state.LiveSessionVWAP <= 0 {
-		return "HOLD"
-	}
-
-	if state.TotalSessionBars < 8 {
+	if state.LiveSessionVWAP <= 0 || state.TotalSessionBars < 8 {
 		return "HOLD"
 	}
 
 	timeAboveVwapPct := state.TimePctAboveVwap
 	timeBelowVwapPct := 1.0 - timeAboveVwapPct
-
 	currentEff := state.NetEfficiency
 	currentSlope := state.NetEfficiencySlope
 
-	// --- 🟢 HIGH CONVICTION LONG ENTRY ---
 	if currentEff > 50.0 && state.LatestPrice > state.LiveSessionVWAP && currentSlope >= 5.0 {
 		if timeAboveVwapPct >= s.MinTimePctVwapRegime {
 			s.stateMutex.Lock()
@@ -91,7 +84,6 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 		}
 	}
 
-	// --- 🔴 HIGH CONVICTION SHORT ENTRY ---
 	if currentEff < -50.0 && state.LatestPrice < state.LiveSessionVWAP && currentSlope <= -5.0 {
 		if timeBelowVwapPct >= s.MinTimePctVwapRegime {
 			s.stateMutex.Lock()
@@ -104,30 +96,32 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	return "HOLD"
 }
 
-// CheckTakeProfit High-Velocity Slope Decay & Institutional Exhaustion
+// CheckTakeProfit Exhaustion & Trailing Profit Lock
 func (s *InstitutionalLedgerStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	currentSlope := state.NetEfficiencySlope
 
-	if currentSide == "LONG" {
-		// Exhaustion Clause: High volume spike occurs but momentum slope flips negative
-		if state.LatestVolumeRank >= 6 && currentSlope < 0 {
-			return true
-		}
-
-		// Trailing De-acceleration Clause: Fast trend breakdown guard
-		if currentSlope < -2.0 {
-			return true
-		}
+	if s.CheckTrailingProfitLock(state, currentSide, averagePrice) {
+		return true
 	}
 
-	if currentSide == "SHORT" {
-		// Mirror logic for short positions
-		if state.LatestVolumeRank >= 6 && currentSlope > 0 {
-			return true
+	// ✅ FIX: Ensure Exhaustion / Deceleration exits ONLY trigger if the trade is actually in profit
+	if state.CurrentPnL > 0 {
+		if currentSide == "LONG" {
+			if state.LatestVolumeRank >= 6 && currentSlope < 0 {
+				return true
+			}
+			if currentSlope < -2.5 { // Loosened from -2.0
+				return true
+			}
 		}
 
-		if currentSlope > 2.0 {
-			return true
+		if currentSide == "SHORT" {
+			if state.LatestVolumeRank >= 6 && currentSlope > 0 {
+				return true
+			}
+			if currentSlope > 2.5 { // Loosened from 2.0
+				return true
+			}
 		}
 	}
 
@@ -140,18 +134,15 @@ func (s *InstitutionalLedgerStrategy) CheckStopLoss(state *InstrumentState, curr
 		return false
 	}
 
-	// Dynamic calculation of threshold price distance
 	allowedLoss := averagePrice * s.StopLossPct
 
 	if currentSide == "LONG" {
-		// If current market price dumps below entry average minus allowed buffer
 		if state.LatestPrice <= (averagePrice - allowedLoss) {
 			return true
 		}
 	}
 
 	if currentSide == "SHORT" {
-		// If market price rips above short entry average plus allowed buffer
 		if state.LatestPrice >= (averagePrice + allowedLoss) {
 			return true
 		}
@@ -160,10 +151,19 @@ func (s *InstitutionalLedgerStrategy) CheckStopLoss(state *InstrumentState, curr
 	return false
 }
 
-// CheckTrailingProfitLock Peak Profit Capture Guards
-func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string) bool {
-	// Note: Engine must populate PeakPnLINR and FinalPnLINR parameters continuously inside tracking registry.
-	// This structure monitors price extension relative to the historical peak achieved during the lifespan of this trade.
+func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentState, currentSide string, averagePrice float64) bool {
+	if state.PeakPnL <= 0 || averagePrice <= 0 {
+		return false
+	}
+
+	peakYieldPct := state.PeakPnL / averagePrice
+
+	if peakYieldPct >= s.ProfitLockTrigger {
+		minimumLockedProfit := state.PeakPnL * s.ProfitLockCapture
+		if state.CurrentPnL < minimumLockedProfit {
+			return true
+		}
+	}
 
 	return false
 }
@@ -172,14 +172,16 @@ func (s *InstitutionalLedgerStrategy) CheckTrailingProfitLock(state *InstrumentS
 func (s *InstitutionalLedgerStrategy) CheckExit(state *InstrumentState, currentSide string) string {
 	currentSlope := state.NetEfficiencySlope
 
+	// ✅ FIX: Loosened structural exit thresholds from 0.5 to 1.5.
+	// This prevents the engine from shaking you out during 1-minute micro-pullbacks.
 	if currentSide == "LONG" {
-		if currentSlope < -0.5 {
+		if currentSlope < -1.5 {
 			return "EXIT_LONG"
 		}
 	}
 
 	if currentSide == "SHORT" {
-		if currentSlope > 0.5 {
+		if currentSlope > 1.5 {
 			return "EXIT_SHORT"
 		}
 	}
