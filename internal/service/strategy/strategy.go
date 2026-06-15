@@ -48,6 +48,23 @@ func NewEngine(
 	}
 }
 
+// 🔥 NEW: Implements the pipeline interface to dynamically assign live strategy metrics
+// onto the structural bar format right before any WebSockets tick packet transfers.
+func (e *Engine) EnrichLiveBar(bar *models.Bar) {
+	e.mu.RLock()
+	state, exists := e.Registry[bar.StockName]
+	if !exists {
+		e.mu.RUnlock()
+		return
+	}
+	netEff := state.NetEfficiency
+	slope := state.NetEfficiencySlope
+	e.mu.RUnlock()
+
+	bar.Analytics.NetEfficiency = netEff
+	bar.Analytics.NetEfficiencySlope = slope
+}
+
 // IngestClosedBar handles structural bar transitions and evaluates strategy exits at bar close
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Lock()
@@ -123,7 +140,6 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 			currentSide = "SHORT"
 		}
 
-		// Decay rules are fully safe to evaluate at Bar Close
 		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, state.LatestPrice, 1) {
 			e.mu.Unlock()
 			e.LogOptimizationExit(bar.StockName, "TAKE_PROFIT_BAR_CLOSE", state)
@@ -157,7 +173,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
 
-	// Sync persistent trades if Engine maps disagree with broker sides
 	if !isFlatNow && state.CurrentSetupPhase != PhaseActiveTrade {
 		state.CurrentSetupPhase = PhaseActiveTrade
 	}
@@ -188,7 +203,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	// --- 🟢 ENTRY EXECUTION WITH CONCURRENCY LOCKS ---
 	if isFlatNow && e.ActiveStrategy != nil {
-		// Hard blocking priority 1 duplication checks
 		if _, duplicateActive := e.ActiveTrades[symbol]; duplicateActive {
 			e.mu.Unlock()
 			return "HOLD"
@@ -196,7 +210,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
-			// Pre-emptively flip state phase *before* shedding context locks to eliminate race conditions
 			state.CurrentSetupPhase = PhaseActiveTrade
 			e.mu.Unlock()
 			e.LogOptimizationEntry(symbol, signal, state)
@@ -206,9 +219,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		// --- 🔴 RISK TICK MANAGEMENT ---
 		tradeLog, tradeExists := e.ActiveTrades[symbol]
 
-		// 🛠️ FIX SUFFOCATION: Only evaluate take profit decay vectors on ticks IF
-		// the trade has lasted at least 60 seconds (or a meaningful duration).
-		// Otherwise, noise flitters instantly destroy the execution strategy.
 		if tradeExists && time.Since(tradeLog.EntryTimestamp) > 1*time.Minute {
 			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
 				e.mu.Unlock()
@@ -217,10 +227,8 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 			}
 		}
 
-		// Structural trend breaks (VWAP failures) skip the time filter for protection
 		signal := e.ActiveStrategy.CheckExit(state, currentSide)
 		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
-			// Hard price boundaries crossed
 			if state.LatestPrice < (state.LiveSessionVWAP*0.995) || state.LatestPrice > (state.LiveSessionVWAP*1.005) {
 				e.mu.Unlock()
 				e.LogOptimizationExit(symbol, signal, state)
@@ -233,7 +241,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	return "HOLD"
 }
 
-// GenerateSignal is stripped of active trade logging hooks to prevent duplicate log events
 func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	state, exists := e.Registry[symbol]
@@ -255,7 +262,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 		}
 	}
 
-	// Double check duplication registers here
 	_, duplicateActive := e.ActiveTrades[symbol]
 	e.mu.Unlock()
 
@@ -267,7 +273,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 		return e.ActiveStrategy.CheckEntry(state)
 	}
 
-	// Delegate metric evaluations safely
 	if tradeLog, exists := e.ActiveTrades[symbol]; exists && time.Since(tradeLog.EntryTimestamp) > 1*time.Minute {
 		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
 			return "EXIT_" + currentSide

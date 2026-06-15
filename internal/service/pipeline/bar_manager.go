@@ -22,6 +22,8 @@ type BarManager struct {
 	wsHub           *ws.Hub
 	analyticsEngine *BarAnalyticsEngine
 	MacroListener   interface{ IngestClosedBar(bar *models.Bar) }
+	// 🔥 NEW: Hook to inject real-time NetEfficiency variables into open bars on each tick
+	TickEnricher interface{ EnrichLiveBar(bar *models.Bar) }
 }
 
 type candleState struct {
@@ -79,15 +81,20 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	bm.updateTimeframe(bm.state10m, token, ts, price, vol, 10*time.Minute, "10m", tick)
 	bm.updateTimeframe(bm.state15m, token, ts, price, vol, 15*time.Minute, "15m", tick)
 
-	// Tick-by-Tick Continuous Broadcasting to WebSockets
+	// Tick-by-Tick Continuous Broadcasting to WebSockets using standard Bar structures
 	if bm.wsHub != nil {
 		timeframes := []map[uint32]*candleState{bm.state1m, bm.state3m, bm.state5m, bm.state10m, bm.state15m}
 		for _, stateMap := range timeframes {
 			cs := stateMap[token]
 			if cs != nil && cs.bar != nil {
+				// 🔥 Prior to broadcasting, inject the strategy engine's latest live analytics
+				if bm.TickEnricher != nil {
+					bm.TickEnricher.EnrichLiveBar(cs.bar)
+				}
+
 				bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
 					"type": "bar",
-					"data": cs.bar,
+					"data": cs.bar, // Sends the true structural models.Bar packet
 				})
 			}
 		}
@@ -159,7 +166,6 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 	}
 }
 
-// processTickForCandle strictly updates core physical transactions on the candle state
 func (bm *BarManager) processTickForCandle(
 	cs *candleState,
 	tick *models.EnrichedTick,
@@ -168,7 +174,6 @@ func (bm *BarManager) processTickForCandle(
 ) {
 	price := tick.Raw.LastPrice
 
-	// 1. Structural Candlestick Boundary Extensions
 	if price > cs.bar.High {
 		cs.bar.High = price
 	}
@@ -177,7 +182,6 @@ func (bm *BarManager) processTickForCandle(
 	}
 	cs.bar.Close = price
 
-	// 2. Accumulate Totals
 	cs.bar.Volume += vol
 	cs.bar.TickCount++
 
@@ -219,15 +223,17 @@ func (bm *BarManager) updateTimeframe(
 
 		bm.analyticsEngine.AnalyzeClose(closedBar)
 
+		// ⚡ Run metrics and write to DB on bar close
+		if bm.MacroListener != nil {
+			bm.MacroListener.IngestClosedBar(closedBar)
+		}
+
+		// Broadcast final bar close event using the exact layout on standard channel
 		if bm.wsHub != nil {
-			bm.wsHub.BroadcastJSON(tick.Raw.StockName+":"+timeframe, map[string]any{
+			bm.wsHub.BroadcastJSON(closedBar.StockName+":"+timeframe, map[string]any{
 				"type": "bar",
 				"data": closedBar,
 			})
-		}
-
-		if bm.MacroListener != nil {
-			bm.MacroListener.IngestClosedBar(closedBar)
 		}
 
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
