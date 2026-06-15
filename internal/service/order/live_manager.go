@@ -18,23 +18,25 @@ import (
 )
 
 type LiveOrderManager struct {
-	mu              sync.RWMutex
-	kiteClient      *kiteconnect.Client
-	dbWriter        *writer.DBWriter
-	wsHub           *ws.Hub
-	activePositions map[string]*models.Position
-	orderBook       []models.OrderBookEntry
-	lastPrices      map[string]float64
+	mu                     sync.RWMutex
+	kiteClient             *kiteconnect.Client
+	dbWriter               *writer.DBWriter
+	wsHub                  *ws.Hub
+	activePositions        map[string]*models.Position
+	orderBook              []models.OrderBookEntry
+	lastPrices             map[string]float64
+	positionChangeCallback func(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64)
 }
 
 func NewLiveOrderManager(kc *kiteconnect.Client, hub *ws.Hub, db *writer.DBWriter) *LiveOrderManager {
 	return &LiveOrderManager{
-		kiteClient:      kc,
-		dbWriter:        db,
-		wsHub:           hub,
-		activePositions: make(map[string]*models.Position),
-		orderBook:       make([]models.OrderBookEntry, 0),
-		lastPrices:      make(map[string]float64),
+		kiteClient:             kc,
+		dbWriter:               db,
+		wsHub:                  hub,
+		activePositions:        make(map[string]*models.Position),
+		orderBook:              make([]models.OrderBookEntry, 0),
+		lastPrices:             make(map[string]float64),
+		positionChangeCallback: nil,
 	}
 }
 
@@ -516,10 +518,29 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		return fmt.Errorf("failed to recover position frames from exchange: %w", err)
 	}
 
-	lm.mu.Lock()
-	defer lm.mu.Unlock()
+	// 🔌 Local tracking structure to capture snapshots inside the lock
+	type posChangeEvent struct {
+		symbol      string
+		netQty      int
+		side        string
+		avgPrice    float64
+		realizedPnL float64
+	}
+	var eventsToDispatch []posChangeEvent
 
-	// Track which keys were confirmed by the exchange
+	lm.mu.Lock()
+	// Defer block ensures that callbacks execute ONLY after the mutex is completely freed
+	defer func() {
+		lm.mu.Unlock()
+
+		// 🔥 DISPATCH CAPTURED EVENTS SAFELY OUTSIDE LOCK FRAME
+		if lm.positionChangeCallback != nil && len(eventsToDispatch) > 0 {
+			for _, ev := range eventsToDispatch {
+				go lm.positionChangeCallback(ev.symbol, ev.netQty, ev.side, ev.avgPrice, ev.realizedPnL)
+			}
+		}
+	}()
+
 	exchangeKeys := make(map[string]bool)
 
 	for _, pos := range positions.Net {
@@ -528,50 +549,46 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		key := fmt.Sprintf("%s:%s", symbolKey, productKey)
 		exchangeKeys[key] = true
 
-		// 1. If exchange confirms it's flat, explicitly neutralize our local structure
+		// 1. Position is Flat
 		if pos.Quantity == 0 {
 			localPos, exists := lm.activePositions[key]
-
-			// --- FIX: Force instantiate the position even if it was closed ---
-			// This ensures our Healer reaches the database to wipe out old corrupted values
 			if !exists {
-				localPos = &models.Position{
-					Symbol:  symbolKey,
-					Product: productKey,
-				}
+				localPos = &models.Position{Symbol: symbolKey, Product: productKey}
 				lm.activePositions[key] = localPos
 			}
 
 			localPos.NetQuantity = 0
-			localPos.Side = ""
+			localPos.Side = "FLAT" // ✅ Unified alignment with Risk Manager string requirements
 			localPos.AveragePrice = 0
 			localPos.UnrealizedPnL = 0
 			localPos.TargetPrice = 0
 			localPos.StopLossPrice = 0
 			localPos.LastFillQty = 0
-
-			// THE ULTIMATE HEALER: For closed intraday positions, Zerodha's total PnL
-			// is the absolute, verified Realized PnL truth. (Notice the capital 'L' here!)
 			localPos.RealizedPnL = pos.PnL
 
 			if lm.dbWriter != nil {
 				lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
 			}
 			lm.broadcastPositionUpdate(localPos)
+
+			// Safely queue event snapshot for post-lock execution
+			eventsToDispatch = append(eventsToDispatch, posChangeEvent{
+				symbol:      symbolKey,
+				netQty:      0,
+				side:        "FLAT",
+				avgPrice:    0.0,
+				realizedPnL: pos.PnL,
+			})
 			continue
 		}
 
-		// 2. OVERWRITE LOGIC: Apply absolute state from Zerodha for Open Positions
+		// 2. Open Active Position
 		localPos, exists := lm.activePositions[key]
 		if !exists {
-			localPos = &models.Position{
-				Symbol:  symbolKey,
-				Product: productKey,
-			}
+			localPos = &models.Position{Symbol: symbolKey, Product: productKey}
 			lm.activePositions[key] = localPos
 		}
 
-		// Directly overwrite the local quantity with Zerodha's absolute truth
 		localPos.NetQuantity = pos.Quantity
 		if pos.Quantity > 0 {
 			localPos.Side = "LONG"
@@ -580,8 +597,6 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		}
 
 		localPos.AveragePrice = lm.calculateTrueAveragePrice(symbolKey, pos.Quantity)
-
-		// Heal Open Positions' Realized PnL too
 		localPos.RealizedPnL = pos.Realised
 
 		if lm.dbWriter != nil {
@@ -589,14 +604,23 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		}
 		lm.broadcastPositionUpdate(localPos)
 
+		// Safely queue event snapshot for post-lock execution
+		eventsToDispatch = append(eventsToDispatch, posChangeEvent{
+			symbol:      symbolKey,
+			netQty:      localPos.NetQuantity,
+			side:        localPos.Side,
+			avgPrice:    localPos.AveragePrice,
+			realizedPnL: pos.Realised,
+		})
+
 		logger.Infof("[Sync] Successfully recovered live active position tracking: %s Qty %d at %.2f", pos.Tradingsymbol, pos.Quantity, localPos.AveragePrice)
 	}
 
-	// 3. Wipe out local ghost entries that do not exist in the broker's portfolio response at all
+	// 3. Clean up ghost local entries
 	for key, localPos := range lm.activePositions {
 		if !exchangeKeys[key] && localPos.NetQuantity != 0 {
 			localPos.NetQuantity = 0
-			localPos.Side = ""
+			localPos.Side = "FLAT" // ✅ Unified string alignment
 			localPos.AveragePrice = 0
 			localPos.TargetPrice = 0
 			localPos.StopLossPrice = 0
@@ -605,6 +629,14 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 				lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
 			}
 			lm.broadcastPositionUpdate(localPos)
+
+			eventsToDispatch = append(eventsToDispatch, posChangeEvent{
+				symbol:      localPos.Symbol,
+				netQty:      0,
+				side:        "FLAT",
+				avgPrice:    0.0,
+				realizedPnL: localPos.RealizedPnL,
+			})
 		}
 	}
 
@@ -788,4 +820,10 @@ func (lm *LiveOrderManager) calculateTrueAveragePrice(symbol string, netQuantity
 		return 0
 	}
 	return totalValue / float64(gatheredQty)
+}
+
+func (lm *LiveOrderManager) RegisterPositionChangeCallback(cb func(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64)) {
+	lm.mu.Lock()
+	defer lm.mu.Unlock()
+	lm.positionChangeCallback = cb
 }

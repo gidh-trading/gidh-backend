@@ -1,6 +1,10 @@
 package risk
 
-import "gidh-backend/internal/service/models"
+import (
+	"fmt"
+	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/strategy"
+)
 
 // GetUIContractNote delivers a deep copy of performance archives to feed visualization dashboards.
 func (rm *RiskManager) GetUIContractNote() UIContractNotePayload {
@@ -65,4 +69,34 @@ func (rm *RiskManager) CalculateItemizedCharges(qty int, price float64) float64 
 	rm.recordTransactionCosts(charges)
 
 	return total
+}
+
+// HandleManualAndBrokerStateSync forces localized memory maps to snap to actual execution realities
+func (rm *RiskManager) HandleManualAndBrokerStateSync(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64) {
+	key := fmt.Sprintf("%s:MIS", symbol)
+
+	rm.mu.Lock()
+	pos, exists := rm.agentPositions[key]
+	if !exists {
+		pos = &models.Position{Symbol: symbol, Product: "MIS", NetQuantity: 0, Side: "FLAT"}
+		rm.agentPositions[key] = pos
+	}
+
+	// Capture previous side to detect unexpected termination
+	oldSide := pos.Side
+
+	// Overwrite Risk Manager's internal state directly with Broker absolute truth
+	pos.NetQuantity = netQty
+	pos.Side = side
+	pos.AveragePrice = avgPrice
+	rm.mu.Unlock()
+
+	// 🚨 CRITICAL STRATEGY OPTIMIZATION SYNC
+	// If the position dropped to FLAT but the strategy engine thinks it is still in an active trade,
+	// a manual user intervention took place. We must force-terminate the active Optimization Trade Log.
+	if side == "FLAT" && oldSide != "FLAT" {
+		rm.strategyEngine.LogOptimizationExit(symbol, "MANUAL_USER_INTERVENTION_SQUARE_OFF", &strategy.InstrumentState{
+			LatestPrice: avgPrice, // fallback coordinate
+		})
+	}
 }

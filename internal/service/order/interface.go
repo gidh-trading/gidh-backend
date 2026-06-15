@@ -25,4 +25,6 @@ type PositionManager interface {
 	GetAllPositions() []models.Position
 	ClearPositions()
 	ReconstituteState(orders []models.OrderBookEntry, positions []models.Position)
+
+	RegisterPositionChangeCallback(cb func(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64))
 }

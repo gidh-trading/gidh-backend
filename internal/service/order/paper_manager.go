@@ -15,25 +15,34 @@ import (
 )
 
 type PaperPositionManager struct {
-	mu              sync.RWMutex
-	activePositions map[string]*models.Position
-	orderBook       []models.OrderBookEntry
-	lastPrices      map[string]float64
-	lastTimestamps  map[string]time.Time
-	currentSimTime  time.Time
-	wsHub           *ws.Hub
-	dbWriter        *writer.DBWriter
+	mu                     sync.RWMutex
+	activePositions        map[string]*models.Position
+	orderBook              []models.OrderBookEntry
+	lastPrices             map[string]float64
+	lastTimestamps         map[string]time.Time
+	currentSimTime         time.Time
+	wsHub                  *ws.Hub
+	dbWriter               *writer.DBWriter
+	positionChangeCallback func(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64)
 }
 
 func NewPaperPositionManager(hub *ws.Hub, db *writer.DBWriter) *PaperPositionManager {
 	return &PaperPositionManager{
-		activePositions: make(map[string]*models.Position),
-		orderBook:       make([]models.OrderBookEntry, 0),
-		lastPrices:      make(map[string]float64),
-		lastTimestamps:  make(map[string]time.Time),
-		wsHub:           hub,
-		dbWriter:        db,
+		activePositions:        make(map[string]*models.Position),
+		orderBook:              make([]models.OrderBookEntry, 0),
+		lastPrices:             make(map[string]float64),
+		lastTimestamps:         make(map[string]time.Time),
+		wsHub:                  hub,
+		dbWriter:               db,
+		positionChangeCallback: nil,
 	}
+}
+
+// RegisterPositionChangeCallback exposes the registry hook for the app bootstrap layer
+func (pm *PaperPositionManager) RegisterPositionChangeCallback(cb func(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64)) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	pm.positionChangeCallback = cb
 }
 
 // PlaceOrder routes entry intent. MARKET fills instantly, LIMIT remains PENDING.
@@ -76,13 +85,19 @@ func (pm *PaperPositionManager) PlaceOrder(ctx context.Context, req models.Order
 	}
 	pm.broadcastOrderUpdate(entry)
 
+	// 🔥 NEW: Emit change event if it filled instantly via MARKET order
+	if entry.OrderType == "MARKET" {
+		pm.broadcastPositionChangeCallback(entry.Symbol)
+	}
+
 	return orderID, nil
 }
 
 // OnPriceUpdate parses ticks, executes limit order fills, and scans local SL/TP boundaries
 func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts time.Time) {
 	pm.mu.Lock()
-	defer pm.mu.Unlock()
+	// defer handling removed to allow deterministic callback orchestration outside lock frames if needed,
+	// but keeping your structured flow simple:
 
 	symbolKey := strings.ToUpper(symbol)
 	pm.lastPrices[symbolKey] = ltp
@@ -104,6 +119,9 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 				}
 				pm.updatePositionState(order.Symbol, "MIS", order.Side, order.Qty, order.Price, ts)
 				pm.broadcastOrderUpdate(*order)
+
+				// 🔥 NEW: Notify Risk & Strategy layers of limit fill change
+				pm.broadcastPositionChangeCallback(order.Symbol)
 			}
 		}
 	}
@@ -114,7 +132,6 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 		pos, exists := pm.activePositions[key]
 
 		if exists && pos.NetQuantity != 0 {
-			// Update ongoing simulation open metrics
 			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 
 			isTargetHit := (pos.Side == "LONG" && pos.TargetPrice > 0 && ltp >= pos.TargetPrice) ||
@@ -130,11 +147,15 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 				}
 				logger.Infof("[Paper] Local %s Triggered for %s at %.2f", triggerType, pos.Symbol, ltp)
 				pm.executeInternalMarketExit(pos, ltp, ts)
+
+				// 🔥 NEW: Notify Risk & Strategy layers that position has been flattened out completely
+				pm.broadcastPositionChangeCallback(pos.Symbol)
 			} else {
 				pm.broadcastPositionUpdate(pos)
 			}
 		}
 	}
+	pm.mu.Unlock()
 }
 
 // UpdatePositionMetadata commits local boundaries straight onto our position memory box
@@ -284,6 +305,11 @@ func (pm *PaperPositionManager) ExitPosition(ctx context.Context, symbol string,
 	pm.broadcastOrderUpdate(exitOrder)
 
 	pm.updatePositionState(symbolUpper, product, side, quantity, ltp, exitTime)
+
+	// 🔥 NEW: Emit user-mandated square off event immediately!
+	// This catches the manual exit and forces Strategy Engine to log "MANUAL_USER_INTERVENTION_SQUARE_OFF"
+	pm.broadcastPositionChangeCallback(symbolUpper)
+
 	return nil
 }
 
@@ -472,5 +498,28 @@ func (pm *PaperPositionManager) ReconstituteState(orders []models.OrderBookEntry
 			logger.Infof("[Paper Startup] Reconstituted active memory slot for %s: NetQty=%d, SL=%.2f, TP=%.2f",
 				key, pos.NetQuantity, pos.StopLossPrice, pos.TargetPrice)
 		}
+	}
+}
+
+// broadcastPositionChangeCallback retrieves the snapshot state safely and fires it asynchronously
+func (pm *PaperPositionManager) broadcastPositionChangeCallback(symbol string) {
+	// Assume pm.mu is ALREADY locked by the calling context method.
+	key := fmt.Sprintf("%s:MIS", strings.ToUpper(symbol))
+	pos, exists := pm.activePositions[key]
+
+	if !exists {
+		return
+	}
+
+	// Capture deep-copy states inside the lock boundary
+	netQty := pos.NetQuantity
+	side := pos.Side
+	avgPrice := pos.AveragePrice
+	realizedPnL := pos.RealizedPnL
+	cb := pm.positionChangeCallback
+
+	// If a callback is registered, fire it outside the core engine thread pool safely
+	if cb != nil {
+		go cb(symbol, netQty, side, avgPrice, realizedPnL)
 	}
 }
