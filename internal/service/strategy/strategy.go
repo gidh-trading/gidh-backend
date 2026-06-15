@@ -208,6 +208,8 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	// --- 🟢 ENTRY EXECUTION WITH CONCURRENCY LOCKS ---
 	if isFlatNow && e.ActiveStrategy != nil {
+		// FIX: Hard-abort execution if an active trade entry log is already tracked in our memory pool.
+		// This intercepts microsecond multi-tick cascading signals before executing redundant actions.
 		if _, duplicateActive := e.ActiveTrades[symbol]; duplicateActive {
 			e.mu.Unlock()
 			return "HOLD"
@@ -216,6 +218,9 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			state.CurrentSetupPhase = PhaseActiveTrade
+
+			// Unlock briefly to let LogOptimizationEntry acquire its internal lock safely,
+			// preventing deadlock while executing logging operations.
 			e.mu.Unlock()
 			e.LogOptimizationEntry(symbol, signal, state)
 			return signal

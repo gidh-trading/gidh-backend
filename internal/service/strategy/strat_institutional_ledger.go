@@ -1,15 +1,20 @@
 package strategy
 
 import (
+	"sync"
 	"time"
 )
 
 type InstitutionalLedgerStrategy struct {
-	VwapBufferPct     float64
-	istLocation       *time.Location
-	StopLossPct       float64 // 🛡️ Emergency Hard Stop Risk Buffer
-	ProfitLockTrigger float64 // 📈 PnL threshold ratio to engage trailing lock
-	ProfitLockCapture float64 // 🔒 Percentage of peak profit guaranteed
+	VwapBufferPct        float64
+	istLocation          *time.Location
+	StopLossPct          float64
+	ProfitLockTrigger    float64
+	ProfitLockCapture    float64
+	MinTimePctVwapRegime float64 // 📊 Minimum session percentage above/below VWAP to confirm directional regime
+
+	stateMutex        sync.RWMutex
+	lastExecutedEntry map[string]time.Time
 }
 
 func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
@@ -19,11 +24,13 @@ func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
 	}
 
 	return &InstitutionalLedgerStrategy{
-		VwapBufferPct:     0.0012,
-		istLocation:       loc,
-		StopLossPct:       0.0035, // 0.35% Hard Maximum Risk per position
-		ProfitLockTrigger: 0.0060, // Engage trailing protection when price gains 0.60%
-		ProfitLockCapture: 0.50,   // Lock in 50% of peak profits once triggered
+		VwapBufferPct:        0.0012,
+		istLocation:          loc,
+		StopLossPct:          0.0035,
+		ProfitLockTrigger:    0.0060,
+		ProfitLockCapture:    0.50,
+		MinTimePctVwapRegime: 0.70,
+		lastExecutedEntry:    make(map[string]time.Time),
 	}
 }
 
@@ -44,7 +51,7 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 		currentTimeHourMinute := (istTime.Hour() * 100) + istTime.Minute()
 
 		// Shifted from 925 to 927 to dodge the front-running execution bottleneck visible in orders
-		if currentTimeHourMinute < 927 {
+		if currentTimeHourMinute < 931 {
 			return "HOLD"
 		}
 	}
@@ -64,17 +71,34 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 		return "HOLD"
 	}
 
+	if state.TotalSessionBars < 8 {
+		return "HOLD"
+	}
+
+	timeAboveVwapPct := state.TimePctAboveVwap
+	timeBelowVwapPct := 1.0 - timeAboveVwapPct
+
 	currentEff := state.NetEfficiency
 	currentSlope := state.NetEfficiencySlope
 
 	// --- 🟢 HIGH CONVICTION LONG ENTRY ---
 	if currentEff > 50.0 && state.LatestPrice > state.LiveSessionVWAP && currentSlope >= 5.0 {
-		return "GO_LONG"
+		if timeAboveVwapPct >= s.MinTimePctVwapRegime {
+			s.stateMutex.Lock()
+			s.lastExecutedEntry[state.Symbol] = state.LastUpdated
+			s.stateMutex.Unlock()
+			return "GO_LONG"
+		}
 	}
 
 	// --- 🔴 HIGH CONVICTION SHORT ENTRY ---
 	if currentEff < -50.0 && state.LatestPrice < state.LiveSessionVWAP && currentSlope <= -5.0 {
-		return "GO_SHORT"
+		if timeBelowVwapPct >= s.MinTimePctVwapRegime {
+			s.stateMutex.Lock()
+			s.lastExecutedEntry[state.Symbol] = state.LastUpdated
+			s.stateMutex.Unlock()
+			return "GO_SHORT"
+		}
 	}
 
 	return "HOLD"
