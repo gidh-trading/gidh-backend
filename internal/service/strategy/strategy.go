@@ -170,6 +170,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	e.updateCoreTickMetrics(state, enrichedTick.Raw)
 	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
+	state.NetEfficiencySlope = CalculateLinearRegressionSlope(state.NetEfficiencyHistory)
 
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
 
@@ -244,6 +245,8 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	state, exists := e.Registry[symbol]
+
+	// Ensure the engine states are cleanly mapped
 	if !exists || e.ActiveStrategy == nil {
 		e.mu.Unlock()
 		return "HOLD"
@@ -251,7 +254,8 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 
 	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
 
-	if currentSide != "FLAT" && currentSide != "" {
+	// Update live unrealized pricing profiles
+	if currentSide != "FLAT" && currentSide != "" && netQty > 0 {
 		if currentSide == "LONG" {
 			state.CurrentPnL = (state.LatestPrice - averagePrice)
 		} else {
@@ -262,21 +266,18 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 		}
 	}
 
-	_, duplicateActive := e.ActiveTrades[symbol]
 	e.mu.Unlock()
 
-	isFlatNow := currentSide == "FLAT" || currentSide == ""
+	// Clean entry/exit evaluations matching Risk Manager positions
+	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 	if isFlatNow {
-		if duplicateActive {
-			return "HOLD"
-		}
+		// Clean pass directly into your strategy card checks
 		return e.ActiveStrategy.CheckEntry(state)
 	}
 
-	if tradeLog, exists := e.ActiveTrades[symbol]; exists && time.Since(tradeLog.EntryTimestamp) > 1*time.Minute {
-		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
-			return "EXIT_" + currentSide
-		}
+	// Active management checks
+	if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+		return "EXIT_" + currentSide
 	}
 
 	return e.ActiveStrategy.CheckExit(state, currentSide)
@@ -333,16 +334,25 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 	e.mu.Lock()
 	tradeLog, exists := e.ActiveTrades[symbol]
 	if !exists {
+		// 🛡️ Safe Concurrency Intercept:
+		// If another concurrent thread (e.g., IngestClosedBar or UpdateContext)
+		// already handled this exit signal, abort instantly.
 		e.mu.Unlock()
 		return
 	}
+
+	// Synchronously delete the active trade record inside the active lock boundary.
+	// This makes sure the very next concurrent thread hits `!exists` above and exits.
 	delete(e.ActiveTrades, symbol)
+
+	// Clean up position state metrics synchronously
 	state.CurrentSetupPhase = PhaseNeutral
 	state.PeakEfficiency = 0.0
 	state.CurrentPnL = 0.0
 	state.PeakPnL = 0.0
 	e.mu.Unlock()
 
+	// --- 📈 CALCULATE TRADE OVERALL PERFORMANCE LOG ---
 	tradeLog.ExitTimestamp = time.Now()
 	tradeLog.ExitPrice = state.LatestPrice
 	tradeLog.ExitReason = signal
@@ -363,6 +373,7 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 		tradeLog.EfficiencyCaptureRatio = -1.0
 	}
 
+	// Dispatch historical accounting metrics asynchronously over the worker pool
 	go func(logRecord *OptimizationTradeLog) {
 		pool := db.GetPool()
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -381,6 +392,7 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 		}
 	}(tradeLog)
 
+	// Single unified execution hook pass-through
 	if e.OnTradeCompleted != nil {
 		e.OnTradeCompleted(tradeLog)
 	}

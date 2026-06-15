@@ -2,7 +2,6 @@ package risk
 
 import (
 	"context"
-	"fmt"
 	"gidh-backend/internal/service/strategy"
 	"gidh-backend/pkg/logger"
 	"sync"
@@ -18,9 +17,9 @@ const (
 	MaxLeverage           = 5.0
 	MaxCapitalPerStockPct = 0.30
 	AgentEmail            = "algo.trader@gidh.tech"
-	// 🕒 Intraday Time Cutoffs
-	AutoSquareOffHour   = 15 // 3 PM
-	AutoSquareOffMinute = 0  // 00 minutes
+	AutoSquareOffHour     = 15 // 3 PM
+	AutoSquareOffMinute   = 0  // 00 minutes
+	MaxConcurrentTrades   = 4
 )
 
 type UIContractNotePayload struct {
@@ -58,7 +57,6 @@ func NewRiskManager(om order.PositionManager, se *strategy.Engine) *RiskManager 
 func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) {
 	rawTick := enrichedTick.Raw
 	symbol := rawTick.StockName
-	key := fmt.Sprintf("%s:MIS", symbol)
 	tickTime := rawTick.Timestamp
 
 	rm.mu.Lock()
@@ -72,11 +70,9 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
 
 	if currentHM >= cutoffHM {
-		// 🔒 FIX: We ALREADY hold the lock from the top of the function. DO NOT lock again!
 		logger.Warnf("🕒 Intraday Cutoff [3:00 PM] breached. Engaging Auto-Square Off across all instruments...")
-		rm.circuitBroken = true // Lock the system from taking ANY fresh entries
+		rm.circuitBroken = true
 
-		// Iterate through all tracked positions and force a market close out
 		for mapKey, pos := range rm.agentPositions {
 			if pos.NetQuantity != 0 && pos.Side != "FLAT" {
 				logger.Infof("⚡ Auto-Squaring off open position for %s. Qty: %d, Side: %s", pos.Symbol, pos.NetQuantity, pos.Side)
@@ -88,10 +84,8 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 					exitSide = "BUY"
 				}
 
-				// Build and dispatch the market execution order immediately
 				exitReq := rm.buildExitOrderRequest(pos, exitSide)
 
-				// Log accounting performance data
 				totalCharges := rm.CalculateItemizedCharges(pos.NetQuantity, pos.AveragePrice)
 				rm.globalSummary.TotalCharges += totalCharges
 				rm.dailyChargesPaid += totalCharges
@@ -99,45 +93,38 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 				rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
 					Timestamp:       tickTime,
 					Side:            exitSide,
-					Symbol:          pos.Symbol, // Store actual asset token identifier
+					Symbol:          pos.Symbol,
 					Exchange:        "NSE",
 					Quantity:        pos.NetQuantity,
 					AveragePrice:    rawTick.LastPrice,
 					AllocatedCharge: totalCharges,
 				})
 
-				// Sync exit cooling metrics uniformly via map key tracking
 				rm.lastExitTime[mapKey] = tickTime
 
-				// Clear memory tracking properties cleanly
 				pos.NetQuantity = 0
 				pos.Side = "FLAT"
 				pos.AveragePrice = 0.0
 
-				// Dispatch order execution over the thread pool asynchronously
 				go rm.orderManager.PlaceOrder(context.Background(), exitReq)
 			}
 		}
 		rm.mu.Unlock()
-		return // Eject immediately
+		return
 	}
 
-	pos, exists := rm.agentPositions[key]
+	// 🛠️ USE CLEAN UNIFORM SYMBOL KEY THROUGHOUT ENTIRE PIPELINE INTERFACES
+	pos, exists := rm.agentPositions[symbol]
 	if !exists {
 		pos = &models.Position{Symbol: symbol, Product: "MIS", NetQuantity: 0, Side: "FLAT"}
-		rm.agentPositions[key] = pos
+		rm.agentPositions[symbol] = pos
 	}
 
-	// ⚡ STATE RECOVERY: MANUAL INTERVENTION & OVER-THE-AIR LIMIT FILL SAFETY SYNC
-	// If you manually squared off the asset, or a resting order filled silently,
-	// pos.NetQuantity will be 0, but our tracking memory might still show "LONG" or "SHORT".
-	// We force a localized memory sync here to prevent stale signals or trade collisions.
 	if pos.NetQuantity == 0 && pos.Side != "FLAT" {
 		pos.Side = "FLAT"
 		pos.AveragePrice = 0.0
 	}
 
-	// Account-Level Global Drawdown Circuit Breaker
 	totalNetSessionPnL := rm.dailyRealized - rm.dailyChargesPaid
 	if totalNetSessionPnL <= -MaxDailyLossAllowed {
 		rm.circuitBroken = true
@@ -151,24 +138,31 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	netQty := pos.NetQuantity
 	rm.mu.Unlock()
 
-	// 🚨 STEP 1: Process real-time tick calculations and check trailing profit locks
+	// 🚨 STEP 1: Process real-time tick calculations
 	tickSignal := rm.strategyEngine.UpdateContext(enrichedTick, currentSide, avgPrice, netQty)
 
-	// ⚡ CRITICAL TRAILING HIERARCHY OVERRIDE
-	// If the real-time tick says the profit lock was breached, we liquidate instantly.
-	// We return early to ensure bar-close indicator flips can never overwrite this exit.
 	if tickSignal == "EXIT_LONG" || tickSignal == "EXIT_SHORT" {
 		rm.mu.Lock()
 		if pos.NetQuantity != 0 {
-			// Explicitly passing the exit reason lets your database logs categorize this perfectly
 			rm.executeBrokerOrder(symbol, pos, "Intelligent Volatility Profit Lock Triggered", rawTick.Timestamp)
 		}
 		rm.mu.Unlock()
-		return // Block any further processing for this tick packet!
+		return
 	}
 
-	// STEP 2: Evaluate standard bar-close triggers only if trailing locks are clear
+	// STEP 2: Evaluate standard triggers
 	barSignal := rm.strategyEngine.GenerateSignal(symbol, currentSide, avgPrice, netQty)
+
+	var engineEff float64
+	var engineVwap float64
+	if state, exists := rm.strategyEngine.Registry[symbol]; exists {
+		engineEff = state.NetEfficiency
+		engineVwap = state.LiveSessionVWAP
+	}
+
+	logger.Debugf("🔍 STRATEGY BRIDGE | Symbol: %s | Signal: %s | NetEff: %.2f | Price: %.2f | VWAP: %.2f",
+		symbol, barSignal, engineEff, rawTick.LastPrice, engineVwap)
+
 	if barSignal == "HOLD" {
 		return
 	}
@@ -178,6 +172,21 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 	// Entry Order Logic
 	if (barSignal == "GO_SHORT" || barSignal == "GO_LONG") && pos.NetQuantity == 0 {
+
+		activeTradesCount := 0
+		for _, p := range rm.agentPositions {
+			if p.NetQuantity != 0 && p.Side != "FLAT" {
+				activeTradesCount++
+			}
+		}
+
+		// If we are already running 4 trades, reject this execution attempt silently
+		if activeTradesCount >= MaxConcurrentTrades {
+			logger.Debugf("⚠️ RISK MANAGER BLOCKED ENTRY: Total active trades cap reached (%d/%d). Skipping entry for %s",
+				activeTradesCount, MaxConcurrentTrades, symbol)
+			return
+		}
+
 		if exitTime, ok := rm.lastExitTime[symbol]; ok {
 			if rawTick.Timestamp.Sub(exitTime) < 5*time.Second {
 				return
@@ -186,6 +195,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 		allowedQty, _ := rm.CalculatePositionSizeAndFees(symbol, rawTick.LastPrice)
 		if allowedQty <= 0 {
+			logger.Warnf("⚠️ Risk Allocation Blocked Size: Calculated Qty for %s at %.2f is 0", symbol, rawTick.LastPrice)
 			return
 		}
 
@@ -200,6 +210,8 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		pos.Side = posSide
 		pos.AveragePrice = rawTick.LastPrice
 
+		logger.Infof("🚀 RISK MANAGER DISPATCHING EXECUTION ORDER: %s %s Qty: %d", txType, symbol, allowedQty)
+
 		go rm.orderManager.PlaceOrder(context.Background(), models.OrderRequest{
 			Symbol:          symbol,
 			Product:         "MIS",
@@ -209,7 +221,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			UserEmail:       AgentEmail,
 		})
 
-		// Closed Bar Structural Exit Logic
 	} else if (barSignal == "EXIT_LONG" || barSignal == "EXIT_SHORT") && pos.NetQuantity != 0 {
 		if (barSignal == "EXIT_LONG" && pos.Side == "LONG") || (barSignal == "EXIT_SHORT" && pos.Side == "SHORT") {
 			rm.executeBrokerOrder(symbol, pos, "Strategy Interface Mandated Direction Flip", rawTick.Timestamp)

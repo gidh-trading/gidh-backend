@@ -48,6 +48,11 @@ type InstrumentState struct {
 	NetEfficiencyHistory []float64           `json:"net_efficiency_history"` // Cached trailing row buffer for slope
 	PeakEfficiency       float64             `json:"peak_efficiency"`        // 🔒 Safely isolated peak cache container
 
+	// --- 📈 NEW: Dynamic Exit Tracking State ---
+	ActiveTradePeakEfficiency float64 `json:"active_trade_peak_efficiency"`
+	BaseDecayFactor           float64 `json:"base_decay_factor"`
+	CurrentDecayWatermark     float64 `json:"current_decay_watermark"`
+
 	// --- Trade Tracking & Historical Buffers ---
 	CurrentSetupPhase SetupPhase                `json:"current_setup_phase"`
 	LastTradedBarTime time.Time                 `json:"last_traded_bar_time"`
