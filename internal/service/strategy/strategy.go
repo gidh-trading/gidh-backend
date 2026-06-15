@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"math"
 	"sync"
 	"time"
 
@@ -65,7 +64,7 @@ func (e *Engine) EnrichLiveBar(bar *models.Bar) {
 	bar.Analytics.NormalizedVwapDistance = vwapDist
 }
 
-// IngestClosedBar Tracks and saves metric snapshot arrays when a bar close frame triggers
+// --- 🛡️ UPDATE INGESTCLOSEDBAR STRUCTURAL REMOVAL ---
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Lock()
 	state := e.getOrInitializeState(bar.StockName)
@@ -93,7 +92,6 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 
 	state.NetEfficiencySlope = CalculateLinearRegressionSlope(state.NetEfficiencyHistory)
 
-	// --- 📈 PNL & EFFICIENCY METRIC TRACING ON BAR CLOSE ---
 	if state.CurrentSetupPhase == PhaseActiveTrade {
 		if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists {
 			var currentUnrealized float64
@@ -107,20 +105,8 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 			if state.CurrentPnL > state.PeakPnL {
 				state.PeakPnL = state.CurrentPnL
 			}
-
 			if state.PeakPnL > tradeLog.PeakPnLINR {
 				tradeLog.PeakPnLINR = state.PeakPnL
-			}
-
-			if tradeLog.TradeSide == "LONG" {
-				if state.NetEfficiency > state.PeakEfficiency {
-					state.PeakEfficiency = state.NetEfficiency
-				}
-			} else if tradeLog.TradeSide == "SHORT" {
-				absEff := math.Abs(state.NetEfficiency)
-				if state.NetEfficiency < 0 && absEff > state.PeakEfficiency {
-					state.PeakEfficiency = absEff
-				}
 			}
 		}
 	} else {
@@ -134,7 +120,8 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	bar.Analytics.NetEfficiencySlope = state.NetEfficiencySlope
 	bar.Analytics.NormalizedVwapDistance = state.NormalizedVwapDistance
 
-	// --- 🛡️ EVALUATE STRUCTURAL EXITS AND TAKE PROFITS AT BAR CLOSE ---
+	// 🔥 CRITICAL REFACTOR: Removed Micro-Slope CheckExit triggers here.
+	// Only evaluate pure mechanical safety exits (Stop Loss & Trailing Target Safeguard).
 	if state.CurrentSetupPhase == PhaseActiveTrade && e.ActiveStrategy != nil {
 		currentSide := "LONG"
 		var avgPrice float64
@@ -147,22 +134,14 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 			avgPrice = state.LatestPrice
 		}
 
-		// ✅ FIX 2: Stop Loss evaluation integrated
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, avgPrice, 1) {
 			e.mu.Unlock()
-			e.LogOptimizationExit(bar.StockName, "STOP_LOSS", state)
+			e.LogOptimizationExit(bar.StockName, "SAFETY_STOP_LOSS", state)
 			e.mu.Lock()
 		} else if e.ActiveStrategy.CheckTakeProfit(state, currentSide, avgPrice, 1) {
 			e.mu.Unlock()
-			e.LogOptimizationExit(bar.StockName, "TAKE_PROFIT_BAR_CLOSE", state)
+			e.LogOptimizationExit(bar.StockName, "SAFETY_HIGH_CONF_TRAILING", state)
 			e.mu.Lock()
-		} else {
-			signal := e.ActiveStrategy.CheckExit(state, currentSide)
-			if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
-				e.mu.Unlock()
-				e.LogOptimizationExit(bar.StockName, signal, state)
-				e.mu.Lock()
-			}
 		}
 	}
 
@@ -174,7 +153,7 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	}
 }
 
-// UpdateContext processes ticks and restricts live actions exclusively to entries and immediate price safety checks
+// --- 🟢 UPDATECONTEXT WITH GLOBAL CLUSTERING LOCK ---
 func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	symbol := enrichedTick.Raw.StockName
@@ -190,7 +169,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		state.CurrentSetupPhase = PhaseActiveTrade
 	}
 
-	// --- 📈 REAL-TIME TICK PNL TRACING ---
 	if !isFlatNow {
 		var currentUnrealized float64
 		if currentSide == "LONG" {
@@ -203,7 +181,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		if state.CurrentPnL > state.PeakPnL {
 			state.PeakPnL = state.CurrentPnL
 		}
-
 		if tradeLog, exists := e.ActiveTrades[symbol]; exists {
 			if state.PeakPnL > tradeLog.PeakPnLINR {
 				tradeLog.PeakPnLINR = state.PeakPnL
@@ -214,55 +191,52 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		state.PeakPnL = 0.0
 	}
 
-	// --- 🟢 ENTRY EXECUTION WITH CONCURRENCY LOCKS ---
+	// --- ENTRY EXECUTION BLOCK ---
 	if isFlatNow && e.ActiveStrategy != nil {
 		if _, duplicateActive := e.ActiveTrades[symbol]; duplicateActive {
 			e.mu.Unlock()
 			return "HOLD"
 		}
 
+		// 🔥 ENGINE CLUSTERING GATEKEEPER:
+		// Scan existing active trades. If an entry occurred within the last 60 seconds anywhere,
+		// bypass execution to prevent systemic market correlation fills.
+		for _, activeTrade := range e.ActiveTrades {
+			if time.Since(activeTrade.EntryTimestamp) < 1*time.Minute {
+				e.mu.Unlock()
+				return "HOLD"
+			}
+		}
+
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			state.CurrentSetupPhase = PhaseActiveTrade
-
-			// ✅ FIX 1: Safely write entry while lock is maintained using locked variant
 			e.logOptimizationEntryLocked(symbol, signal, state)
-
 			e.mu.Unlock()
 			return signal
 		}
 	} else if !isFlatNow && e.ActiveStrategy != nil {
-		// --- 🔴 RISK TICK MANAGEMENT ---
-		tradeLog, tradeExists := e.ActiveTrades[symbol]
-
-		// ✅ FIX 2: Check Stop Loss on every live tick to prevent catastrophic bleed
+		// --- RISK TICK SAFETY DISPATCHER ---
+		// Human is driving, checking safety nets only.
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
 			e.mu.Unlock()
-			e.LogOptimizationExit(symbol, "STOP_LOSS", state)
+			e.LogOptimizationExit(symbol, "SAFETY_STOP_LOSS", state)
 			return "EXIT_" + currentSide
 		}
 
+		tradeLog, tradeExists := e.ActiveTrades[symbol]
 		if tradeExists && time.Since(tradeLog.EntryTimestamp) > 1*time.Minute {
 			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
 				e.mu.Unlock()
-				e.LogOptimizationExit(symbol, "TAKE_PROFIT_TRAILING_TICK", state)
+				e.LogOptimizationExit(symbol, "SAFETY_HIGH_CONF_TRAILING", state)
 				return "EXIT_" + currentSide
 			}
-		}
-
-		signal := e.ActiveStrategy.CheckExit(state, currentSide)
-		if signal == "EXIT_LONG" || signal == "EXIT_SHORT" {
-			// ✅ FIX 4: Removed the restrictive VWAP blocker. Exit triggers purely on signal logic.
-			e.mu.Unlock()
-			e.LogOptimizationExit(symbol, signal, state)
-			return signal
 		}
 	}
 
 	e.mu.Unlock()
 	return "HOLD"
 }
-
 func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	state, exists := e.Registry[symbol]

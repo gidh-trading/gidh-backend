@@ -4,6 +4,7 @@ import (
 	"context"
 	"gidh-backend/internal/service/strategy"
 	"gidh-backend/pkg/logger"
+	"math"
 	"sync"
 	"time"
 
@@ -13,9 +14,9 @@ import (
 
 const (
 	MaxDailyLossAllowed   = 3000.0
-	InitialCapital        = 50000.0
+	InitialCapital        = 70000.0
 	MaxLeverage           = 5.0
-	MaxCapitalPerStockPct = 0.30
+	MaxCapitalPerStockPct = 0.25
 	AgentEmail            = "algo.trader@gidh.tech"
 	AutoSquareOffHour     = 15 // 3 PM
 	AutoSquareOffMinute   = 0  // 00 minutes
@@ -65,7 +66,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		return
 	}
 
-	// 1. 🕒 TIME CUTOFF CHECK (3:00 PM Auto-Square Off)
+	// 1. TIME CUTOFF CHECK (3:00 PM Auto-Square Off)
 	currentHM := (tickTime.Hour() * 100) + tickTime.Minute()
 	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
 
@@ -75,8 +76,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 		for mapKey, pos := range rm.agentPositions {
 			if pos.NetQuantity != 0 && pos.Side != "FLAT" {
-				logger.Infof("⚡ Auto-Squaring off open position for %s. Qty: %d, Side: %s", pos.Symbol, pos.NetQuantity, pos.Side)
-
 				var exitSide string
 				if pos.Side == "LONG" {
 					exitSide = "SELL"
@@ -113,7 +112,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		return
 	}
 
-	// 🛠️ USE CLEAN UNIFORM SYMBOL KEY THROUGHOUT ENTIRE PIPELINE INTERFACES
 	pos, exists := rm.agentPositions[symbol]
 	if !exists {
 		pos = &models.Position{Symbol: symbol, Product: "MIS", NetQuantity: 0, Side: "FLAT"}
@@ -138,7 +136,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	netQty := pos.NetQuantity
 	rm.mu.Unlock()
 
-	// 🚨 STEP 1: Process real-time tick calculations
+	// real-time tick context pipeline execution
 	tickSignal := rm.strategyEngine.UpdateContext(enrichedTick, currentSide, avgPrice, netQty)
 
 	if tickSignal == "EXIT_LONG" || tickSignal == "EXIT_SHORT" {
@@ -150,7 +148,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		return
 	}
 
-	// STEP 2: Evaluate standard triggers
 	barSignal := rm.strategyEngine.GenerateSignal(symbol, currentSide, avgPrice, netQty)
 
 	var engineEff float64
@@ -170,7 +167,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	// Entry Order Logic
+	// Entry Order logic with optimized dynamic sizing calculations
 	if (barSignal == "GO_SHORT" || barSignal == "GO_LONG") && pos.NetQuantity == 0 {
 
 		activeTradesCount := 0
@@ -180,7 +177,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			}
 		}
 
-		// If we are already running 4 trades, reject this execution attempt silently
 		if activeTradesCount >= MaxConcurrentTrades {
 			logger.Debugf("⚠️ RISK MANAGER BLOCKED ENTRY: Total active trades cap reached (%d/%d). Skipping entry for %s",
 				activeTradesCount, MaxConcurrentTrades, symbol)
@@ -193,8 +189,20 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			}
 		}
 
-		allowedQty, _ := rm.CalculatePositionSizeAndFees(symbol, rawTick.LastPrice)
-		if allowedQty <= 0 {
+		if rawTick.LastPrice <= 0 {
+			return
+		}
+
+		// ✅ FIX: Dynamic Capital Allocation Calculation Engine
+		// Max allowed risk capital per trade based on portfolio weight restrictions
+		capitalAllocationForStock := InitialCapital * MaxCapitalPerStockPct
+		// Total purchasing buying power augmented by 5x MIS Intraday Leverage
+		totalBuyingPowerLeveraged := capitalAllocationForStock * MaxLeverage
+
+		// Determine exact dynamic share quantities to buy/sell
+		calculatedQty := int(math.Floor(totalBuyingPowerLeveraged / rawTick.LastPrice))
+
+		if calculatedQty <= 0 {
 			logger.Warnf("⚠️ Risk Allocation Blocked Size: Calculated Qty for %s at %.2f is 0", symbol, rawTick.LastPrice)
 			return
 		}
@@ -206,18 +214,19 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			posSide = "SHORT"
 		}
 
-		pos.NetQuantity = allowedQty
+		pos.NetQuantity = calculatedQty
 		pos.Side = posSide
 		pos.AveragePrice = rawTick.LastPrice
 
-		logger.Infof("🚀 RISK MANAGER DISPATCHING EXECUTION ORDER: %s %s Qty: %d", txType, symbol, allowedQty)
+		logger.Infof("🚀 DYNAMIC RISK MANAGER DISPATCHING EXECUTION ORDER: %s %s Qty: %d (Leveraged Capital Invested: %.2f INR)",
+			txType, symbol, calculatedQty, float64(calculatedQty)*rawTick.LastPrice)
 
 		go rm.orderManager.PlaceOrder(context.Background(), models.OrderRequest{
 			Symbol:          symbol,
 			Product:         "MIS",
 			TransactionType: txType,
 			OrderType:       "MARKET",
-			Quantity:        allowedQty,
+			Quantity:        calculatedQty,
 			UserEmail:       AgentEmail,
 		})
 
@@ -228,7 +237,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	}
 }
 
-// executeBrokerOrder clears local memory entries and tracks systemic itemized friction.
 func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, reason string, timestamp time.Time) {
 	if pos.NetQuantity == 0 {
 		return
@@ -266,7 +274,6 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 
 	rm.lastExitTime[symbol] = timestamp
 
-	// Synchronously close local properties immediately while inside the mutex loop
 	pos.NetQuantity = 0
 	pos.Side = "FLAT"
 	pos.AveragePrice = 0.0
@@ -294,5 +301,4 @@ func (rm *RiskManager) recordTransactionCosts(charges models.ItemizedCharges) {
 	rm.globalSummary.StampDuty += charges.StampDuty
 	rm.globalSummary.TotalCharges += charges.TotalCharges
 	rm.dailyChargesPaid += charges.TotalCharges
-
 }
