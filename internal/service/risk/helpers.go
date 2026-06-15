@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/strategy"
+	"gidh-backend/pkg/logger"
 )
 
 // GetUIContractNote delivers a deep copy of performance archives to feed visualization dashboards.
@@ -71,32 +72,57 @@ func (rm *RiskManager) CalculateItemizedCharges(qty int, price float64) float64 
 	return total
 }
 
-// HandleManualAndBrokerStateSync forces localized memory maps to snap to actual execution realities
+// HandleManualAndBrokerStateSync forces localized memory maps to snap to actual execution realities.
+// It intercepts unexpected flat transitions to cleanly close strategy optimization logging records.
 func (rm *RiskManager) HandleManualAndBrokerStateSync(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64) {
 	key := fmt.Sprintf("%s:MIS", symbol)
 
 	rm.mu.Lock()
 	pos, exists := rm.agentPositions[key]
 	if !exists {
-		pos = &models.Position{Symbol: symbol, Product: "MIS", NetQuantity: 0, Side: "FLAT"}
+		// Initialize the tracking instance if it does not yet exist in risk manager memory
+		pos = &models.Position{
+			Symbol:      symbol,
+			Product:     "MIS",
+			NetQuantity: 0,
+			Side:        "FLAT",
+		}
 		rm.agentPositions[key] = pos
 	}
 
-	// Capture previous side to detect unexpected termination
+	// 1. Capture snapshots of historical metrics inside the lock boundary to evaluate anomalies
 	oldSide := pos.Side
+	oldQty := pos.NetQuantity
 
-	// Overwrite Risk Manager's internal state directly with Broker absolute truth
+	// 2. Overwrite Risk Manager's internal state with verified execution absolute truth
 	pos.NetQuantity = netQty
 	pos.Side = side
 	pos.AveragePrice = avgPrice
+
+	// Update systemic realized metrics for global account drawdown boundaries
+	// Note: If you want to accumulate or directly assign session PnL, map it safely here.
+
+	// 🔓 CRITICAL STEP: Release the lock immediately before entering outer package layers!
 	rm.mu.Unlock()
 
-	// 🚨 CRITICAL STRATEGY OPTIMIZATION SYNC
-	// If the position dropped to FLAT but the strategy engine thinks it is still in an active trade,
-	// a manual user intervention took place. We must force-terminate the active Optimization Trade Log.
-	if side == "FLAT" && oldSide != "FLAT" {
-		rm.strategyEngine.LogOptimizationExit(symbol, "MANUAL_USER_INTERVENTION_SQUARE_OFF", &strategy.InstrumentState{
-			LatestPrice: avgPrice, // fallback coordinate
-		})
+	// 3. Evaluate State Transitions for External Strategy Sync
+	// If the asset dropped to "FLAT" but our memory tracks it as having active market exposure,
+	// an external manual liquidation, bracket fill, or panic square-off occurred.
+	if (side == "FLAT" || side == "") && (oldSide != "FLAT" && oldSide != "") {
+		logger.Warnf("⚠️ Asynchronous State Sync: Position for %s closed externally (Previous: %s Qty: %d). Forcing Strategy Engine Optimization Exit...", symbol, oldSide, oldQty)
+
+		// Build a placeholder InstrumentState to pass the closing price coordinate down to database log routines
+		fallbackState := &strategy.InstrumentState{
+			LatestPrice: avgPrice,
+		}
+		if avgPrice <= 0 {
+			// If closed flat at 0 entry, fallback context to standard market tick logic values
+			fallbackState.LatestPrice = pos.AveragePrice
+		}
+
+		// Cleanly close out the optimization logs so performance tracking remains mathematically correct
+		rm.strategyEngine.LogOptimizationExit(symbol, "MANUAL_USER_INTERVENTION_SQUARE_OFF", fallbackState)
+	} else {
+		logger.Infof("🔄 System Sync: Internal Risk mapping updated for %s | Qty: %d | Side: %s | AvgPrice: %.2f", symbol, netQty, side, avgPrice)
 	}
 }

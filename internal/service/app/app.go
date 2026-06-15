@@ -111,7 +111,7 @@ func (a *App) initDatabase(ctx context.Context) error {
 
 func (a *App) initOrderManager() {
 	if a.Config.Mode == "live" {
-		a.OrderManager = order.NewLiveOrderManager(a.kiteClient, a.wsHub, a.DBWriter)
+		a.OrderManager = order.NewLiveOrderManager(a.kiteClient, a.wsHub, a.DBWriter, a.Config.SkipLiveExecution)
 	} else {
 		a.OrderManager = order.NewPaperPositionManager(a.wsHub, a.DBWriter)
 	}
@@ -190,7 +190,8 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// ⚡ MODULAR SEPARATED INTERFACE ASSEMBLY PIPELINE
 	// ========================================================================
 
-	logger.Infof("[System Initialization] Modular Algorithmic Strategy Layer. AlgoAgent Online.")
+	logger.Infof("[System Initialization] Assembling Algorithmic Strategy Layer...")
+
 	// Construct the symbol name map for the execution engine registry
 	symbolProfiles := make(map[string]*models.InstrumentProfile)
 	for _, prof := range profilesMap {
@@ -199,53 +200,58 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
-	if a.Config.Mode != "live" {
-		// Step C: Initialize your engine using the compiled symbol map
-		a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, a.DBWriter, func(log *strategy.OptimizationTradeLog) {
-			// 1. Output a visual stream verification log item
-			logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s |  VWAP Dist: %.4f",
-				log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryVwapDistance)
+	// Step A: Initialize the Strategy Engine universally across ALL runtime modes
+	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, a.DBWriter, func(log *strategy.OptimizationTradeLog) {
+		// 1. Output a visual stream verification log item
+		logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s | VWAP Dist: %.4f",
+			log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryVwapDistance)
 
-			// 2. Write straight down into our persistent TimescaleDB relational logs table
-			if a.pool != nil {
-				err := db.LogStrategyOptimizationTradeExpanded(
-					context.Background(),
-					a.pool,
-					log.Symbol,
-					log.StrategyName,
-					log.TradeSide,
-					log.MinutesSinceOpen,
-					log.EntryTimestamp,
-					log.EntryPrice,
-					log.EntryVwap,
-					log.EntryVolumeRank,
-					log.EntryEfficiency,
-					log.EntryDelta,
-					log.EntrySlope,
-					log.EntryVwapDistance,
-					log.ExitTimestamp,
-					log.ExitPrice,
-					log.ExitReason,
-					log.FinalPnLINR,
-					log.PeakPnLINR,
-					log.EfficiencyCaptureRatio,
-				)
-				if err != nil {
-					logger.Errorf("Failed to persist strategy optimization metrics chunk for %s: %v", log.Symbol, err)
-				}
+		// 2. Write straight down into our persistent TimescaleDB relational logs table
+		if a.pool != nil {
+			err := db.LogStrategyOptimizationTradeExpanded(
+				context.Background(),
+				a.pool,
+				log.Symbol,
+				log.StrategyName,
+				log.TradeSide,
+				log.MinutesSinceOpen,
+				log.EntryTimestamp,
+				log.EntryPrice,
+				log.EntryVwap,
+				log.EntryVolumeRank,
+				log.EntryEfficiency,
+				log.EntryDelta,
+				log.EntrySlope,
+				log.EntryVwapDistance,
+				log.ExitTimestamp,
+				log.ExitPrice,
+				log.ExitReason,
+				log.FinalPnLINR,
+				log.PeakPnLINR,
+				log.EfficiencyCaptureRatio,
+			)
+			if err != nil {
+				logger.Errorf("Failed to persist strategy optimization metrics chunk for %s: %v", log.Symbol, err)
 			}
-		})
+		}
+	})
 
-		// Connect macro streaming listeners
-		barManager.MacroListener = a.StrategyEngine
+	// Connect macro streaming listeners
+	barManager.MacroListener = a.StrategyEngine
 
-		// Initialize standalone Risk, Capital and Broker Order Controllers
-		moneyManager := risk.NewRiskManager(a.OrderManager, a.StrategyEngine)
-		a.Pipeline.AlgoAgent = moneyManager
-		a.RiskManager = moneyManager
-	} else {
-		logger.Infof("[System Initialization] Operating in %s mode. Algorithmic Agent deactivated.", a.Config.Mode)
+	// Step B: Initialize standalone Risk, Capital and Broker Order Controllers
+	a.RiskManager = risk.NewRiskManager(a.OrderManager, a.StrategyEngine)
+
+	// 🔥 Step C: REGISTER STATE SYNCHRONIZATION EVENT-DRIVEN CALLBACK HERE!
+	// Connects decoupled order execution updates straight to the risk management layer.
+	if a.OrderManager != nil && a.RiskManager != nil {
+		a.OrderManager.RegisterPositionChangeCallback(a.RiskManager.HandleManualAndBrokerStateSync)
+		logger.Info("[Startup] Event-Driven Position State Sync Callback registered between Order and Risk layers.")
 	}
+
+	// Step D: Only run the agent live or in simulation mode based on flag (if you want toggleable live execution)
+	// Note: If you want to disable automatic live market orders but keep risk calculations, do it inside risk manager.
+	a.Pipeline.AlgoAgent = a.RiskManager
 
 	a.activePipe = a.Pipeline
 

@@ -26,9 +26,10 @@ type LiveOrderManager struct {
 	orderBook              []models.OrderBookEntry
 	lastPrices             map[string]float64
 	positionChangeCallback func(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64)
+	skipExecution          bool
 }
 
-func NewLiveOrderManager(kc *kiteconnect.Client, hub *ws.Hub, db *writer.DBWriter) *LiveOrderManager {
+func NewLiveOrderManager(kc *kiteconnect.Client, hub *ws.Hub, db *writer.DBWriter, skipExec bool) *LiveOrderManager {
 	return &LiveOrderManager{
 		kiteClient:             kc,
 		dbWriter:               db,
@@ -37,6 +38,7 @@ func NewLiveOrderManager(kc *kiteconnect.Client, hub *ws.Hub, db *writer.DBWrite
 		orderBook:              make([]models.OrderBookEntry, 0),
 		lastPrices:             make(map[string]float64),
 		positionChangeCallback: nil,
+		skipExecution:          skipExec,
 	}
 }
 
@@ -53,6 +55,83 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 	orderType := kiteconnect.OrderTypeMarket
 	if strings.ToUpper(req.OrderType) == "LIMIT" {
 		orderType = kiteconnect.OrderTypeLimit
+	}
+
+	// 🛑 DRY RUN INTERCEPTOR GATEWAY
+	if lm.skipExecution {
+		mockOrderID := fmt.Sprintf("DRY-%d", time.Now().UnixNano())
+		logger.Warnf("🔬 [DRY RUN MODE] Intercepted routing ticket for %s: %s %d shares.", req.Symbol, req.TransactionType, req.Quantity)
+
+		ltp := lm.lastPrices[strings.ToUpper(req.Symbol)]
+		if ltp <= 0 {
+			ltp = req.Price // Fallback to requested coordinate if tick feed hasn't arrived
+		}
+
+		lm.mu.Lock()
+		dryEntry := models.OrderBookEntry{
+			OrderID:   mockOrderID,
+			Symbol:    strings.ToUpper(req.Symbol),
+			Side:      strings.ToUpper(req.TransactionType),
+			OrderType: strings.ToUpper(req.OrderType),
+			Qty:       req.Quantity,
+			FilledQty: req.Quantity, // Assume absolute immediate fill for tracking logic parity
+			Price:     ltp,
+			Status:    "COMPLETE",
+			Timestamp: time.Now(),
+			UserEmail: req.UserEmail,
+		}
+		lm.orderBook = append(lm.orderBook, dryEntry)
+
+		if lm.dbWriter != nil {
+			lm.dbWriter.PersistOrder(dryEntry)
+		}
+		lm.mu.Unlock()
+
+		lm.broadcastOrderUpdate(dryEntry)
+
+		// Trigger background synchronization logic immediately to populate local position RAM caches
+		// and fire our callback downstream to the RiskManager/StrategyEngine layers!
+		go func(symbol string) {
+			_, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+			defer cancel()
+
+			// If dry running, SyncExchangeState cannot pull matching logs from Zerodha.
+			// We trigger an explicit manual evaluation pass or let background mock state handle it.
+			// Better yet, trigger the change callback directly for structural simulation correctness:
+			lm.mu.Lock()
+			// Basic mock position calculations inside live tracking slots for dry run mode:
+			key := fmt.Sprintf("%s:MIS", strings.ToUpper(symbol))
+			localPos, exists := lm.activePositions[key]
+			if !exists {
+				localPos = &models.Position{Symbol: strings.ToUpper(symbol), Product: "MIS"}
+				lm.activePositions[key] = localPos
+			}
+
+			// Simple signed adjustment calculation mapping
+			multiplier := 1
+			if dryEntry.Side == "SELL" {
+				multiplier = -1
+			}
+
+			localPos.NetQuantity += dryEntry.Qty * multiplier
+			if localPos.NetQuantity > 0 {
+				localPos.Side = "LONG"
+			} else if localPos.NetQuantity < 0 {
+				localPos.Side = "SHORT"
+			} else {
+				localPos.Side = "FLAT"
+			}
+			localPos.AveragePrice = ltp
+
+			netQty, side, avgPrice := localPos.NetQuantity, localPos.Side, localPos.AveragePrice
+			lm.mu.Unlock()
+
+			if lm.positionChangeCallback != nil {
+				lm.positionChangeCallback(symbol, netQty, side, avgPrice, 0.0)
+			}
+		}(req.Symbol)
+
+		return mockOrderID, nil
 	}
 
 	params := kiteconnect.OrderParams{
