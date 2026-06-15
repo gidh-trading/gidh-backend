@@ -54,13 +54,15 @@ func (e *Engine) getOrInitializeState(symbol string) *InstrumentState {
 	state, exists := e.Registry[symbol]
 	if !exists {
 		state = &InstrumentState{
-			Symbol:               symbol,
-			CurrentSetupPhase:    PhaseNeutral,
-			BarHistory:           make(map[string][]*models.Bar),
-			NetEfficiencyHistory: make([]float64, 0, 16), // Allocated cleanly for 10-bar slope lookback requirements
-			NetEfficiency:        0.0,
-			NetEfficiencySlope:   0.0,
-			PeakEfficiency:       0.0,
+			Symbol:                      symbol,
+			CurrentSetupPhase:           PhaseNeutral,
+			BarHistory:                  make(map[string][]*models.Bar),
+			NetEfficiencyHistory:        make([]float64, 0, 16), // Allocated cleanly for 10-bar slope lookback requirements
+			NetEfficiency:               0.0,
+			NetEfficiencySlope:          0.0,
+			PeakEfficiency:              0.0,
+			TotalBarsByTimeframe:        make(map[string]int),
+			TimePctAboveVwapByTimeframe: make(map[string]float64),
 		}
 		if profile, ok := e.profiles[symbol]; ok {
 			state.Profile = profile

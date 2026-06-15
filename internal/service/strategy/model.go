@@ -59,6 +59,9 @@ type InstrumentState struct {
 	EntryVwapAnchor   float64                   `json:"entry_vwap_anchor"`
 	BarHistory        map[string][]*models.Bar  `json:"bar_history"`
 	Profile           *models.InstrumentProfile `json:"profile"`
+
+	TotalBarsByTimeframe        map[string]int     // Tracks counts per timeframe independently
+	TimePctAboveVwapByTimeframe map[string]float64 // Bounded between 0.0 and 100.0 per timeframe
 }
 
 // OptimizationTradeLog fully updated with Missing Metrics (Fixes Bug #8)

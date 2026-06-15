@@ -25,7 +25,21 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 		bar.Analytics.TickRank = tick.Enrichment.TickRank
 	}
 
-	// 2. Recalculate ranks and macro direction continuously
+	// 2. 🔥 Calculate the specific bar's internal tracking context (Scaled 0-100)
+	if bar.VWAP > 0 && bar.TickCount > 0 {
+		// Convert the previous 0-100 percentage value back to a raw tick count fraction
+		previousTotalTicks := float64(bar.TickCount - 1)
+		previousTicksAbove := (bar.Analytics.TimePctAboveVwap / 100.0) * previousTotalTicks
+
+		if tick.Raw.LastPrice > bar.VWAP {
+			previousTicksAbove++
+		}
+
+		// Compute raw fraction and transform into a clean 0 to 100 scaling layout
+		bar.Analytics.TimePctAboveVwap = (previousTicksAbove / float64(bar.TickCount)) * 100.0
+	}
+
+	// 3. Recalculate ranks and macro direction continuously
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 }
 

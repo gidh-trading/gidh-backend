@@ -13,6 +13,7 @@ type BarAnalytics struct {
 	NetEfficiency          float64        `json:"net_efficiency"`
 	NetEfficiencySlope     float64        `json:"net_efficiency_slope"`
 	NormalizedVwapDistance float64        `json:"normalized_vwap_distance"`
+	TimePctAboveVwap       float64        `json:"time_pct_above_vwap"`
 }
 
 type Bar struct {

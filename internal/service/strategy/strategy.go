@@ -64,7 +64,7 @@ func (e *Engine) EnrichLiveBar(bar *models.Bar) {
 	bar.Analytics.NormalizedVwapDistance = vwapDist
 }
 
-// --- 🛡️ UPDATE INGESTCLOSEDBAR STRUCTURAL REMOVAL ---
+// --- 🛡️ INGESTCLOSEDBAR WITH TIMEFRAME ISOLATION ---
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Lock()
 	state := e.getOrInitializeState(bar.StockName)
@@ -72,14 +72,28 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.updateCoreBarMetrics(state, bar)
 	e.trackVwapAcceptance(state, bar)
 
-	state.TotalSessionBars++
-	if bar.Close > bar.VWAP {
-		aboveCount := (state.TimePctAboveVwap * float64(state.TotalSessionBars-1)) + 1.0
-		state.TimePctAboveVwap = aboveCount / float64(state.TotalSessionBars)
-	} else {
-		aboveCount := (state.TimePctAboveVwap * float64(state.TotalSessionBars-1))
-		state.TimePctAboveVwap = aboveCount / float64(state.TotalSessionBars)
+	// 🔥 FIX: Initialize timeframe maps safely if they don't exist in your state
+	if state.TotalBarsByTimeframe == nil {
+		state.TotalBarsByTimeframe = make(map[string]int)
 	}
+	if state.TimePctAboveVwapByTimeframe == nil {
+		state.TimePctAboveVwapByTimeframe = make(map[string]float64)
+	}
+
+	// Isolate calculation exclusively to the incoming bar's timeframe (e.g., "1m", "5m")
+	tf := bar.Timeframe
+	state.TotalBarsByTimeframe[tf]++
+	totalTfBars := float64(state.TotalBarsByTimeframe[tf])
+
+	// Un-scale the current 0-100 state for this specific timeframe to find raw counts
+	previousBarsAbove := (state.TimePctAboveVwapByTimeframe[tf] / 100.0) * (totalTfBars - 1.0)
+
+	if bar.Close > bar.VWAP {
+		previousBarsAbove += 1.0
+	}
+
+	// Recalculate rolling percentage for this timeframe and scale bounded between 0 and 100
+	state.TimePctAboveVwapByTimeframe[tf] = (previousBarsAbove / totalTfBars) * 100.0
 
 	e.ProcessClosedBarLedger(state, bar)
 
@@ -120,7 +134,9 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	bar.Analytics.NetEfficiencySlope = state.NetEfficiencySlope
 	bar.Analytics.NormalizedVwapDistance = state.NormalizedVwapDistance
 
-	// 🔥 CRITICAL REFACTOR: Removed Micro-Slope CheckExit triggers here.
+	// 🔥 Assign the timeframe-isolated percentage to the outgoing DB entity
+	bar.Analytics.TimePctAboveVwap = state.TimePctAboveVwapByTimeframe[tf]
+
 	// Only evaluate pure mechanical safety exits (Stop Loss & Trailing Target Safeguard).
 	if state.CurrentSetupPhase == PhaseActiveTrade && e.ActiveStrategy != nil {
 		currentSide := "LONG"
