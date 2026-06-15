@@ -48,8 +48,7 @@ func NewEngine(
 	}
 }
 
-// 🔥 NEW: Implements the pipeline interface to dynamically assign live strategy metrics
-// onto the structural bar format right before any WebSockets tick packet transfers.
+// EnrichLiveBar Enriches live tick streaming data payload right before transfer
 func (e *Engine) EnrichLiveBar(bar *models.Bar) {
 	e.mu.RLock()
 	state, exists := e.Registry[bar.StockName]
@@ -59,13 +58,17 @@ func (e *Engine) EnrichLiveBar(bar *models.Bar) {
 	}
 	netEff := state.NetEfficiency
 	slope := state.NetEfficiencySlope
+
+	// Dynamically calculate the signed distance on current price frame
+	vwapDist := e.calculateNormalizedDistance(bar.Close, bar.VWAP, state.Profile)
 	e.mu.RUnlock()
 
 	bar.Analytics.NetEfficiency = netEff
 	bar.Analytics.NetEfficiencySlope = slope
+	bar.Analytics.NormalizedVwapDistance = vwapDist
 }
 
-// IngestClosedBar handles structural bar transitions and evaluates strategy exits at bar close
+// IngestClosedBar Tracks and saves metric snapshot arrays when a bar close frame triggers
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Lock()
 	state := e.getOrInitializeState(bar.StockName)
@@ -128,10 +131,11 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 		state.PeakPnL = 0.0
 	}
 
+	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
+
 	bar.Analytics.NetEfficiency = state.NetEfficiency
 	bar.Analytics.NetEfficiencySlope = state.NetEfficiencySlope
-
-	state.NormalizedVwapDistance = e.calculateNormalizedDistance(state.LatestPrice, state.LiveSessionVWAP, state.Profile)
+	bar.Analytics.NormalizedVwapDistance = state.NormalizedVwapDistance
 
 	// --- 🛡️ EVALUATE STRUCTURAL EXITS AND TAKE PROFITS AT BAR CLOSE ---
 	if state.CurrentSetupPhase == PhaseActiveTrade && e.ActiveStrategy != nil {
@@ -182,9 +186,9 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	if !isFlatNow {
 		var currentUnrealized float64
 		if currentSide == "LONG" {
-			currentUnrealized = (state.LatestPrice - averagePrice)
+			currentUnrealized = state.LatestPrice - averagePrice
 		} else if currentSide == "SHORT" {
-			currentUnrealized = (averagePrice - state.LatestPrice)
+			currentUnrealized = averagePrice - state.LatestPrice
 		}
 
 		state.CurrentPnL = currentUnrealized

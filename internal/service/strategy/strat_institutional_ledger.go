@@ -1,14 +1,23 @@
 package strategy
 
-import "math"
+import (
+	"time"
+)
 
 type InstitutionalLedgerStrategy struct {
 	VwapBufferPct float64
+	istLocation   *time.Location
 }
 
 func NewInstitutionalLedgerStrategy() *InstitutionalLedgerStrategy {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		loc = time.Local
+	}
+
 	return &InstitutionalLedgerStrategy{
 		VwapBufferPct: 0.0012,
+		istLocation:   loc,
 	}
 }
 
@@ -23,14 +32,31 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 		return "HOLD"
 	}
 
-	// 🕒 Priority 2: 10-Bar Opening Range Shield (Blocks trades from 9:15 to 9:25)
-	if state.TotalSessionBars < 10 {
+	// 🕒 Priority 2: Precise Time-Based Opening Range Shield (Blocks trades from 9:15 to 9:25 AM IST)
+	// Converts any incoming UTC bar or tick timestamp directly to India Standard Time (IST)
+	if !state.LastUpdated.IsZero() {
+		// 🛡️ Explicitly map the feed timestamp to Asia/Kolkata time boundaries
+		istTime := state.LastUpdated.In(s.istLocation)
+
+		// Extract hours and minutes from the converted IST object
+		currentTimeHourMinute := (istTime.Hour() * 100) + istTime.Minute()
+
+		// Blocks execution from 09:15 AM up to exactly 09:25 AM IST
+		if currentTimeHourMinute < 925 {
+			return "HOLD"
+		}
+	} else {
+		// Safety catch if the inbound network packet timestamp is uninitialized
 		return "HOLD"
 	}
 
-	// 🛡️ ACCELERATION REJECT GATEWAY: Prevents buying overextended tops
-	// If distance is > 0.15 (Long) or < -0.15 (Short), do not chase the move.
-	if math.Abs(state.NormalizedVwapDistance) > 0.15 {
+	// Checking Long Overextension:
+	if state.NormalizedVwapDistance > 0.25 {
+		return "HOLD"
+	}
+
+	// Checking Short Overextension:
+	if state.NormalizedVwapDistance < -0.25 {
 		return "HOLD"
 	}
 
@@ -46,7 +72,7 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	// 1. Efficiency absolute threshold is met (> 35)
 	// 2. Price is trading cleanly above VWAP
 	// 3. 🔥 NEW: Slope confirms explosive institutional acceleration (>= 2.0)
-	if currentEff > 35.0 && state.LatestPrice > state.LiveSessionVWAP && currentSlope >= 2.0 {
+	if currentEff > 50.0 && state.LatestPrice > state.LiveSessionVWAP && currentSlope >= 5.0 {
 		return "GO_LONG"
 	}
 
@@ -54,7 +80,7 @@ func (s *InstitutionalLedgerStrategy) CheckEntry(state *InstrumentState) string 
 	// 1. Efficiency absolute threshold is met (< -35)
 	// 2. Price is trading cleanly below VWAP
 	// 3. 🔥 NEW: Slope confirms explosive downward liquidation (<= -2.0)
-	if currentEff < -35.0 && state.LatestPrice < state.LiveSessionVWAP && currentSlope <= -2.0 {
+	if currentEff < -50.0 && state.LatestPrice < state.LiveSessionVWAP && currentSlope <= -5.0 {
 		return "GO_SHORT"
 	}
 
