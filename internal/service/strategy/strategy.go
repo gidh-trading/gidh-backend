@@ -15,28 +15,22 @@ type Engine struct {
 	MaxBarLookback time.Duration
 	profiles       map[string]*models.InstrumentProfile
 	dbWriter       *writer.DBWriter
-
-	ActiveTrades     map[string]*OptimizationTradeLog
-	OnTradeCompleted func(log *OptimizationTradeLog)
 }
 
 func NewEngine(
 	barLookback time.Duration,
 	profiles map[string]*models.InstrumentProfile,
 	dbW *writer.DBWriter,
-	completeHook func(log *OptimizationTradeLog),
 ) *Engine {
 	masterStrat := NewVwapEfficiencyMomentumStrategy()
 	timeRouterWrapper := NewTimeBasedRouter(masterStrat)
 
 	return &Engine{
-		Registry:         make(map[string]*InstrumentState),
-		ActiveTrades:     make(map[string]*OptimizationTradeLog),
-		ActiveStrategy:   timeRouterWrapper,
-		MaxBarLookback:   barLookback,
-		profiles:         profiles,
-		dbWriter:         dbW,
-		OnTradeCompleted: completeHook,
+		Registry:       make(map[string]*InstrumentState),
+		ActiveStrategy: timeRouterWrapper,
+		MaxBarLookback: barLookback,
+		profiles:       profiles,
+		dbWriter:       dbW,
 	}
 }
 
@@ -44,13 +38,11 @@ func NewEngine(
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Lock()
 	state := e.getOrInitializeState(bar.StockName)
-	marketTime := bar.Timestamp // ⚡ Using True Tick/Bar Time
 
 	state.LatestPrice = bar.Close
 	state.LiveSessionVWAP = bar.VWAP
 
 	e.calculateActivePnLState(state, bar)
-	e.evaluateExecutionRiskSafely(state, bar, marketTime) // ⚡ Pass market time
 	e.appendAndPruneHistory(state, bar)
 	e.mu.Unlock()
 }
@@ -60,9 +52,11 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	e.mu.Lock()
 	symbol := enrichedTick.Raw.StockName
 	state := e.getOrInitializeState(symbol)
-	marketTime := enrichedTick.Raw.Timestamp // ⚡ Using True Tick Time
+	marketTime := enrichedTick.Raw.Timestamp
 
 	state.LatestPrice = enrichedTick.Raw.LastPrice
+	state.ActiveSide = currentSide
+	state.ActiveAvgPrice = averagePrice
 
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
 
@@ -80,51 +74,41 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		if state.CurrentPnL > state.PeakPnL {
 			state.PeakPnL = state.CurrentPnL
 		}
-		if tradeLog, exists := e.ActiveTrades[symbol]; exists {
-			if state.PeakPnL > tradeLog.PeakPnLINR {
-				tradeLog.PeakPnLINR = state.PeakPnL
-			}
-		}
 	} else {
+		state.CurrentSetupPhase = PhaseNeutral // Auto-heal state if RiskManager flattened it
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
 	}
 
 	if isFlatNow && e.ActiveStrategy != nil {
-		if _, duplicateActive := e.ActiveTrades[symbol]; duplicateActive {
+		// Enforce the 1-minute cooldown from the last entry
+		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) < 1*time.Minute {
 			e.mu.Unlock()
 			return "HOLD"
-		}
-
-		for _, activeTrade := range e.ActiveTrades {
-			// ⚡ Using Market Time delta instead of time.Since() wall clock
-			if marketTime.Sub(activeTrade.EntryTimestamp) < 1*time.Minute {
-				e.mu.Unlock()
-				return "HOLD"
-			}
 		}
 
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			state.CurrentSetupPhase = PhaseActiveTrade
-			e.logOptimizationEntryLocked(symbol, signal, state, marketTime) // ⚡ Pass market time
+			state.EntryTimestamp = marketTime // Record entry time for cooldown tracking
 			e.mu.Unlock()
 			return signal
 		}
 	} else if !isFlatNow && e.ActiveStrategy != nil {
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
-			latestPriceSnapshot := state.LatestPrice
+			state.CurrentSetupPhase = PhaseNeutral
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
 			e.mu.Unlock()
-			e.LogOptimizationExit(symbol, "SAFETY_STOP_LOSS", latestPriceSnapshot, marketTime)
 			return "EXIT_" + currentSide
 		}
 
-		tradeLog, tradeExists := e.ActiveTrades[symbol]
-		if tradeExists && marketTime.Sub(tradeLog.EntryTimestamp) > 1*time.Minute {
+		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
 			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
-				latestPriceSnapshot := state.LatestPrice
+				state.CurrentSetupPhase = PhaseNeutral
+				state.CurrentPnL = 0.0
+				state.PeakPnL = 0.0
 				e.mu.Unlock()
-				e.LogOptimizationExit(symbol, "SAFETY_HIGH_CONF_TRAILING", latestPriceSnapshot, marketTime)
 				return "EXIT_" + currentSide
 			}
 		}
@@ -167,132 +151,4 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 		return "EXIT_" + currentSide
 	}
 	return e.ActiveStrategy.CheckExit(state, currentSide)
-}
-
-func (e *Engine) LogOptimizationEntry(symbol string, signal string, state *InstrumentState, marketTime time.Time) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.logOptimizationEntryLocked(symbol, signal, state, marketTime)
-}
-
-func (e *Engine) logOptimizationEntryLocked(symbol string, signal string, state *InstrumentState, marketTime time.Time) {
-	if _, exists := e.ActiveTrades[symbol]; exists {
-		return
-	}
-
-	tradeSide := "LONG"
-	if signal == "GO_SHORT" {
-		tradeSide = "SHORT"
-	}
-
-	strategyName := "Institutional_Ledger"
-	if e.ActiveStrategy != nil {
-		strategyName = e.ActiveStrategy.Name()
-	}
-
-	state.CurrentPnL = 0.0
-	state.PeakPnL = 0.0
-	state.CurrentSetupPhase = PhaseActiveTrade
-
-	var entryEff, entrySlope, entryVwapDist float64
-	// Example placeholder analytical values - extend from your BarAnalyticsEngine if available
-	var volumeRank, priceRank, entryDelta int
-
-	if state.BarHistory != nil {
-		if history, ok := state.BarHistory["1m"]; ok && len(history) > 0 {
-			lastBar := history[len(history)-1]
-			entryEff = lastBar.Analytics.NetEfficiency
-			entrySlope = lastBar.Analytics.NetEfficiencySlope
-
-			// Compute dynamic distance from VWAP curve at point of ingestion
-			if lastBar.VWAP > 0 {
-				entryVwapDist = state.LatestPrice - lastBar.VWAP
-			}
-
-			// If your payload contains rank or delta indicators, extract them safely:
-			// volumeRank = lastBar.Analytics.VolumeRank
-			// priceRank = lastBar.Analytics.PriceRank
-			// entryDelta = lastBar.Analytics.Delta
-		}
-	}
-
-	// 🕒 ACCURATE MARKET TIME CALCULATION (Deterministic Timezone Alignment)
-	marketLocation := marketTime.Location()
-	todayOpen := time.Date(marketTime.Year(), marketTime.Month(), marketTime.Day(), 9, 15, 0, 0, marketLocation)
-
-	// If marketTime contains explicit zone offsets (+05:30) and todayOpen was calculated in UTC/Local,
-	// force strict timezone parity alignment to protect delta measurements.
-	if marketTime.Unix() < todayOpen.Unix() {
-		todayOpen = todayOpen.In(marketLocation)
-	}
-
-	minutesElapsed := int(marketTime.Sub(todayOpen).Minutes())
-	if minutesElapsed < 0 {
-		minutesElapsed = 0
-	}
-
-	log := &OptimizationTradeLog{
-		Symbol:            symbol,
-		StrategyName:      strategyName,
-		TradeSide:         tradeSide,
-		EntryTimestamp:    marketTime,
-		EntryPrice:        state.LatestPrice,
-		EntryVwap:         state.LiveSessionVWAP,
-		EntryVolumeRank:   volumeRank,
-		EntryPriceRank:    priceRank,
-		EntryEfficiency:   entryEff,
-		EntryDelta:        float64(entryDelta),
-		EntrySlope:        entrySlope,
-		EntryVwapDistance: entryVwapDist,
-		CreatedAt:         time.Now(), // DB persistence tracking instant
-		MinutesSinceOpen:  minutesElapsed,
-	}
-
-	e.ActiveTrades[symbol] = log
-}
-
-// LogOptimizationExit runs deterministically to calculate accurate absolute gains/losses
-func (e *Engine) LogOptimizationExit(symbol string, reason string, exitPrice float64, marketTime time.Time) {
-	e.mu.Lock()
-	tradeLog, exists := e.ActiveTrades[symbol]
-	if !exists {
-		e.mu.Unlock()
-		return
-	}
-
-	// Evict the trade from active memory tracking matrices immediately
-	delete(e.ActiveTrades, symbol)
-
-	state := e.getOrInitializeState(symbol)
-	state.CurrentSetupPhase = PhaseNeutral
-	state.CurrentPnL = 0.0
-	state.PeakPnL = 0.0
-	e.mu.Unlock()
-
-	tradeLog.ExitTimestamp = marketTime
-	tradeLog.ExitPrice = exitPrice // 🎯 Catch directly from execution context (Prevents 0.0 value leakage)
-	tradeLog.ExitReason = reason
-
-	// Calculate True Absolute Performance Returns
-	var finalPnL float64
-	if tradeLog.TradeSide == "LONG" {
-		finalPnL = tradeLog.ExitPrice - tradeLog.EntryPrice
-	} else {
-		finalPnL = tradeLog.EntryPrice - tradeLog.ExitPrice
-	}
-	tradeLog.FinalPnLINR = finalPnL
-
-	// Compute Structural Efficiency Capture Ratios
-	if tradeLog.PeakPnLINR > 0 {
-		tradeLog.EfficiencyCaptureRatio = finalPnL / tradeLog.PeakPnLINR
-	} else if tradeLog.PeakPnLINR == 0 && finalPnL == 0 {
-		tradeLog.EfficiencyCaptureRatio = 1.0
-	} else {
-		tradeLog.EfficiencyCaptureRatio = -1.0
-	}
-
-	// Dispatch out to DB Writer or backtest callback channel hooks
-	if e.OnTradeCompleted != nil {
-		e.OnTradeCompleted(tradeLog)
-	}
 }

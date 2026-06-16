@@ -101,12 +101,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 				rm.lastExitTime[mapKey] = tickTime
 
-				// =========================================================================
-				// 🎯 FIX: Inform the Strategy Engine that this trade has been closed out
-				// by the intraday risk limits before zeroing out the structural variables.
-				// =========================================================================
-				rm.strategyEngine.LogOptimizationExit(pos.Symbol, "INTRADAY_AUTO_SQUARE_OFF", rawTick.LastPrice, tickTime)
-
 				pos.NetQuantity = 0
 				pos.Side = "FLAT"
 				pos.AveragePrice = 0.0

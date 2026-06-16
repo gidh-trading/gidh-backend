@@ -201,39 +201,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	// Step A: Initialize the Strategy Engine universally across ALL runtime modes
-	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, a.DBWriter, func(log *strategy.OptimizationTradeLog) {
-		logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s | VWAP Dist: %.4f",
-			log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryVwapDistance)
-
-		if a.pool != nil {
-			err := db.SaveStrategyOptimizationLog(
-				context.Background(),
-				a.pool,
-				log.Symbol,
-				log.StrategyName,
-				log.TradeSide,
-				log.MinutesSinceOpen,
-				log.EntryTimestamp,
-				log.EntryPrice,
-				log.EntryVwap,
-				log.EntryVolumeRank,
-				log.EntryPriceRank, // ✅ FIX: Added missing field to prevent structural truncation/offset corruption
-				log.EntryEfficiency,
-				log.EntryDelta,
-				log.EntrySlope,
-				log.EntryVwapDistance,
-				log.ExitTimestamp,
-				log.ExitPrice,
-				log.ExitReason,
-				log.FinalPnLINR,
-				log.PeakPnLINR,
-				log.EfficiencyCaptureRatio,
-			)
-			if err != nil {
-				logger.Errorf("Failed to persist strategy optimization metrics chunk for %s: %v", log.Symbol, err)
-			}
-		}
-	})
+	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, a.DBWriter)
 
 	// Connect macro streaming listeners
 	barManager.MacroListener = a.StrategyEngine

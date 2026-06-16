@@ -70,51 +70,19 @@ func (e *Engine) updateSignalPhaseAndExtensions(state *InstrumentState, currentS
 
 // calculateActivePnLState updates current and peak portfolio performance tracking deltas
 func (e *Engine) calculateActivePnLState(state *InstrumentState, bar *models.Bar) {
-	if state.CurrentSetupPhase != PhaseActiveTrade {
+	if state.CurrentSetupPhase != PhaseActiveTrade || state.ActiveSide == "FLAT" || state.ActiveSide == "" {
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
 		return
 	}
 
-	tradeLog, exists := e.ActiveTrades[bar.StockName]
-	if !exists {
-		return
-	}
-
-	if tradeLog.TradeSide == "LONG" {
-		state.CurrentPnL = (bar.Close - tradeLog.EntryPrice)
-	} else if tradeLog.TradeSide == "SHORT" {
-		state.CurrentPnL = (tradeLog.EntryPrice - bar.Close)
+	if state.ActiveSide == "LONG" {
+		state.CurrentPnL = bar.Close - state.ActiveAvgPrice
+	} else if state.ActiveSide == "SHORT" {
+		state.CurrentPnL = state.ActiveAvgPrice - bar.Close
 	}
 
 	if state.CurrentPnL > state.PeakPnL {
 		state.PeakPnL = state.CurrentPnL
-	}
-	if state.PeakPnL > tradeLog.PeakPnLINR {
-		tradeLog.PeakPnLINR = state.PeakPnL
-	}
-}
-
-// evaluateExecutionRiskSafely processes strategy rules via true market timestamps
-func (e *Engine) evaluateExecutionRiskSafely(state *InstrumentState, bar *models.Bar, marketTime time.Time) {
-	if state.CurrentSetupPhase != PhaseActiveTrade || e.ActiveStrategy == nil {
-		return
-	}
-
-	currentSide := "LONG"
-	avgPrice := state.LatestPrice
-	if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists {
-		if tradeLog.TradeSide == "SHORT" {
-			currentSide = "SHORT"
-		}
-		avgPrice = tradeLog.EntryPrice
-	}
-
-	if e.ActiveStrategy.CheckStopLoss(state, currentSide, avgPrice, 1) {
-		// 🎯 FIX: Pass state.LatestPrice as a flat float64 instead of the full state struct pointer.
-		// ⚡ FIX: Call synchronously without the 'go' keyword to prevent asynchronous trace state overlap.
-		e.LogOptimizationExit(bar.StockName, "SAFETY_STOP_LOSS", state.LatestPrice, marketTime)
-	} else if e.ActiveStrategy.CheckTakeProfit(state, currentSide, avgPrice, 1) {
-		e.LogOptimizationExit(bar.StockName, "SAFETY_HIGH_CONF_TRAILING", state.LatestPrice, marketTime)
 	}
 }
