@@ -150,16 +150,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 
 	barSignal := rm.strategyEngine.GenerateSignal(symbol, currentSide, avgPrice, netQty)
 
-	var engineEff float64
-	var engineVwap float64
-	if state, exists := rm.strategyEngine.Registry[symbol]; exists {
-		engineEff = state.NetEfficiency
-		engineVwap = state.LiveSessionVWAP
-	}
-
-	logger.Debugf("🔍 STRATEGY BRIDGE | Symbol: %s | Signal: %s | NetEff: %.2f | Price: %.2f | VWAP: %.2f",
-		symbol, barSignal, engineEff, rawTick.LastPrice, engineVwap)
-
 	if barSignal == "HOLD" {
 		return
 	}

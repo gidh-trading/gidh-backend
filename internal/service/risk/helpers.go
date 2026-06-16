@@ -5,6 +5,7 @@ import (
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/strategy"
 	"gidh-backend/pkg/logger"
+	"time"
 )
 
 // GetUIContractNote delivers a deep copy of performance archives to feed visualization dashboards.
@@ -121,7 +122,7 @@ func (rm *RiskManager) HandleManualAndBrokerStateSync(symbol string, netQty int,
 		}
 
 		// Cleanly close out the optimization logs so performance tracking remains mathematically correct
-		rm.strategyEngine.LogOptimizationExit(symbol, "MANUAL_USER_INTERVENTION_SQUARE_OFF", fallbackState)
+		rm.strategyEngine.LogOptimizationExit(symbol, "MANUAL_USER_INTERVENTION_SQUARE_OFF", fallbackState, time.Now())
 	} else {
 		logger.Infof("🔄 System Sync: Internal Risk mapping updated for %s | Qty: %d | Side: %s | AvgPrice: %.2f", symbol, netQty, side, avgPrice)
 	}

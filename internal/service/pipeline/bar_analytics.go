@@ -30,14 +30,16 @@ type TimeframeAnalyticsHistory struct {
 
 type BarAnalyticsEngine struct {
 	dnaMap   map[uint32]*models.MarketDNA
+	profiles map[uint32]*models.InstrumentProfile
 	history  map[string]map[string]*TimeframeAnalyticsHistory // stock -> timeframe -> history
 	dbWriter *writer.DBWriter
 	mu       sync.Mutex
 }
 
-func NewBarAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, dbW *writer.DBWriter) *BarAnalyticsEngine {
+func NewBarAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, profiles map[uint32]*models.InstrumentProfile, dbW *writer.DBWriter) *BarAnalyticsEngine {
 	return &BarAnalyticsEngine{
 		dnaMap:   dnaMap,
+		profiles: profiles,
 		history:  make(map[string]map[string]*TimeframeAnalyticsHistory),
 		dbWriter: dbW,
 	}
@@ -98,6 +100,8 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 
 		bar.Analytics.TimePctAboveVwap = (previousTicksAbove / float64(bar.TickCount)) * 100.0
 	}
+
+	bar.Analytics.NormalizedVwapDistance = bae.calculateDistance(bar.Close, bar.VWAP, uint32(bar.InstrumentToken))
 
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 }
@@ -306,4 +310,16 @@ func (bae *BarAnalyticsEngine) calculateLinearRegressionSlope(series []float64) 
 		return 0.0
 	}
 	return ((n * sumXY) - (sumX * sumY)) / denominator
+}
+
+// Add a quick internal math helper to un-scale distance relative to asset ADR percentage limits
+func (bae *BarAnalyticsEngine) calculateDistance(price, vwap float64, token uint32) float64 {
+	if vwap <= 0 {
+		return 0.0
+	}
+	rawPct := ((price - vwap) / vwap) * 100.0
+	if profile, ok := bae.profiles[token]; ok && profile != nil && profile.ADRPct > 0 {
+		return rawPct / profile.ADRPct
+	}
+	return rawPct
 }

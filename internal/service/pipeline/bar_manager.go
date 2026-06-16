@@ -1,13 +1,13 @@
 package pipeline
 
 import (
-	"gidh-backend/internal/service/writer"
-	"gidh-backend/pkg/logger"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
+	"gidh-backend/internal/service/writer"
 	"gidh-backend/internal/service/ws"
+	"gidh-backend/pkg/logger"
 )
 
 type BarManager struct {
@@ -24,8 +24,6 @@ type BarManager struct {
 	dbWriter        *writer.DBWriter
 	analyticsEngine *BarAnalyticsEngine
 	MacroListener   interface{ IngestClosedBar(bar *models.Bar) }
-	// 🔥 NEW: Hook to inject real-time NetEfficiency variables into open bars on each tick
-	TickEnricher interface{ EnrichLiveBar(bar *models.Bar) }
 }
 
 type candleState struct {
@@ -50,7 +48,7 @@ func NewBarManager(
 		dnaMap:          rawDnaMap,
 		wsHub:           hub,
 		dbWriter:        dbW,
-		analyticsEngine: NewBarAnalyticsEngine(rawDnaMap, dbW),
+		analyticsEngine: NewBarAnalyticsEngine(rawDnaMap, profiles, dbW),
 	}
 }
 
@@ -95,14 +93,16 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 		for _, stateMap := range timeframes {
 			cs := stateMap[token]
 			if cs != nil && cs.bar != nil {
-				// 🔥 Prior to broadcasting, inject the strategy engine's latest live analytics
-				if bm.TickEnricher != nil {
-					bm.TickEnricher.EnrichLiveBar(cs.bar)
+				// ✅ FIX: Real-time features are fetched from BarAnalyticsEngine instead of an external strategy hook.
+				if bm.analyticsEngine != nil {
+					netEff, slope := bm.analyticsEngine.GetLiveSnapshot(cs.bar.StockName, cs.bar.Timeframe)
+					cs.bar.Analytics.NetEfficiency = netEff
+					cs.bar.Analytics.NetEfficiencySlope = slope
 				}
 
 				bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
 					"type": "bar",
-					"data": cs.bar, // Sends the true structural models.Bar packet
+					"data": cs.bar, // Sends the fully updated structural models.Bar packet
 				})
 			}
 		}
@@ -229,24 +229,24 @@ func (bm *BarManager) updateTimeframe(
 	if cs.bar.Timestamp.Before(candleStart) {
 		closedBar := cs.bar
 
-		bm.analyticsEngine.AnalyzeClose(closedBar)
+		// 1. BarAnalyticsEngine computes final statistics, saves to DB, and broadcasts closed metrics
+		if bm.analyticsEngine != nil {
+			bm.analyticsEngine.AnalyzeClose(closedBar)
+		}
 
-		// ⚡ Run metrics and write to DB on bar close
+		// 2. Pass fully populated bar seamlessly to the Strategy Engine execution listener
 		if bm.MacroListener != nil {
 			bm.MacroListener.IngestClosedBar(closedBar)
 		}
 
-		// Broadcast final bar close event using the exact layout on standard channel
-		if bm.wsHub != nil {
-			bm.wsHub.BroadcastJSON(closedBar.StockName+":"+timeframe, map[string]any{
-				"type": "bar",
-				"data": closedBar,
-			})
-		}
-
+		// 3. Instantiate the next ongoing candle context frame safely
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
 	}
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)
-	bm.analyticsEngine.AnalyzeTick(cs.bar, tick)
+
+	// Live tracking continuous updates on the active bar object frame
+	if bm.analyticsEngine != nil {
+		bm.analyticsEngine.AnalyzeTick(cs.bar, tick)
+	}
 }

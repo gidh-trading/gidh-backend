@@ -95,8 +95,8 @@ func (e *Engine) calculateActivePnLState(state *InstrumentState, bar *models.Bar
 	}
 }
 
-// evaluateExecutionRiskSafely processes strategy rules via async logs to prevent deadlocks completely
-func (e *Engine) evaluateExecutionRiskSafely(state *InstrumentState, bar *models.Bar) {
+// evaluateExecutionRiskSafely processes strategy rules via true market timestamps
+func (e *Engine) evaluateExecutionRiskSafely(state *InstrumentState, bar *models.Bar, marketTime time.Time) {
 	if state.CurrentSetupPhase != PhaseActiveTrade || e.ActiveStrategy == nil {
 		return
 	}
@@ -111,8 +111,8 @@ func (e *Engine) evaluateExecutionRiskSafely(state *InstrumentState, bar *models
 	}
 
 	if e.ActiveStrategy.CheckStopLoss(state, currentSide, avgPrice, 1) {
-		go e.LogOptimizationExit(bar.StockName, "SAFETY_STOP_LOSS", state)
+		go e.LogOptimizationExit(bar.StockName, "SAFETY_STOP_LOSS", state, marketTime)
 	} else if e.ActiveStrategy.CheckTakeProfit(state, currentSide, avgPrice, 1) {
-		go e.LogOptimizationExit(bar.StockName, "SAFETY_HIGH_CONF_TRAILING", state)
+		go e.LogOptimizationExit(bar.StockName, "SAFETY_HIGH_CONF_TRAILING", state, marketTime)
 	}
 }

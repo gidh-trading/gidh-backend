@@ -14,11 +14,10 @@ const (
 // InstrumentState handles ONLY active trade execution lifecycle, position tracking,
 // and shallow snapshots of analytical calculations forwarded by the pipeline stages.
 type InstrumentState struct {
-	StockName              string
-	Profile                *models.InstrumentProfile
-	LatestPrice            float64
-	LiveSessionVWAP        float64
-	NormalizedVwapDistance float64
+	StockName       string
+	Profile         *models.InstrumentProfile
+	LatestPrice     float64
+	LiveSessionVWAP float64
 
 	// Operational Trade Lifecycle State (Owned entirely by strategy.Engine)
 	CurrentSetupPhase string  // e.g., PhaseNeutral, PhaseActiveTrade
@@ -49,5 +48,6 @@ type OptimizationTradeLog struct {
 	FinalPnLINR            float64   `json:"final_pnl_inr"`
 	PeakPnLINR             float64   `json:"peak_pnl_inr"`
 	EfficiencyCaptureRatio float64   `json:"efficiency_capture_ratio"`
+	MinutesSinceOpen       int       `json:"minutes_since_open"`
 	CreatedAt              time.Time `json:"created_at"`
 }
