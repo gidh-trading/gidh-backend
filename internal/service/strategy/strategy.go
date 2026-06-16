@@ -1,12 +1,12 @@
 package strategy
 
 import (
-	"gidh-backend/pkg/logger"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
+	"gidh-backend/pkg/logger"
 )
 
 const (
@@ -62,28 +62,25 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	state.LatestPrice = enrichedTick.Raw.LastPrice
 	state.ActiveSide = currentSide
 	state.ActiveAvgPrice = averagePrice
+	state.LastTickTime = marketTime // <-- Sync the latest market time for GenerateSignal to use
 
 	// 1. TIME CUTOFF CHECK (Strategy Layer)
 	currentHM := (marketTime.Hour() * 100) + marketTime.Minute()
 	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
 
 	if currentHM >= cutoffHM {
-		// If we have an active position past cutoff time, force an exit.
 		if currentSide != "FLAT" && currentSide != "" {
 			state.CurrentSetupPhase = PhaseNeutral
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
-			state.LastExitSignalTime = marketTime // <-- Record exit time
+			state.LastExitSignalTime = marketTime
 			e.mu.Unlock()
-			return "EXIT_" + currentSide // RiskManager will execute this
+			return "EXIT_" + currentSide
 		}
 	}
 
 	// 2. MANUAL CLOSE DETECTION
-	// If the strategy thought we were in an active trade, but the incoming tick reports we are FLAT (netQty == 0)
 	if state.CurrentSetupPhase == PhaseActiveTrade && (currentSide == "FLAT" || netQty == 0) {
-
-		// Only trigger the warning if it has been more than 3 seconds since our last algorithmic exit signal
 		if marketTime.Sub(state.LastExitSignalTime) > 3*time.Second {
 			logger.Warnf("⚠️ Asynchronous State Sync: Position for %s closed externally. Strategy will auto-heal on next tick.", symbol)
 		}
@@ -91,9 +88,9 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
-		// Setting the EntryTimestamp to now enforces the existing 1-minute cooldown,
-		// preventing the bot from instantly re-entering the trade you just closed.
 		state.EntryTimestamp = marketTime
+		// If closed manually, also enforce the 5-minute break from right now
+		state.LastExitSignalTime = marketTime
 	}
 
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
@@ -125,7 +122,13 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 			return "HOLD"
 		}
 
-		// Enforce the 1-minute cooldown from the last entry (or manual exit)
+		// 4. NEW: 5-MINUTE BREAK AFTER A TRADE FINISHES
+		if !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 5*time.Minute {
+			e.mu.Unlock()
+			return "HOLD"
+		}
+
+		// Enforce the 1-minute cooldown from the last entry (to prevent double entries)
 		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) < 1*time.Minute {
 			e.mu.Unlock()
 			return "HOLD"
@@ -143,7 +146,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 			state.CurrentSetupPhase = PhaseNeutral
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
-			state.LastExitSignalTime = marketTime // <-- Record exit time
+			state.LastExitSignalTime = marketTime
 			e.mu.Unlock()
 			return "EXIT_" + currentSide
 		}
@@ -153,7 +156,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 				state.CurrentSetupPhase = PhaseNeutral
 				state.CurrentPnL = 0.0
 				state.PeakPnL = 0.0
-				state.LastExitSignalTime = marketTime // <-- Record exit time
+				state.LastExitSignalTime = marketTime
 				e.mu.Unlock()
 				return "EXIT_" + currentSide
 			}
@@ -188,13 +191,19 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 	if isFlatNow {
+		// 🛡️ BLOCK BAR SIGNALS DURING THE 5 MINUTE COOLDOWN
+		if !state.LastExitSignalTime.IsZero() && state.LastTickTime.Sub(state.LastExitSignalTime) < 5*time.Minute {
+			return "HOLD"
+		}
 		return e.ActiveStrategy.CheckEntry(state)
 	}
+
 	if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
 		return "EXIT_" + currentSide
 	}
 	if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
 		return "EXIT_" + currentSide
 	}
+
 	return e.ActiveStrategy.CheckExit(state, currentSide)
 }

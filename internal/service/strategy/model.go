@@ -27,6 +27,7 @@ type InstrumentState struct {
 	EntryVwapAnchor    float64
 	EntryTimestamp     time.Time
 	LastExitSignalTime time.Time
+	LastTickTime       time.Time
 
 	BarHistory map[string][]*models.Bar
 }
