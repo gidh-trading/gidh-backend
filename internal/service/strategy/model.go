@@ -22,6 +22,7 @@ type InstrumentState struct {
 	CurrentSetupPhase  string
 	ActiveSide         string
 	ActiveAvgPrice     float64
+	CurrentTradeID     string
 	CurrentPnL         float64
 	PeakPnL            float64
 	EntryVwapAnchor    float64

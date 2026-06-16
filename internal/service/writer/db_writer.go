@@ -224,6 +224,39 @@ func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime tim
 	}
 }
 
+func (w *DBWriter) PersistStrategyTransaction(tx models.StrategyTransaction) {
+	if w.config.SkipDatabaseInsert {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	query := `
+		INSERT INTO strategy_transactions (
+			trade_id, strategy_name, instrument, action_type, price, quantity, 
+			execution_time, trigger_reason, current_pnl, peak_pnl, market_snapshot
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11);`
+
+	_, err := w.pool.Exec(ctx, query,
+		tx.TradeID,
+		tx.StrategyName,
+		strings.ToUpper(tx.Instrument),
+		strings.ToUpper(tx.ActionType),
+		tx.Price,
+		tx.Quantity,
+		tx.ExecutionTime,
+		tx.TriggerReason,
+		tx.CurrentPnL,
+		tx.PeakPnL,
+		tx.MarketSnapshot, // pgx marshals maps to jsonb naturally
+	)
+
+	if err != nil {
+		logger.Errorf("DB Error persisting strategy transaction logs for trade %s: %v", tx.TradeID, err)
+	}
+}
+
 func (w *DBWriter) insertTicksBatch(batch []models.TickData) {
 
 	if w.config.SkipDatabaseInsert {

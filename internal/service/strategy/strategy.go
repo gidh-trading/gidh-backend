@@ -66,7 +66,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	// 1. TIME CUTOFF CHECK (Strategy Layer)
 	currentHM := (marketTime.Hour() * 100) + marketTime.Minute()
-
 	// 🛡️ BLOCK ALL TRADES BEFORE 9:30 AM IST
 	if currentHM < 930 {
 		e.mu.Unlock()
@@ -77,6 +76,9 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	if currentHM >= cutoffHM {
 		if currentSide != "FLAT" && currentSide != "" {
+			// Log the forced time cutoff square off event before resetting engine tracking values
+			e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Auto_Square_Off_Hour_Reached", netQty, marketTime)
+
 			state.CurrentSetupPhase = PhaseNeutral
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
@@ -91,6 +93,9 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		if marketTime.Sub(state.LastExitSignalTime) > 3*time.Second {
 			logger.Warnf("⚠️ Asynchronous State Sync: Position for %s closed externally. Strategy will auto-heal on next tick.", symbol)
 		}
+
+		// Log the manual closing detection for historical integrity anomalies matching strategy rules
+		e.logStrategyDecision(state, symbol, "EXIT_"+state.ActiveSide, "External_Manual_Close_Detected", netQty, marketTime)
 
 		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
@@ -145,11 +150,22 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			state.CurrentSetupPhase = PhaseActiveTrade
 			state.EntryTimestamp = marketTime
+
+			// Initialize PnL tracking nodes fresh on allocation sequence initialization
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
+
+			// Log entry rules transaction matching details
+			e.logStrategyDecision(state, symbol, signal, "Strategy_Entry_Condition_Met", netQty, marketTime)
+
 			e.mu.Unlock()
 			return signal
 		}
 	} else if !isFlatNow && e.ActiveStrategy != nil {
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+			// Log the exit transaction BEFORE clearing the tracking state
+			e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Stop_Loss_Hit", netQty, marketTime)
+
 			state.CurrentSetupPhase = PhaseNeutral
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
@@ -160,6 +176,9 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
 			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+				// Log the profit target execution record BEFORE state clearance metrics drop
+				e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Take_Profit_Hit", netQty, marketTime)
+
 				state.CurrentSetupPhase = PhaseNeutral
 				state.CurrentPnL = 0.0
 				state.PeakPnL = 0.0

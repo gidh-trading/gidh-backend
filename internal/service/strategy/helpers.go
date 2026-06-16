@@ -86,3 +86,45 @@ func (e *Engine) calculateActivePnLState(state *InstrumentState, bar *models.Bar
 		state.PeakPnL = state.CurrentPnL
 	}
 }
+
+// Helper method to write strategy logs into the database out of state metrics safely.
+// This executes asynchronously to protect the tick matching engine from latency penalties.
+func (e *Engine) logStrategyDecision(state *InstrumentState, symbol string, action string, reason string, qty int, marketTime time.Time) {
+	if e.dbWriter == nil {
+		return
+	}
+
+	// If no trade ID exists yet (Entry), generate a unique grouping string for this lifecycle
+	if state.CurrentTradeID == "" {
+		state.CurrentTradeID = symbol + "-" + marketTime.Format("20060102-150405.000")
+	}
+
+	// Build context metadata map to figure out where strategy went wrong later
+	snapshot := map[string]interface{}{
+		"latest_price":      state.LatestPrice,
+		"live_session_vwap": state.LiveSessionVWAP,
+		"phase":             state.CurrentSetupPhase,
+	}
+
+	txLog := models.StrategyTransaction{
+		TradeID:        state.CurrentTradeID,
+		StrategyName:   e.ActiveStrategy.Name(),
+		Instrument:     symbol,
+		ActionType:     action,
+		Price:          state.LatestPrice,
+		Quantity:       float64(qty),
+		ExecutionTime:  marketTime,
+		TriggerReason:  reason,
+		CurrentPnL:     state.CurrentPnL,
+		PeakPnL:        state.PeakPnL,
+		MarketSnapshot: snapshot,
+	}
+
+	// Persist asynchronously via DBWriter handle standard connection thread pool
+	go e.dbWriter.PersistStrategyTransaction(txLog)
+
+	// Clear out identifier track trace if this action closed the position lifecycle
+	if action == "EXIT_LONG" || action == "EXIT_SHORT" {
+		state.CurrentTradeID = ""
+	}
+}
