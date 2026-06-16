@@ -241,6 +241,13 @@ func (bm *BarManager) updateTimeframe(
 
 		// 3. Instantiate the next ongoing candle context frame safely
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
+
+		// ✅ FIX: Seed the new active bar with the updated historical metric baseline
+		if bm.analyticsEngine != nil {
+			// Safely fetch from the engine's history cache
+			h := bm.analyticsEngine.getOrInitTimeframeHistory(tick.Raw.StockName, timeframe)
+			cs.bar.Analytics.TimePctAboveVwap = h.TimePctAboveVwap
+		}
 	}
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)

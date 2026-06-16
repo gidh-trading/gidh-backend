@@ -26,8 +26,8 @@ func NewEngine(
 	dbW *writer.DBWriter,
 	completeHook func(log *OptimizationTradeLog),
 ) *Engine {
-	ledgerStrategyCard := NewVwapEfficiencyReversalStrategy()
-	timeRouterWrapper := NewTimeBasedRouter(ledgerStrategyCard)
+	masterStrat := NewVwapEfficiencyMomentumStrategy()
+	timeRouterWrapper := NewTimeBasedRouter(masterStrat)
 
 	return &Engine{
 		Registry:         make(map[string]*InstrumentState),

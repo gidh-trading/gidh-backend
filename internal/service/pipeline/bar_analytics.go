@@ -98,7 +98,6 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 			previousTicksAbove++
 		}
 
-		bar.Analytics.TimePctAboveVwap = (previousTicksAbove / float64(bar.TickCount)) * 100.0
 	}
 
 	bar.Analytics.NormalizedVwapDistance = bae.calculateDistance(bar.Close, bar.VWAP, uint32(bar.InstrumentToken))
