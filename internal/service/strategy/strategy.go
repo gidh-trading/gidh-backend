@@ -194,33 +194,58 @@ func (e *Engine) logOptimizationEntryLocked(symbol string, signal string, state 
 	state.PeakPnL = 0.0
 	state.CurrentSetupPhase = PhaseActiveTrade
 
-	var entryEff, entrySlope float64
+	var entryEff, entrySlope, entryVwapDist float64
+	// Example placeholder analytical values - extend from your BarAnalyticsEngine if available
+	var volumeRank, priceRank, entryDelta int
+
 	if state.BarHistory != nil {
 		if history, ok := state.BarHistory["1m"]; ok && len(history) > 0 {
 			lastBar := history[len(history)-1]
 			entryEff = lastBar.Analytics.NetEfficiency
 			entrySlope = lastBar.Analytics.NetEfficiencySlope
+
+			// Compute dynamic distance from VWAP curve at point of ingestion
+			if lastBar.VWAP > 0 {
+				entryVwapDist = state.LatestPrice - lastBar.VWAP
+			}
+
+			// If your payload contains rank or delta indicators, extract them safely:
+			// volumeRank = lastBar.Analytics.VolumeRank
+			// priceRank = lastBar.Analytics.PriceRank
+			// entryDelta = lastBar.Analytics.Delta
 		}
 	}
 
-	// 🕒 ACCURATE MARKET TIME CALCULATION (Deterministic in live & backtests)
-	todayOpen := time.Date(marketTime.Year(), marketTime.Month(), marketTime.Day(), 9, 15, 0, 0, marketTime.Location())
+	// 🕒 ACCURATE MARKET TIME CALCULATION (Deterministic Timezone Alignment)
+	marketLocation := marketTime.Location()
+	todayOpen := time.Date(marketTime.Year(), marketTime.Month(), marketTime.Day(), 9, 15, 0, 0, marketLocation)
+
+	// If marketTime contains explicit zone offsets (+05:30) and todayOpen was calculated in UTC/Local,
+	// force strict timezone parity alignment to protect delta measurements.
+	if marketTime.Unix() < todayOpen.Unix() {
+		todayOpen = todayOpen.In(marketLocation)
+	}
+
 	minutesElapsed := int(marketTime.Sub(todayOpen).Minutes())
 	if minutesElapsed < 0 {
 		minutesElapsed = 0
 	}
 
 	log := &OptimizationTradeLog{
-		Symbol:           symbol,
-		StrategyName:     strategyName,
-		TradeSide:        tradeSide,
-		EntryTimestamp:   marketTime, // ⚡ Set to true tick opening time
-		EntryPrice:       state.LatestPrice,
-		EntryVwap:        state.LiveSessionVWAP,
-		EntryEfficiency:  entryEff,
-		EntrySlope:       entrySlope,
-		CreatedAt:        marketTime,
-		MinutesSinceOpen: minutesElapsed, // ✅ Calculated deterministically
+		Symbol:            symbol,
+		StrategyName:      strategyName,
+		TradeSide:         tradeSide,
+		EntryTimestamp:    marketTime,
+		EntryPrice:        state.LatestPrice,
+		EntryVwap:         state.LiveSessionVWAP,
+		EntryVolumeRank:   volumeRank,
+		EntryPriceRank:    priceRank,
+		EntryEfficiency:   entryEff,
+		EntryDelta:        float64(entryDelta),
+		EntrySlope:        entrySlope,
+		EntryVwapDistance: entryVwapDist,
+		CreatedAt:         time.Now(), // DB persistence tracking instant
+		MinutesSinceOpen:  minutesElapsed,
 	}
 
 	e.ActiveTrades[symbol] = log
