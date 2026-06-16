@@ -1,6 +1,7 @@
 package pipeline
 
 import (
+	"gidh-backend/internal/service/writer"
 	"gidh-backend/pkg/logger"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ type BarManager struct {
 	dnaMap          map[uint32]*models.MarketDNA
 	mu              sync.RWMutex
 	wsHub           *ws.Hub
+	dbWriter        *writer.DBWriter
 	analyticsEngine *BarAnalyticsEngine
 	MacroListener   interface{ IngestClosedBar(bar *models.Bar) }
 	// 🔥 NEW: Hook to inject real-time NetEfficiency variables into open bars on each tick
@@ -30,7 +32,12 @@ type candleState struct {
 	bar *models.Bar
 }
 
-func NewBarManager(hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile, rawDnaMap map[uint32]*models.MarketDNA) *BarManager {
+func NewBarManager(
+	hub *ws.Hub,
+	dbW *writer.DBWriter,
+	profiles map[uint32]*models.InstrumentProfile,
+	rawDnaMap map[uint32]*models.MarketDNA,
+) *BarManager {
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 	return &BarManager{
 		loc:             loc,
@@ -42,7 +49,8 @@ func NewBarManager(hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile, r
 		profiles:        profiles,
 		dnaMap:          rawDnaMap,
 		wsHub:           hub,
-		analyticsEngine: NewBarAnalyticsEngine(rawDnaMap),
+		dbWriter:        dbW,
+		analyticsEngine: NewBarAnalyticsEngine(rawDnaMap, dbW),
 	}
 }
 

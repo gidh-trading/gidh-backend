@@ -1,93 +1,53 @@
 package strategy
 
 import (
-	"gidh-backend/internal/service/models"
 	"time"
-)
 
-type SetupPhase string
+	"gidh-backend/internal/service/models"
+)
 
 const (
-	PhaseNeutral     SetupPhase = "NEUTRAL"
-	PhaseActiveTrade SetupPhase = "ACTIVE_TRADE"
+	PhaseNeutral     = "NEUTRAL"
+	PhaseActiveTrade = "ACTIVE_TRADE"
 )
 
-type InstitutionalLedger struct {
-	BullEfficient float64   `json:"bull_efficient"`
-	BearEfficient float64   `json:"bear_efficient"`
-	LastUpdated   time.Time `json:"last_updated"`
-}
-
+// InstrumentState handles ONLY active trade execution lifecycle, position tracking,
+// and shallow snapshots of analytical calculations forwarded by the pipeline stages.
 type InstrumentState struct {
-	// --- Core Identity & Current Snapshots ---
-	Symbol          string    `json:"symbol"`
-	LastUpdated     time.Time `json:"last_updated"`
-	LatestPrice     float64   `json:"latest_price"`
-	LiveSessionVWAP float64   `json:"live_session_vwap"`
+	StockName              string
+	Profile                *models.InstrumentProfile
+	LatestPrice            float64
+	LiveSessionVWAP        float64
+	NormalizedVwapDistance float64
 
-	// --- VWAP Regime Counters & Core Metric Vectors ---
-	ConsecutiveClosesAboveVwap int     `json:"consecutive_closes_above_vwap"`
-	ConsecutiveClosesBelowVwap int     `json:"consecutive_closes_below_vwap"`
-	TimePctAboveVwap           float64 `json:"time_pct_above_vwap"`
-	NormalizedVwapDistance     float64 `json:"normalized_vwap_distance"`
-	TotalSessionBars           int     `json:"total_session_bars"`
-	LatestChangePct            float64 `json:"latest_change_pct"`
+	// Operational Trade Lifecycle State (Owned entirely by strategy.Engine)
+	CurrentSetupPhase string  // e.g., PhaseNeutral, PhaseActiveTrade
+	CurrentPnL        float64 // Real-time run tracking currency delta
+	PeakPnL           float64 // Maximum unrealized PnL reached during active position
+	EntryVwapAnchor   float64 // VWAP level recorded at the exact point of market entry
 
-	// --- 📈 Dynamic Position PnL Fields ---
-	CurrentPnL float64 `json:"current_pnl"`
-	PeakPnL    float64 `json:"peak_pnl"`
-
-	// --- Asset Context Ranks ---
-	LatestPriceRank  int `json:"latest_price_rank"`
-	LatestVolumeRank int `json:"latest_volume_rank"`
-
-	// --- 📊 Expanded Memory Fields (Fixes Bug #1 & #2) ---
-	Ledger               InstitutionalLedger `json:"ledger"`
-	NetEfficiency        float64             `json:"net_efficiency"`         // [-150 to 150 Scale]
-	NetEfficiencySlope   float64             `json:"net_efficiency_slope"`   // 10-bar Trend Quality line
-	NetEfficiencyHistory []float64           `json:"net_efficiency_history"` // Cached trailing row buffer for slope
-	PeakEfficiency       float64             `json:"peak_efficiency"`        // 🔒 Safely isolated peak cache container
-
-	// --- 📈 NEW: Dynamic Exit Tracking State ---
-	ActiveTradePeakEfficiency float64 `json:"active_trade_peak_efficiency"`
-	BaseDecayFactor           float64 `json:"base_decay_factor"`
-	CurrentDecayWatermark     float64 `json:"current_decay_watermark"`
-
-	// --- Trade Tracking & Historical Buffers ---
-	CurrentSetupPhase SetupPhase                `json:"current_setup_phase"`
-	LastTradedBarTime time.Time                 `json:"last_traded_bar_time"`
-	EntryVwapAnchor   float64                   `json:"entry_vwap_anchor"`
-	BarHistory        map[string][]*models.Bar  `json:"bar_history"`
-	Profile           *models.InstrumentProfile `json:"profile"`
-
-	TotalBarsByTimeframe        map[string]int     // Tracks counts per timeframe independently
-	TimePctAboveVwapByTimeframe map[string]float64 // Bounded between 0.0 and 100.0 per timeframe
+	BarHistory map[string][]*models.Bar // key: Timeframe (e.g., "1m", "5m")
 }
 
-// OptimizationTradeLog fully updated with Missing Metrics (Fixes Bug #8)
+// OptimizationTradeLog records the immutable entry baseline footprint metrics
+// and captures trade execution outcome performance details.
 type OptimizationTradeLog struct {
-	ID                int       `json:"id" db:"id"`
-	Symbol            string    `json:"symbol" db:"symbol"`
-	StrategyName      string    `json:"strategy_name" db:"strategy_name"`
-	TradeSide         string    `json:"trade_side" db:"trade_side"`
-	MinutesSinceOpen  int       `json:"minutes_since_open" db:"minutes_since_open"`
-	EntryTimestamp    time.Time `json:"entry_timestamp" db:"entry_timestamp"`
-	EntryPrice        float64   `json:"entry_price" db:"entry_price"`
-	EntryVwap         float64   `json:"entry_vwap" db:"entry_vwap"`
-	EntryVwapDistance float64   `json:"entry_vwap_distance" db:"entry_vwap_distance"`
-
-	// Analytics Snapshots
-	EntryEfficiency float64 `json:"entry_efficiency" db:"entry_efficiency"`
-	EntryDelta      float64 `json:"entry_delta" db:"entry_delta"`
-	EntrySlope      float64 `json:"entry_slope" db:"entry_slope"`
-	EntryVolumeRank int     `json:"entry_volume_rank" db:"entry_volume_rank"`
-
-	PeakPnLINR             float64 `json:"peak_pnl_inr" db:"peak_pnl_inr"`
-	EfficiencyCaptureRatio float64 `json:"efficiency_capture_ratio" db:"efficiency_capture_ratio"` // 📈 Added optimization vector
-
-	ExitTimestamp time.Time `json:"exit_timestamp" db:"exit_timestamp"`
-	ExitPrice     float64   `json:"exit_price" db:"exit_price"`
-	ExitReason    string    `json:"exit_reason" db:"exit_reason"`
-	FinalPnLINR   float64   `json:"final_pnl_inr" db:"final_pnl_inr"`
-	CreatedAt     time.Time `json:"created_at" db:"created_at"`
+	Symbol                 string    `json:"symbol"`
+	StrategyName           string    `json:"strategy_name"`
+	TradeSide              string    `json:"trade_side"`
+	EntryTimestamp         time.Time `json:"entry_timestamp"`
+	EntryPrice             float64   `json:"entry_price"`
+	EntryVwap              float64   `json:"entry_vwap"`
+	EntryVwapDistance      float64   `json:"entry_vwap_distance"`
+	EntryEfficiency        float64   `json:"entry_efficiency"`
+	EntryDelta             float64   `json:"entry_delta"`
+	EntrySlope             float64   `json:"entry_slope"`
+	EntryVolumeRank        int       `json:"entry_volume_rank"`
+	ExitTimestamp          time.Time `json:"exit_timestamp"`
+	ExitPrice              float64   `json:"exit_price"`
+	ExitReason             string    `json:"exit_reason"`
+	FinalPnLINR            float64   `json:"final_pnl_inr"`
+	PeakPnLINR             float64   `json:"peak_pnl_inr"`
+	EfficiencyCaptureRatio float64   `json:"efficiency_capture_ratio"`
+	CreatedAt              time.Time `json:"created_at"`
 }

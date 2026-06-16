@@ -179,7 +179,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	enrichmentStage := pipeline.NewEnrichmentStage(a.OrderManager, dnaMap, profilesMap)
 
 	// 4. Initialize the decoupled Bar Manager
-	barManager := pipeline.NewBarManager(a.wsHub, profilesMap, dnaMap)
+	barManager := pipeline.NewBarManager(a.wsHub, a.DBWriter, profilesMap, dnaMap)
 
 	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
 
@@ -201,7 +201,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	// Step A: Initialize the Strategy Engine universally across ALL runtime modes
-	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, a.DBWriter, func(log *strategy.OptimizationTradeLog) {
+	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, func(log *strategy.OptimizationTradeLog) {
 		logger.Infof("🎯 OPTIMIZATION LOG | %s | Side: %s | PnL: %.2f INR | Reason: %s | VWAP Dist: %.4f",
 			log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryVwapDistance)
 
@@ -237,7 +237,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	// Connect macro streaming listeners
 	barManager.MacroListener = a.StrategyEngine
 	barManager.TickEnricher = a.StrategyEngine
-	
+
 	// Step B: Initialize standalone Risk, Capital and Broker Order Controllers
 	a.RiskManager = risk.NewRiskManager(a.OrderManager, a.StrategyEngine)
 

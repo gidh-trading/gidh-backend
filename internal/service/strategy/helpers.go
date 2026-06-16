@@ -1,119 +1,47 @@
 package strategy
 
 import (
-	"math"
 	"time"
 
 	"gidh-backend/internal/service/models"
 )
 
-const DecayConstant = 0.90
-
-// ProcessClosedBarLedger decays individual registers and isolates high-impact energy parameters
-func (e *Engine) ProcessClosedBarLedger(state *InstrumentState, bar *models.Bar) {
-	// 1. Smoothly decay existing registers to maintain historical context memory
-	state.Ledger.BullEfficient *= DecayConstant
-	state.Ledger.BearEfficient *= DecayConstant
-	state.Ledger.LastUpdated = bar.Timestamp
-
-	// 2. Derive delta edge and full energy footprint using internal analytics ranks
-	energy := float64(bar.Analytics.VolumeRank * bar.Analytics.PriceRank)
-	delta := bar.Analytics.PriceRank - bar.Analytics.VolumeRank
-
-	// 3. Classify and distribute values back into independent registers
-	switch bar.Analytics.Direction {
-	case models.DirStrongBullish, models.DirBullish:
-		if math.Abs(float64(delta)) <= 1 {
-			state.Ledger.BullEfficient += energy
-		} else {
-			state.Ledger.BullEfficient += energy * 0.5
-		}
-
-	case models.DirStrongBearish, models.DirBearish:
-		if math.Abs(float64(delta)) <= 1 {
-			state.Ledger.BearEfficient += energy
-		} else {
-			state.Ledger.BearEfficient += (energy * 0.5)
-		}
-	}
-}
-
-func (e *Engine) processActiveSignalRoute(symbol string, state *InstrumentState, side string, avgPrice float64, qty int) string {
-	if e.ActiveStrategy != nil {
-		return e.ActiveStrategy.CheckExit(state, side)
-	}
-	return "HOLD"
-}
-
-func (e *Engine) isBeforeMarketOpen(bar *models.Bar) bool {
-	marketOpenTime := time.Date(bar.Timestamp.Year(), bar.Timestamp.Month(), bar.Timestamp.Day(), 9, 15, 0, 0, bar.Timestamp.Location())
-	return bar.Timestamp.Before(marketOpenTime)
-}
-
+// getOrInitializeState extracts or boots context tracking registers cleanly
 func (e *Engine) getOrInitializeState(symbol string) *InstrumentState {
 	state, exists := e.Registry[symbol]
 	if !exists {
+		profile := e.profiles[symbol]
 		state = &InstrumentState{
-			Symbol:                      symbol,
-			CurrentSetupPhase:           PhaseNeutral,
-			BarHistory:                  make(map[string][]*models.Bar),
-			NetEfficiencyHistory:        make([]float64, 0, 16), // Allocated cleanly for 10-bar slope lookback requirements
-			NetEfficiency:               0.0,
-			NetEfficiencySlope:          0.0,
-			PeakEfficiency:              0.0,
-			TotalBarsByTimeframe:        make(map[string]int),
-			TimePctAboveVwapByTimeframe: make(map[string]float64),
-		}
-		if profile, ok := e.profiles[symbol]; ok {
-			state.Profile = profile
+			StockName:         symbol,
+			Profile:           profile,
+			CurrentSetupPhase: PhaseNeutral,
+			BarHistory:        make(map[string][]*models.Bar),
 		}
 		e.Registry[symbol] = state
 	}
 	return state
 }
 
-func (e *Engine) updateCoreBarMetrics(state *InstrumentState, bar *models.Bar) {
-	state.LatestPrice = bar.Close
-	state.LiveSessionVWAP = bar.VWAP
-	state.LastUpdated = bar.Timestamp
-
-	// 🛠️ FIX Bug #8 Context Support: Retain ranks from incoming closed bar contexts
-	state.LatestVolumeRank = bar.Analytics.VolumeRank
-	state.LatestPriceRank = bar.Analytics.PriceRank
-}
-
-func (e *Engine) updateCoreTickMetrics(state *InstrumentState, tick models.TickData) {
-	state.LatestPrice = tick.LastPrice
-	state.LastUpdated = tick.Timestamp
-
-	// Ticks do not naturally possess bar analytics ranks; these remain cached from the last closed bar step
-}
-
-func (e *Engine) trackVwapAcceptance(state *InstrumentState, bar *models.Bar) {
-	if bar.Close > bar.VWAP {
-		state.ConsecutiveClosesAboveVwap++
-		state.ConsecutiveClosesBelowVwap = 0
-	} else if bar.Close < bar.VWAP {
-		state.ConsecutiveClosesBelowVwap++
-		state.ConsecutiveClosesAboveVwap = 0
-	} else {
-		state.ConsecutiveClosesAboveVwap = 0
-		state.ConsecutiveClosesBelowVwap = 0
-	}
-}
-
-// calculateNormalizedDistance maps structural deviations against ADRPct expected daily boundaries
+// calculateNormalizedDistance determines the signed percentage gap relative to asset ADR percentage limits
 func (e *Engine) calculateNormalizedDistance(price float64, vwap float64, profile *models.InstrumentProfile) float64 {
-	if vwap == 0 || profile == nil || profile.ADRPct == 0 {
+	if vwap <= 0 {
 		return 0.0
 	}
-	expectedDailyVarianceRange := vwap * (profile.ADRPct / 100.0)
-	if expectedDailyVarianceRange == 0 {
-		return 0.0
+
+	// 1. Derive the standard raw distance from VWAP as a percentage value (e.g., +0.56%)
+	rawDistancePercentage := ((price - vwap) / vwap) * 100.0
+
+	// 2. Normalize distance using your profile data frame properties
+	// Since profile.ADRPct is stored as a raw layout float (e.g., 2.80 representing 2.80%),
+	// we divide directly by that threshold percentage capacity.
+	if profile != nil && profile.ADRPct > 0 {
+		return rawDistancePercentage / profile.ADRPct
 	}
-	return (price - vwap) / expectedDailyVarianceRange
+
+	return rawDistancePercentage
 }
 
+// appendAndPruneHistory inserts closed bars into isolated lookback buffers for strategy card evaluations
 func (e *Engine) appendAndPruneHistory(state *InstrumentState, bar *models.Bar) {
 	timeframe := bar.Timeframe
 	state.BarHistory[timeframe] = append(state.BarHistory[timeframe], bar)
@@ -127,11 +55,11 @@ func (e *Engine) appendAndPruneHistory(state *InstrumentState, bar *models.Bar) 
 	}
 }
 
+// updateSignalPhaseAndExtensions manages execution anchors inside live signal generation passes
 func (e *Engine) updateSignalPhaseAndExtensions(state *InstrumentState, currentSide string, averagePrice float64, netQty int) {
 	if currentSide == "FLAT" || currentSide == "" || netQty == 0 {
 		state.CurrentSetupPhase = PhaseNeutral
 		state.EntryVwapAnchor = 0.0
-		// Do not mutate or scrub peak indicators blindly inside the signal re-routing phase thread loops
 	} else {
 		state.CurrentSetupPhase = PhaseActiveTrade
 		if state.EntryVwapAnchor == 0 {
@@ -140,26 +68,51 @@ func (e *Engine) updateSignalPhaseAndExtensions(state *InstrumentState, currentS
 	}
 }
 
-// CalculateLinearRegressionSlope returns the slope of historical metrics data points over time frames
-func CalculateLinearRegressionSlope(values []float64) float64 {
-	n := float64(len(values))
-	if n < 2 {
-		return 0.0 // Can't calculate a trendline on 1 or 0 points
+// calculateActivePnLState updates current and peak portfolio performance tracking deltas
+func (e *Engine) calculateActivePnLState(state *InstrumentState, bar *models.Bar) {
+	if state.CurrentSetupPhase != PhaseActiveTrade {
+		state.CurrentPnL = 0.0
+		state.PeakPnL = 0.0
+		return
 	}
 
-	var sumX, sumY, sumXY, sumXX float64
-	for i, y := range values {
-		x := float64(i)
-		sumX += x
-		sumY += y
-		sumXY += x * y
-		sumXX += x * x
+	tradeLog, exists := e.ActiveTrades[bar.StockName]
+	if !exists {
+		return
 	}
 
-	denominator := (n * sumXX) - (sumX * sumX)
-	if denominator == 0 {
-		return 0.0
+	if tradeLog.TradeSide == "LONG" {
+		state.CurrentPnL = (bar.Close - tradeLog.EntryPrice)
+	} else if tradeLog.TradeSide == "SHORT" {
+		state.CurrentPnL = (tradeLog.EntryPrice - bar.Close)
 	}
 
-	return (n*sumXY - sumX*sumY) / denominator
+	if state.CurrentPnL > state.PeakPnL {
+		state.PeakPnL = state.CurrentPnL
+	}
+	if state.PeakPnL > tradeLog.PeakPnLINR {
+		tradeLog.PeakPnLINR = state.PeakPnL
+	}
+}
+
+// evaluateExecutionRiskSafely processes strategy rules via async logs to prevent deadlocks completely
+func (e *Engine) evaluateExecutionRiskSafely(state *InstrumentState, bar *models.Bar) {
+	if state.CurrentSetupPhase != PhaseActiveTrade || e.ActiveStrategy == nil {
+		return
+	}
+
+	currentSide := "LONG"
+	avgPrice := state.LatestPrice
+	if tradeLog, exists := e.ActiveTrades[bar.StockName]; exists {
+		if tradeLog.TradeSide == "SHORT" {
+			currentSide = "SHORT"
+		}
+		avgPrice = tradeLog.EntryPrice
+	}
+
+	if e.ActiveStrategy.CheckStopLoss(state, currentSide, avgPrice, 1) {
+		go e.LogOptimizationExit(bar.StockName, "SAFETY_STOP_LOSS", state)
+	} else if e.ActiveStrategy.CheckTakeProfit(state, currentSide, avgPrice, 1) {
+		go e.LogOptimizationExit(bar.StockName, "SAFETY_HIGH_CONF_TRAILING", state)
+	}
 }

@@ -10,9 +10,6 @@ type Strategy interface {
 	// CheckExit evaluates indicator trend breakdowns when in an ACTIVE trade
 	CheckExit(state *InstrumentState, currentSide string) string // Returns "EXIT_LONG", "EXIT_SHORT", or "HOLD"
 
-	// CheckTrailingProfitLock Intelligent Volatility Retracement Monitoring
-	CheckTrailingProfitLock(state *InstrumentState, currentSide string, averagePrice float64) bool
-
 	// CheckTakeProfit evaluates if your profit targets have been met
 	CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool
 
