@@ -74,11 +74,6 @@ func (e *Engine) validateTimeAndCooldowns(state *InstrumentState, marketTime tim
 		return false, false, currentHM
 	}
 
-	// 4. 🛡️ ENFORCE 1-MINUTE COOLDOWN BETWEEN ENTRIES (Prevent double signals)
-	if isFlat && !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) < 1*time.Minute {
-		return false, false, currentHM
-	}
-
 	return true, false, currentHM
 }
 
@@ -135,7 +130,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
-		state.EntryTimestamp = marketTime
+		state.EntryTimestamp = time.Time{}
 		state.LastExitSignalTime = marketTime
 		isFlatNow = true
 	}
