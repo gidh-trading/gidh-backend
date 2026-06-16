@@ -18,8 +18,6 @@ const (
 	MaxLeverage           = 5.0
 	MaxCapitalPerStockPct = 0.25
 	AgentEmail            = "algo.trader@gidh.tech"
-	AutoSquareOffHour     = 15 // 3 PM
-	AutoSquareOffMinute   = 0  // 00 minutes
 	MaxConcurrentTrades   = 4
 )
 
@@ -58,56 +56,9 @@ func NewRiskManager(om order.PositionManager, se *strategy.Engine) *RiskManager 
 func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) {
 	rawTick := enrichedTick.Raw
 	symbol := rawTick.StockName
-	tickTime := rawTick.Timestamp
 
 	rm.mu.Lock()
 	if rm.circuitBroken {
-		rm.mu.Unlock()
-		return
-	}
-
-	// 1. TIME CUTOFF CHECK (3:00 PM Auto-Square Off)
-	currentHM := (tickTime.Hour() * 100) + tickTime.Minute()
-	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
-
-	if currentHM >= cutoffHM {
-		logger.Warnf("🕒 Intraday Cutoff [3:00 PM] breached. Engaging Auto-Square Off across all instruments...")
-		rm.circuitBroken = true
-
-		for mapKey, pos := range rm.agentPositions {
-			if pos.NetQuantity != 0 && pos.Side != "FLAT" {
-				var exitSide string
-				if pos.Side == "LONG" {
-					exitSide = "SELL"
-				} else {
-					exitSide = "BUY"
-				}
-
-				exitReq := rm.buildExitOrderRequest(pos, exitSide)
-
-				totalCharges := rm.CalculateItemizedCharges(pos.NetQuantity, pos.AveragePrice)
-				rm.globalSummary.TotalCharges += totalCharges
-				rm.dailyChargesPaid += totalCharges
-
-				rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
-					Timestamp:       tickTime,
-					Side:            exitSide,
-					Symbol:          pos.Symbol,
-					Exchange:        "NSE",
-					Quantity:        pos.NetQuantity,
-					AveragePrice:    rawTick.LastPrice,
-					AllocatedCharge: totalCharges,
-				})
-
-				rm.lastExitTime[mapKey] = tickTime
-
-				pos.NetQuantity = 0
-				pos.Side = "FLAT"
-				pos.AveragePrice = 0.0
-
-				go rm.orderManager.PlaceOrder(context.Background(), exitReq)
-			}
-		}
 		rm.mu.Unlock()
 		return
 	}

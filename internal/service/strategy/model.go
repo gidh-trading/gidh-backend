@@ -19,13 +19,14 @@ type InstrumentState struct {
 	LiveSessionVWAP float64
 
 	// Operational Trade Lifecycle State
-	CurrentSetupPhase string
-	ActiveSide        string
-	ActiveAvgPrice    float64
-	CurrentPnL        float64
-	PeakPnL           float64
-	EntryVwapAnchor   float64
-	EntryTimestamp    time.Time
+	CurrentSetupPhase  string
+	ActiveSide         string
+	ActiveAvgPrice     float64
+	CurrentPnL         float64
+	PeakPnL            float64
+	EntryVwapAnchor    float64
+	EntryTimestamp     time.Time
+	LastExitSignalTime time.Time
 
 	BarHistory map[string][]*models.Bar
 }

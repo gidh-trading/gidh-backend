@@ -1,11 +1,17 @@
 package strategy
 
 import (
+	"gidh-backend/pkg/logger"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
+)
+
+const (
+	AutoSquareOffHour   = 15 // 3 PM
+	AutoSquareOffMinute = 0  // 00 minutes
 )
 
 type Engine struct {
@@ -47,7 +53,6 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Unlock()
 }
 
-// UpdateContext reads the true localized timestamp straight from the incoming EnrichedTick
 func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
 	e.mu.Lock()
 	symbol := enrichedTick.Raw.StockName
@@ -57,6 +62,39 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	state.LatestPrice = enrichedTick.Raw.LastPrice
 	state.ActiveSide = currentSide
 	state.ActiveAvgPrice = averagePrice
+
+	// 1. TIME CUTOFF CHECK (Strategy Layer)
+	currentHM := (marketTime.Hour() * 100) + marketTime.Minute()
+	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
+
+	if currentHM >= cutoffHM {
+		// If we have an active position past cutoff time, force an exit.
+		if currentSide != "FLAT" && currentSide != "" {
+			state.CurrentSetupPhase = PhaseNeutral
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
+			state.LastExitSignalTime = marketTime // <-- Record exit time
+			e.mu.Unlock()
+			return "EXIT_" + currentSide // RiskManager will execute this
+		}
+	}
+
+	// 2. MANUAL CLOSE DETECTION
+	// If the strategy thought we were in an active trade, but the incoming tick reports we are FLAT (netQty == 0)
+	if state.CurrentSetupPhase == PhaseActiveTrade && (currentSide == "FLAT" || netQty == 0) {
+
+		// Only trigger the warning if it has been more than 3 seconds since our last algorithmic exit signal
+		if marketTime.Sub(state.LastExitSignalTime) > 3*time.Second {
+			logger.Warnf("⚠️ Asynchronous State Sync: Position for %s closed externally. Strategy will auto-heal on next tick.", symbol)
+		}
+
+		state.CurrentSetupPhase = PhaseNeutral
+		state.CurrentPnL = 0.0
+		state.PeakPnL = 0.0
+		// Setting the EntryTimestamp to now enforces the existing 1-minute cooldown,
+		// preventing the bot from instantly re-entering the trade you just closed.
+		state.EntryTimestamp = marketTime
+	}
 
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
 
@@ -75,13 +113,19 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 			state.PeakPnL = state.CurrentPnL
 		}
 	} else {
-		state.CurrentSetupPhase = PhaseNeutral // Auto-heal state if RiskManager flattened it
+		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
 	}
 
 	if isFlatNow && e.ActiveStrategy != nil {
-		// Enforce the 1-minute cooldown from the last entry
+		// 3. BLOCK NEW ENTRIES AFTER CUTOFF
+		if currentHM >= cutoffHM {
+			e.mu.Unlock()
+			return "HOLD"
+		}
+
+		// Enforce the 1-minute cooldown from the last entry (or manual exit)
 		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) < 1*time.Minute {
 			e.mu.Unlock()
 			return "HOLD"
@@ -90,7 +134,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			state.CurrentSetupPhase = PhaseActiveTrade
-			state.EntryTimestamp = marketTime // Record entry time for cooldown tracking
+			state.EntryTimestamp = marketTime
 			e.mu.Unlock()
 			return signal
 		}
@@ -99,6 +143,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 			state.CurrentSetupPhase = PhaseNeutral
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
+			state.LastExitSignalTime = marketTime // <-- Record exit time
 			e.mu.Unlock()
 			return "EXIT_" + currentSide
 		}
@@ -108,6 +153,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 				state.CurrentSetupPhase = PhaseNeutral
 				state.CurrentPnL = 0.0
 				state.PeakPnL = 0.0
+				state.LastExitSignalTime = marketTime // <-- Record exit time
 				e.mu.Unlock()
 				return "EXIT_" + currentSide
 			}
