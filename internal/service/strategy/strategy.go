@@ -66,6 +66,13 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	// 1. TIME CUTOFF CHECK (Strategy Layer)
 	currentHM := (marketTime.Hour() * 100) + marketTime.Minute()
+
+	// 🛡️ BLOCK ALL TRADES BEFORE 9:30 AM IST
+	if currentHM < 930 {
+		e.mu.Unlock()
+		return "HOLD"
+	}
+
 	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
 
 	if currentHM >= cutoffHM {
@@ -123,7 +130,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		}
 
 		// 4. NEW: 5-MINUTE BREAK AFTER A TRADE FINISHES
-		if !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 5*time.Minute {
+		if !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 10*time.Minute {
 			e.mu.Unlock()
 			return "HOLD"
 		}
