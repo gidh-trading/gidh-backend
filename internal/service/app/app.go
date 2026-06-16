@@ -206,7 +206,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 			log.Symbol, log.TradeSide, log.FinalPnLINR, log.ExitReason, log.EntryVwapDistance)
 
 		if a.pool != nil {
-			err := db.LogStrategyOptimizationTradeExpanded(
+			err := db.SaveStrategyOptimizationLog(
 				context.Background(),
 				a.pool,
 				log.Symbol,
@@ -217,6 +217,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 				log.EntryPrice,
 				log.EntryVwap,
 				log.EntryVolumeRank,
+				log.EntryPriceRank, // ✅ FIX: Added missing field to prevent structural truncation/offset corruption
 				log.EntryEfficiency,
 				log.EntryDelta,
 				log.EntrySlope,

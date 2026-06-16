@@ -111,8 +111,10 @@ func (e *Engine) evaluateExecutionRiskSafely(state *InstrumentState, bar *models
 	}
 
 	if e.ActiveStrategy.CheckStopLoss(state, currentSide, avgPrice, 1) {
-		go e.LogOptimizationExit(bar.StockName, "SAFETY_STOP_LOSS", state, marketTime)
+		// 🎯 FIX: Pass state.LatestPrice as a flat float64 instead of the full state struct pointer.
+		// ⚡ FIX: Call synchronously without the 'go' keyword to prevent asynchronous trace state overlap.
+		e.LogOptimizationExit(bar.StockName, "SAFETY_STOP_LOSS", state.LatestPrice, marketTime)
 	} else if e.ActiveStrategy.CheckTakeProfit(state, currentSide, avgPrice, 1) {
-		go e.LogOptimizationExit(bar.StockName, "SAFETY_HIGH_CONF_TRAILING", state, marketTime)
+		e.LogOptimizationExit(bar.StockName, "SAFETY_HIGH_CONF_TRAILING", state.LatestPrice, marketTime)
 	}
 }

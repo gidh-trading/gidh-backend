@@ -3,7 +3,6 @@ package risk
 import (
 	"fmt"
 	"gidh-backend/internal/service/models"
-	"gidh-backend/internal/service/strategy"
 	"gidh-backend/pkg/logger"
 	"time"
 )
@@ -107,22 +106,19 @@ func (rm *RiskManager) HandleManualAndBrokerStateSync(symbol string, netQty int,
 	rm.mu.Unlock()
 
 	// 3. Evaluate State Transitions for External Strategy Sync
-	// If the asset dropped to "FLAT" but our memory tracks it as having active market exposure,
-	// an external manual liquidation, bracket fill, or panic square-off occurred.
 	if (side == "FLAT" || side == "") && (oldSide != "FLAT" && oldSide != "") {
 		logger.Warnf("⚠️ Asynchronous State Sync: Position for %s closed externally (Previous: %s Qty: %d). Forcing Strategy Engine Optimization Exit...", symbol, oldSide, oldQty)
 
-		// Build a placeholder InstrumentState to pass the closing price coordinate down to database log routines
-		fallbackState := &strategy.InstrumentState{
-			LatestPrice: avgPrice,
-		}
-		if avgPrice <= 0 {
-			// If closed flat at 0 entry, fallback context to standard market tick logic values
-			fallbackState.LatestPrice = pos.AveragePrice
+		// 🎯 FIX: Determine the definitive historical exit price coordinate
+		exitPriceSnapshot := avgPrice
+		if exitPriceSnapshot <= 0 {
+			// If broker transaction message drops a 0 average price on clear,
+			// use the last active engine tick price tracked by risk memory instead of duplicating entry
+			exitPriceSnapshot = pos.AveragePrice
 		}
 
-		// Cleanly close out the optimization logs so performance tracking remains mathematically correct
-		rm.strategyEngine.LogOptimizationExit(symbol, "MANUAL_USER_INTERVENTION_SQUARE_OFF", fallbackState, time.Now())
+		// Sync directly with the strategy execution engine using the new flat float64 signature
+		rm.strategyEngine.LogOptimizationExit(symbol, "MANUAL_USER_INTERVENTION_SQUARE_OFF", exitPriceSnapshot, time.Now())
 	} else {
 		logger.Infof("🔄 System Sync: Internal Risk mapping updated for %s | Qty: %d | Side: %s | AvgPrice: %.2f", symbol, netQty, side, avgPrice)
 	}

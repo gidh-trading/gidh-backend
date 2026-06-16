@@ -113,17 +113,18 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		}
 	} else if !isFlatNow && e.ActiveStrategy != nil {
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+			latestPriceSnapshot := state.LatestPrice
 			e.mu.Unlock()
-			go e.LogOptimizationExit(symbol, "SAFETY_STOP_LOSS", state, marketTime) // ⚡ Pass market time
+			e.LogOptimizationExit(symbol, "SAFETY_STOP_LOSS", latestPriceSnapshot, marketTime)
 			return "EXIT_" + currentSide
 		}
 
 		tradeLog, tradeExists := e.ActiveTrades[symbol]
-		// ⚡ Using Market Time delta instead of time.Since() wall clock
 		if tradeExists && marketTime.Sub(tradeLog.EntryTimestamp) > 1*time.Minute {
 			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+				latestPriceSnapshot := state.LatestPrice
 				e.mu.Unlock()
-				go e.LogOptimizationExit(symbol, "SAFETY_HIGH_CONF_TRAILING", state, marketTime) // ⚡ Pass market time
+				e.LogOptimizationExit(symbol, "SAFETY_HIGH_CONF_TRAILING", latestPriceSnapshot, marketTime)
 				return "EXIT_" + currentSide
 			}
 		}
@@ -145,9 +146,9 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 
 	if currentSide != "FLAT" && currentSide != "" && netQty > 0 {
 		if currentSide == "LONG" {
-			state.CurrentPnL = (state.LatestPrice - averagePrice)
+			state.CurrentPnL = state.LatestPrice - averagePrice
 		} else {
-			state.CurrentPnL = (averagePrice - state.LatestPrice)
+			state.CurrentPnL = averagePrice - state.LatestPrice
 		}
 		if state.CurrentPnL > state.PeakPnL {
 			state.PeakPnL = state.CurrentPnL
@@ -225,7 +226,8 @@ func (e *Engine) logOptimizationEntryLocked(symbol string, signal string, state 
 	e.ActiveTrades[symbol] = log
 }
 
-func (e *Engine) LogOptimizationExit(symbol string, signal string, state *InstrumentState, marketTime time.Time) {
+// LogOptimizationExit runs deterministically to calculate accurate absolute gains/losses
+func (e *Engine) LogOptimizationExit(symbol string, reason string, exitPrice float64, marketTime time.Time) {
 	e.mu.Lock()
 	tradeLog, exists := e.ActiveTrades[symbol]
 	if !exists {
@@ -233,16 +235,20 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 		return
 	}
 
+	// Evict the trade from active memory tracking matrices immediately
 	delete(e.ActiveTrades, symbol)
+
+	state := e.getOrInitializeState(symbol)
 	state.CurrentSetupPhase = PhaseNeutral
 	state.CurrentPnL = 0.0
 	state.PeakPnL = 0.0
 	e.mu.Unlock()
 
-	tradeLog.ExitTimestamp = marketTime // ⚡ Set to true tick exit time
-	tradeLog.ExitPrice = state.LatestPrice
-	tradeLog.ExitReason = signal
+	tradeLog.ExitTimestamp = marketTime
+	tradeLog.ExitPrice = exitPrice // 🎯 Catch directly from execution context (Prevents 0.0 value leakage)
+	tradeLog.ExitReason = reason
 
+	// Calculate True Absolute Performance Returns
 	var finalPnL float64
 	if tradeLog.TradeSide == "LONG" {
 		finalPnL = tradeLog.ExitPrice - tradeLog.EntryPrice
@@ -251,6 +257,7 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 	}
 	tradeLog.FinalPnLINR = finalPnL
 
+	// Compute Structural Efficiency Capture Ratios
 	if tradeLog.PeakPnLINR > 0 {
 		tradeLog.EfficiencyCaptureRatio = finalPnL / tradeLog.PeakPnLINR
 	} else if tradeLog.PeakPnLINR == 0 && finalPnL == 0 {
@@ -259,6 +266,7 @@ func (e *Engine) LogOptimizationExit(symbol string, signal string, state *Instru
 		tradeLog.EfficiencyCaptureRatio = -1.0
 	}
 
+	// Dispatch out to DB Writer or backtest callback channel hooks
 	if e.OnTradeCompleted != nil {
 		e.OnTradeCompleted(tradeLog)
 	}

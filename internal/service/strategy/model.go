@@ -42,6 +42,7 @@ type OptimizationTradeLog struct {
 	EntryDelta             float64   `json:"entry_delta"`
 	EntrySlope             float64   `json:"entry_slope"`
 	EntryVolumeRank        int       `json:"entry_volume_rank"`
+	EntryPriceRank         int       `json:"entry_price_rank"`
 	ExitTimestamp          time.Time `json:"exit_timestamp"`
 	ExitPrice              float64   `json:"exit_price"`
 	ExitReason             string    `json:"exit_reason"`
