@@ -64,8 +64,17 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	state.ActiveAvgPrice = averagePrice
 	state.LastTickTime = marketTime // <-- Sync the latest market time for GenerateSignal to use
 
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		logger.Warnf("cannot load time location: %v", err)
+		loc = time.UTC
+	}
+
+	istTime := marketTime.In(loc)
+
 	// 1. TIME CUTOFF CHECK (Strategy Layer)
-	currentHM := (marketTime.Hour() * 100) + marketTime.Minute()
+	currentHM := (istTime.Hour() * 100) + istTime.Minute()
+
 	// 🛡️ BLOCK ALL TRADES BEFORE 9:30 AM IST
 	if currentHM < 930 {
 		e.mu.Unlock()
@@ -187,6 +196,18 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 				return "EXIT_" + currentSide
 			}
 		}
+
+		exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
+		if exitSignal == "EXIT_LONG" || exitSignal == "EXIT_SHORT" {
+			e.logStrategyDecision(state, symbol, exitSignal, "Strategy_Condition_Exit", netQty, marketTime)
+
+			state.CurrentSetupPhase = PhaseNeutral
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
+			state.LastExitSignalTime = marketTime
+			e.mu.Unlock()
+			return exitSignal
+		}
 	}
 
 	e.mu.Unlock()
@@ -213,23 +234,39 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 			state.PeakPnL = state.CurrentPnL
 		}
 	}
+	marketTime := state.LastTickTime // Capture time before unlock
 	e.mu.Unlock()
 
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 	if isFlatNow {
-		// 🛡️ BLOCK BAR SIGNALS DURING THE 5 MINUTE COOLDOWN
 		if !state.LastExitSignalTime.IsZero() && state.LastTickTime.Sub(state.LastExitSignalTime) < 5*time.Minute {
 			return "HOLD"
 		}
-		return e.ActiveStrategy.CheckEntry(state)
+
+		signal := e.ActiveStrategy.CheckEntry(state)
+		// FIX: Log the entry!
+		if signal == "GO_LONG" || signal == "GO_SHORT" {
+			e.logStrategyDecision(state, symbol, signal, "Strategy_Entry", netQty, marketTime)
+		}
+		return signal
 	}
 
 	if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+		// FIX: Log Stop Loss!
+		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Stop_Loss", netQty, marketTime)
 		return "EXIT_" + currentSide
 	}
 	if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+		// FIX: Log Take Profit!
+		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Take_Profit", netQty, marketTime)
 		return "EXIT_" + currentSide
 	}
 
-	return e.ActiveStrategy.CheckExit(state, currentSide)
+	exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
+	// FIX: Log standard Strategy Exit!
+	if exitSignal != "HOLD" {
+		e.logStrategyDecision(state, symbol, exitSignal, "Strategy_Exit", netQty, marketTime)
+	}
+
+	return exitSignal
 }

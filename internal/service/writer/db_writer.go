@@ -225,9 +225,6 @@ func (w *DBWriter) PersistPositionSnapshot(pos *models.Position, sessionTime tim
 }
 
 func (w *DBWriter) PersistStrategyTransaction(tx models.StrategyTransaction) {
-	if w.config.SkipDatabaseInsert {
-		return
-	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()

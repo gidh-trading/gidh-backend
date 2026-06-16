@@ -11,12 +11,10 @@ type VwapEfficiencyMomentumStrategy struct {
 	minVolumePriceRank    int     // Minimum institutional footprint rank (e.g. 5)
 	longTimeAboveVwapPct  float64 // Minimum time spent above VWAP for long (e.g. 85.0)
 	shortTimeAboveVwapPct float64 // Maximum time spent above VWAP for short (e.g. 15.0)
-	minEntrySlope         float64 // Minimum required acceleration slope to validate entry (e.g. 8.0)
 
 	// NEW: Simple Exit Thresholds
-	exitSlopeThreshold float64 // Slope threshold to trigger an early exit (e.g., 10.0)
-	exitEffThreshold   float64 // Efficiency threshold to trigger an early exit (e.g., 30.0)
-	takeProfitINR      float64 // Flat currency target for profit locking (e.g., 500.0 INR)
+	exitEffThreshold float64 // Efficiency threshold to trigger an early exit (e.g., 30.0)
+	takeProfitINR    float64 // Flat currency target for profit locking (e.g., 500.0 INR)
 }
 
 func NewVwapEfficiencyMomentumStrategy() *VwapEfficiencyMomentumStrategy {
@@ -24,12 +22,10 @@ func NewVwapEfficiencyMomentumStrategy() *VwapEfficiencyMomentumStrategy {
 		strategyName:          "High_Momentum_Scalp",
 		effScalpThreshold:     40.0,
 		maxEffScalpThreshold:  95.0,
-		minVolumePriceRank:    5,
+		minVolumePriceRank:    6,
 		longTimeAboveVwapPct:  85.0,
 		shortTimeAboveVwapPct: 15.0,
-		minEntrySlope:         8.0, // <-- Added entry slope requirement
-		exitSlopeThreshold:    10.0,
-		exitEffThreshold:      35.0,
+		exitEffThreshold:      40.0,
 		takeProfitINR:         500.0,
 	}
 }
@@ -55,11 +51,10 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	priceRank := latestBar.Analytics.PriceRank
 	timePctAboveVwap := latestBar.Analytics.TimePctAboveVwap
 	eff := latestBar.Analytics.NetEfficiency
-	slope := latestBar.Analytics.NetEfficiencySlope
 	dir := latestBar.Analytics.Direction // Cast to string for safety if it's a custom type
 
 	// FILTER: Require authentic institutional volume and price displacement
-	if volumeRank < s.minVolumePriceRank || priceRank < s.minVolumePriceRank {
+	if volumeRank < s.minVolumePriceRank && priceRank < s.minVolumePriceRank {
 		return "HOLD"
 	}
 
@@ -69,11 +64,9 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	// 3. Time > 85% above VWAP
 	// 4. Bar direction is explicitly Bullish
 	if eff > s.effScalpThreshold && eff <= s.maxEffScalpThreshold {
-		if slope > s.minEntrySlope {
-			if timePctAboveVwap >= s.longTimeAboveVwapPct {
-				if dir == models.DirBullish || dir == models.DirStrongBullish {
-					return "GO_LONG"
-				}
+		if timePctAboveVwap >= s.longTimeAboveVwapPct {
+			if dir == models.DirBullish || dir == models.DirStrongBullish {
+				return "GO_LONG"
 			}
 		}
 	}
@@ -84,11 +77,9 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	// 3. Time < 15% above VWAP
 	// 4. Bar direction is explicitly Bearish
 	if eff < -s.effScalpThreshold && eff >= -s.maxEffScalpThreshold {
-		if slope < -s.minEntrySlope {
-			if timePctAboveVwap <= s.shortTimeAboveVwapPct {
-				if dir == models.DirBearish || dir == models.DirStrongBearish {
-					return "GO_SHORT"
-				}
+		if timePctAboveVwap <= s.shortTimeAboveVwapPct {
+			if dir == models.DirBearish || dir == models.DirStrongBearish {
+				return "GO_SHORT"
 			}
 		}
 	}
@@ -98,7 +89,7 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 
 // CheckExit shifts from a simple VWAP cross to cutting trends when speed completely dies
 func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	tf := "1m"
+	tf := "5m"
 	history, exists := state.BarHistory[tf]
 	if !exists || len(history) == 0 {
 		return "HOLD"
@@ -106,18 +97,17 @@ func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, curre
 
 	latestBar := history[len(history)-1]
 	eff := latestBar.Analytics.NetEfficiency
-	slope := latestBar.Analytics.NetEfficiencySlope
 
 	// 📉 LONG EXIT: Momentum reverses heavily downward
 	if currentSide == "LONG" {
-		if slope <= -s.exitSlopeThreshold || eff < -s.exitEffThreshold {
+		if eff < -s.exitEffThreshold {
 			return "EXIT_LONG"
 		}
 	}
 
 	// 📈 SHORT EXIT: Momentum reverses heavily upward
 	if currentSide == "SHORT" {
-		if slope >= s.exitSlopeThreshold || eff > s.exitEffThreshold {
+		if eff > s.exitEffThreshold {
 			return "EXIT_SHORT"
 		}
 	}
