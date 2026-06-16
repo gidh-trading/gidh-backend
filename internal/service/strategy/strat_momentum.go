@@ -25,7 +25,7 @@ func NewVwapEfficiencyMomentumStrategy() *VwapEfficiencyMomentumStrategy {
 		minVolumePriceRank:    6,
 		longTimeAboveVwapPct:  85.0,
 		shortTimeAboveVwapPct: 15.0,
-		exitEffThreshold:      40.0,
+		exitEffThreshold:      50.0,
 		takeProfitINR:         500.0,
 	}
 }
@@ -89,7 +89,7 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 
 // CheckExit shifts from a simple VWAP cross to cutting trends when speed completely dies
 func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	tf := "5m"
+	tf := "1m"
 	history, exists := state.BarHistory[tf]
 	if !exists || len(history) == 0 {
 		return "HOLD"

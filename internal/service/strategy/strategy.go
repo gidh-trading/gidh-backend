@@ -40,7 +40,48 @@ func NewEngine(
 	}
 }
 
-// IngestClosedBar now reads the true market timestamp from the closed bar payload
+// validateTimeAndCooldowns is the common helper function checking market times and order breaks.
+// It returns (isAllowed, shouldAutoSquareOff, currentHM).
+func (e *Engine) validateTimeAndCooldowns(state *InstrumentState, marketTime time.Time, isFlat bool) (bool, bool, int) {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		logger.Warnf("cannot load time location: %v", err)
+		loc = time.UTC
+	}
+
+	istTime := marketTime.In(loc)
+	currentHM := (istTime.Hour() * 100) + istTime.Minute()
+
+	// 1. 🛡️ BLOCK ALL TRADES BEFORE 9:30 AM IST
+	if currentHM < 915 {
+		return false, false, currentHM
+	}
+
+	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
+
+	// 2. 🛡️ HANDLE TIME CUTOFF AT OR AFTER 3:00 PM
+	if currentHM >= cutoffHM {
+		if !isFlat {
+			// Signal an active position should be immediately auto-squared off
+			return false, true, currentHM
+		}
+		// Block any new entry allocations
+		return false, false, currentHM
+	}
+
+	// 3. 🛡️ ENFORCE 5-MINUTE COOLDOWN BREAK AFTER EXIT
+	if isFlat && !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 5*time.Minute {
+		return false, false, currentHM
+	}
+
+	// 4. 🛡️ ENFORCE 1-MINUTE COOLDOWN BETWEEN ENTRIES (Prevent double signals)
+	if isFlat && !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) < 1*time.Minute {
+		return false, false, currentHM
+	}
+
+	return true, false, currentHM
+}
+
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Lock()
 	state := e.getOrInitializeState(bar.StockName)
@@ -62,59 +103,42 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	state.LatestPrice = enrichedTick.Raw.LastPrice
 	state.ActiveSide = currentSide
 	state.ActiveAvgPrice = averagePrice
-	state.LastTickTime = marketTime // <-- Sync the latest market time for GenerateSignal to use
+	state.LastTickTime = marketTime // Sync time for GenerateSignal usage
 
-	loc, err := time.LoadLocation("Asia/Kolkata")
-	if err != nil {
-		logger.Warnf("cannot load time location: %v", err)
-		loc = time.UTC
+	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
+
+	// Run Shared Validations
+	isAllowed, shouldSquareOff, _ := e.validateTimeAndCooldowns(state, marketTime, isFlatNow)
+
+	if shouldSquareOff {
+		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Auto_Square_Off_Hour_Reached", netQty, marketTime)
+		state.CurrentSetupPhase = PhaseNeutral
+		state.CurrentPnL = 0.0
+		state.PeakPnL = 0.0
+		state.LastExitSignalTime = marketTime
+		e.mu.Unlock()
+		return "EXIT_" + currentSide
 	}
 
-	istTime := marketTime.In(loc)
-
-	// 1. TIME CUTOFF CHECK (Strategy Layer)
-	currentHM := (istTime.Hour() * 100) + istTime.Minute()
-
-	// 🛡️ BLOCK ALL TRADES BEFORE 9:30 AM IST
-	if currentHM < 930 {
+	if !isAllowed {
 		e.mu.Unlock()
 		return "HOLD"
 	}
 
-	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
-
-	if currentHM >= cutoffHM {
-		if currentSide != "FLAT" && currentSide != "" {
-			// Log the forced time cutoff square off event before resetting engine tracking values
-			e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Auto_Square_Off_Hour_Reached", netQty, marketTime)
-
-			state.CurrentSetupPhase = PhaseNeutral
-			state.CurrentPnL = 0.0
-			state.PeakPnL = 0.0
-			state.LastExitSignalTime = marketTime
-			e.mu.Unlock()
-			return "EXIT_" + currentSide
-		}
-	}
-
-	// 2. MANUAL CLOSE DETECTION
+	// MANUAL CLOSE DETECTION
 	if state.CurrentSetupPhase == PhaseActiveTrade && (currentSide == "FLAT" || netQty == 0) {
 		if marketTime.Sub(state.LastExitSignalTime) > 3*time.Second {
 			logger.Warnf("⚠️ Asynchronous State Sync: Position for %s closed externally. Strategy will auto-heal on next tick.", symbol)
 		}
 
-		// Log the manual closing detection for historical integrity anomalies matching strategy rules
 		e.logStrategyDecision(state, symbol, "EXIT_"+state.ActiveSide, "External_Manual_Close_Detected", netQty, marketTime)
-
 		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
 		state.EntryTimestamp = marketTime
-		// If closed manually, also enforce the 5-minute break from right now
 		state.LastExitSignalTime = marketTime
+		isFlatNow = true
 	}
-
-	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
 
 	if !isFlatNow && state.CurrentSetupPhase != PhaseActiveTrade {
 		state.CurrentSetupPhase = PhaseActiveTrade
@@ -126,7 +150,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		} else if currentSide == "SHORT" {
 			state.CurrentPnL = averagePrice - state.LatestPrice
 		}
-
 		if state.CurrentPnL > state.PeakPnL {
 			state.PeakPnL = state.CurrentPnL
 		}
@@ -137,44 +160,20 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	}
 
 	if isFlatNow && e.ActiveStrategy != nil {
-		// 3. BLOCK NEW ENTRIES AFTER CUTOFF
-		if currentHM >= cutoffHM {
-			e.mu.Unlock()
-			return "HOLD"
-		}
-
-		// 4. NEW: 5-MINUTE BREAK AFTER A TRADE FINISHES
-		if !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 10*time.Minute {
-			e.mu.Unlock()
-			return "HOLD"
-		}
-
-		// Enforce the 1-minute cooldown from the last entry (to prevent double entries)
-		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) < 1*time.Minute {
-			e.mu.Unlock()
-			return "HOLD"
-		}
-
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			state.CurrentSetupPhase = PhaseActiveTrade
 			state.EntryTimestamp = marketTime
-
-			// Initialize PnL tracking nodes fresh on allocation sequence initialization
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
 
-			// Log entry rules transaction matching details
 			e.logStrategyDecision(state, symbol, signal, "Strategy_Entry_Condition_Met", netQty, marketTime)
-
 			e.mu.Unlock()
 			return signal
 		}
 	} else if !isFlatNow && e.ActiveStrategy != nil {
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
-			// Log the exit transaction BEFORE clearing the tracking state
 			e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Stop_Loss_Hit", netQty, marketTime)
-
 			state.CurrentSetupPhase = PhaseNeutral
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
@@ -185,9 +184,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
 			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
-				// Log the profit target execution record BEFORE state clearance metrics drop
 				e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Take_Profit_Hit", netQty, marketTime)
-
 				state.CurrentSetupPhase = PhaseNeutral
 				state.CurrentPnL = 0.0
 				state.PeakPnL = 0.0
@@ -200,7 +197,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
 		if exitSignal == "EXIT_LONG" || exitSignal == "EXIT_SHORT" {
 			e.logStrategyDecision(state, symbol, exitSignal, "Strategy_Condition_Exit", netQty, marketTime)
-
 			state.CurrentSetupPhase = PhaseNeutral
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
@@ -222,6 +218,27 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 		return "HOLD"
 	}
 
+	marketTime := state.LastTickTime
+	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
+
+	// Run Shared Validations
+	isAllowed, shouldSquareOff, _ := e.validateTimeAndCooldowns(state, marketTime, isFlatNow)
+
+	if shouldSquareOff {
+		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Auto_Square_Off_Hour_Reached", netQty, marketTime)
+		state.CurrentSetupPhase = PhaseNeutral
+		state.CurrentPnL = 0.0
+		state.PeakPnL = 0.0
+		state.LastExitSignalTime = marketTime
+		e.mu.Unlock()
+		return "EXIT_" + currentSide
+	}
+
+	if !isAllowed {
+		e.mu.Unlock()
+		return "HOLD"
+	}
+
 	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
 
 	if currentSide != "FLAT" && currentSide != "" && netQty > 0 {
@@ -234,39 +251,57 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 			state.PeakPnL = state.CurrentPnL
 		}
 	}
-	marketTime := state.LastTickTime // Capture time before unlock
-	e.mu.Unlock()
 
-	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 	if isFlatNow {
-		if !state.LastExitSignalTime.IsZero() && state.LastTickTime.Sub(state.LastExitSignalTime) < 5*time.Minute {
-			return "HOLD"
+		signal := e.ActiveStrategy.CheckEntry(state)
+		if signal == "GO_LONG" || signal == "GO_SHORT" {
+			state.CurrentSetupPhase = PhaseActiveTrade
+			state.EntryTimestamp = marketTime
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
+
+			e.logStrategyDecision(state, symbol, signal, "Strategy_Entry", netQty, marketTime)
+			e.mu.Unlock()
+			return signal
 		}
 
-		signal := e.ActiveStrategy.CheckEntry(state)
-		// FIX: Log the entry!
-		if signal == "GO_LONG" || signal == "GO_SHORT" {
-			e.logStrategyDecision(state, symbol, signal, "Strategy_Entry", netQty, marketTime)
-		}
-		return signal
+		e.mu.Unlock()
+		return "HOLD"
 	}
 
 	if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
-		// FIX: Log Stop Loss!
 		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Stop_Loss", netQty, marketTime)
+		state.CurrentSetupPhase = PhaseNeutral
+		state.CurrentPnL = 0.0
+		state.PeakPnL = 0.0
+		state.LastExitSignalTime = marketTime
+		e.mu.Unlock()
 		return "EXIT_" + currentSide
 	}
-	if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
-		// FIX: Log Take Profit!
-		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Take_Profit", netQty, marketTime)
-		return "EXIT_" + currentSide
+
+	if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
+		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+			e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Take_Profit", netQty, marketTime)
+			state.CurrentSetupPhase = PhaseNeutral
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
+			state.LastExitSignalTime = marketTime
+			e.mu.Unlock()
+			return "EXIT_" + currentSide
+		}
 	}
 
 	exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
-	// FIX: Log standard Strategy Exit!
-	if exitSignal != "HOLD" {
+	if exitSignal != "HOLD" && exitSignal != "" {
 		e.logStrategyDecision(state, symbol, exitSignal, "Strategy_Exit", netQty, marketTime)
+		state.CurrentSetupPhase = PhaseNeutral
+		state.CurrentPnL = 0.0
+		state.PeakPnL = 0.0
+		state.LastExitSignalTime = marketTime
+		e.mu.Unlock()
+		return exitSignal
 	}
 
-	return exitSignal
+	e.mu.Unlock()
+	return "HOLD"
 }
