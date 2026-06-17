@@ -18,7 +18,7 @@ const (
 	MaxLeverage           = 5.0
 	MaxCapitalPerStockPct = 0.45
 	AgentEmail            = "algo.trader@gidh.tech"
-	MaxConcurrentTrades   = 3
+	MaxConcurrentTrades   = 4
 )
 
 type UIContractNotePayload struct {
@@ -158,6 +158,8 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		pos.NetQuantity = calculatedQty
 		pos.Side = posSide
 		pos.AveragePrice = rawTick.LastPrice
+
+		rm.strategyEngine.CommitEntryTransaction(symbol, barSignal, calculatedQty, rawTick.Timestamp)
 
 		logger.Infof("🚀 DYNAMIC RISK MANAGER DISPATCHING EXECUTION ORDER: %s %s Qty: %d (Leveraged Capital Invested: %.2f INR)",
 			txType, symbol, calculatedQty, float64(calculatedQty)*rawTick.LastPrice)

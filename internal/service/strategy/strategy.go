@@ -98,14 +98,14 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	state.LatestPrice = enrichedTick.Raw.LastPrice
 	state.ActiveSide = currentSide
 	state.ActiveAvgPrice = averagePrice
-	state.LastTickTime = marketTime // Sync time for GenerateSignal usage
+	state.LastTickTime = marketTime
 
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
 
-	// Run Shared Validations
 	isAllowed, shouldSquareOff, _ := e.validateTimeAndCooldowns(state, marketTime, isFlatNow)
 
 	if shouldSquareOff {
+		// Real square-offs by the engine are executed actions, so we log them
 		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Auto_Square_Off_Hour_Reached", netQty, marketTime)
 		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
@@ -120,7 +120,6 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 		return "HOLD"
 	}
 
-	// MANUAL CLOSE DETECTION
 	if state.CurrentSetupPhase == PhaseActiveTrade && (currentSide == "FLAT" || netQty == 0) {
 		if marketTime.Sub(state.LastExitSignalTime) > 3*time.Second {
 			logger.Warnf("⚠️ Asynchronous State Sync: Position for %s closed externally. Strategy will auto-heal on next tick.", symbol)
@@ -157,12 +156,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	if isFlatNow && e.ActiveStrategy != nil {
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
-			state.CurrentSetupPhase = PhaseActiveTrade
-			state.EntryTimestamp = marketTime
-			state.CurrentPnL = 0.0
-			state.PeakPnL = 0.0
-
-			e.logStrategyDecision(state, symbol, signal, "Strategy_Entry_Condition_Met", netQty, marketTime)
+			// ❌ STATE MUTATIONS REMOVED FROM HERE TO PREVENT LOGGING BLOCKED ENTRIES
 			e.mu.Unlock()
 			return signal
 		}
@@ -216,7 +210,6 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	marketTime := state.LastTickTime
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 
-	// Run Shared Validations
 	isAllowed, shouldSquareOff, _ := e.validateTimeAndCooldowns(state, marketTime, isFlatNow)
 
 	if shouldSquareOff {
@@ -250,12 +243,7 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 	if isFlatNow {
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
-			state.CurrentSetupPhase = PhaseActiveTrade
-			state.EntryTimestamp = marketTime
-			state.CurrentPnL = 0.0
-			state.PeakPnL = 0.0
-
-			e.logStrategyDecision(state, symbol, signal, "Strategy_Entry", netQty, marketTime)
+			// ❌ STATE MUTATIONS REMOVED FROM HERE TO PREVENT TRANSACTION VIOLATIONS
 			e.mu.Unlock()
 			return signal
 		}
@@ -299,4 +287,17 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 
 	e.mu.Unlock()
 	return "HOLD"
+}
+
+func (e *Engine) CommitEntryTransaction(symbol string, signal string, netQty int, marketTime time.Time) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	state := e.getOrInitializeState(symbol)
+	state.CurrentSetupPhase = PhaseActiveTrade
+	state.EntryTimestamp = marketTime
+	state.CurrentPnL = 0.0
+	state.PeakPnL = 0.0
+
+	e.logStrategyDecision(state, symbol, signal, "Strategy_Entry_Approved_By_Risk", netQty, marketTime)
 }
