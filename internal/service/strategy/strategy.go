@@ -270,7 +270,12 @@ func (e *Engine) CommitTransaction(symbol string, proposedState *InstrumentState
 			"timeframe_phase":   proposedState.CurrentSetupPhase,
 		}
 
-		if history, ok := proposedState.BarHistory["1m"]; ok && len(history) > 0 {
+		loggingTimeframe := "1m"
+		if isExit {
+			loggingTimeframe = "5m"
+		}
+
+		if history, ok := proposedState.BarHistory[loggingTimeframe]; ok && len(history) > 0 {
 			latestBar := history[len(history)-1]
 			marketSnapshot["bar_context"] = map[string]interface{}{
 				"volume":  latestBar.Volume,
