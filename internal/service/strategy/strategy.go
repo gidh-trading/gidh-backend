@@ -53,7 +53,7 @@ func (e *Engine) validateTimeAndCooldowns(state *InstrumentState, marketTime tim
 	currentHM := (istTime.Hour() * 100) + istTime.Minute()
 
 	// 1. 🛡️ BLOCK ALL TRADES BEFORE 9:30 AM IST
-	if currentHM < 921 {
+	if currentHM < 930 {
 		return false, false, currentHM
 	}
 

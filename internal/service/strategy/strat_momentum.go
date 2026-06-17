@@ -48,11 +48,12 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	// Extract features cleanly computed by your BarAnalyticsEngine
 	volumeRank := latestBar.Analytics.VolumeRank
 	priceRank := latestBar.Analytics.PriceRank
+	tickRank := latestBar.Analytics.TickRank
 	timePctAboveVwap := latestBar.Analytics.TimePctAboveVwap
 	eff := latestBar.Analytics.NetEfficiency
 	dir := latestBar.Analytics.Direction // Cast to string for safety if it's a custom type
 
-	if volumeRank == 6 && priceRank == 7 {
+	if volumeRank >= 7 && priceRank >= 7 && tickRank > 3 {
 		// 🚀 LONG SCALP IGNITION
 		if eff >= 35 && eff <= 95 {
 			if timePctAboveVwap >= 75 {
@@ -111,10 +112,15 @@ func (s *VwapEfficiencyMomentumStrategy) CheckStopLoss(state *InstrumentState, c
 }
 
 // CheckTakeProfit handles automated technical trailing profit protections
+// CheckTakeProfit handles automated technical trailing profit protections
 func (s *VwapEfficiencyMomentumStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
 
-	// Calculate the actual currency profit (Points gained * Number of shares)
-	totalProfitINR := state.CurrentPnL * float64(netQty)
+	// 💡 FIX: state.CurrentPnL already tracks total positional monetary profit!
+	// Simply check the absolute value of the current tracked PnL against your target.
+	totalProfitINR := state.CurrentPnL
+	if totalProfitINR < 0 {
+		return false // We are currently in a loss; cannot take profit
+	}
 
 	// Simple flat target exit
 	if totalProfitINR >= s.takeProfitINR {
