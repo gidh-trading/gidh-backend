@@ -5,6 +5,7 @@ import (
 	"gidh-backend/internal/service/strategy"
 	"gidh-backend/pkg/logger"
 	"math"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,7 +53,7 @@ func NewRiskManager(om order.PositionManager, se *strategy.Engine) *RiskManager 
 	}
 }
 
-// ProcessSequentialTick coordinates data collection updates safely across package layers.
+// ProcessSequentialTick coordinates data collection updates safely using transactional state snapshots.
 func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) {
 	rawTick := enrichedTick.Raw
 	symbol := rawTick.StockName
@@ -87,28 +88,42 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	netQty := pos.NetQuantity
 	rm.mu.Unlock()
 
-	// real-time tick context pipeline execution
-	tickSignal := rm.strategyEngine.UpdateContext(enrichedTick, currentSide, avgPrice, netQty)
+	// 1. 🔍 REAL-TIME STREAM CONTEXT STEP (Returns isolated proposed state snapshot)
+	tickSignal, proposedState := rm.strategyEngine.UpdateContext(enrichedTick, currentSide, avgPrice, netQty)
 
-	if tickSignal == "EXIT_LONG" || tickSignal == "EXIT_SHORT" {
+	if strings.HasPrefix(tickSignal, "EXIT_") {
 		rm.mu.Lock()
 		if pos.NetQuantity != 0 {
+			rm.strategyEngine.CommitTransaction(symbol, proposedState, tickSignal, "Intelligent_Volatility_Profit_Lock_Triggered", pos.NetQuantity)
 			rm.executeBrokerOrder(symbol, pos, "Intelligent Volatility Profit Lock Triggered", rawTick.Timestamp)
 		}
 		rm.mu.Unlock()
 		return
 	}
 
-	barSignal := rm.strategyEngine.GenerateSignal(symbol, currentSide, avgPrice, netQty)
+	// 2. 🔍 BAR-SIGNAL GENERATION STEP (Feeds previous output snapshot into the secondary engine loop)
+	barSignal, proposedState := rm.strategyEngine.GenerateSignal(symbol, proposedState, currentSide, avgPrice, netQty)
 
-	if barSignal == "HOLD" {
+	if strings.HasPrefix(barSignal, "EXIT_") && currentSide != "FLAT" && netQty != 0 {
+		rm.mu.Lock()
+		rm.strategyEngine.CommitTransaction(symbol, proposedState, barSignal, "Strategy_Interface_Mandated_Direction_Flip", pos.NetQuantity)
+		rm.executeBrokerOrder(symbol, pos, "Strategy Interface Mandated Direction Flip", rawTick.Timestamp)
+		rm.mu.Unlock()
 		return
 	}
 
+	if barSignal == "HOLD" {
+		// 📈 Even on HOLD steps, commit live calculations to volatile registry memory if an active position exists
+		if netQty > 0 {
+			rm.strategyEngine.CommitTransaction(symbol, proposedState, "HOLD", "Continuous_Live_Tracking_Update", netQty)
+		}
+		return
+	}
+
+	// 3. 🚀 ATOMIC ENTRY VERIFICATION GATE
 	rm.mu.Lock()
 	defer rm.mu.Unlock()
 
-	// Entry Order logic with optimized dynamic sizing calculations
 	if (barSignal == "GO_SHORT" || barSignal == "GO_LONG") && pos.NetQuantity == 0 {
 
 		activeTradesCount := 0
@@ -121,7 +136,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		if activeTradesCount >= MaxConcurrentTrades {
 			logger.Debugf("⚠️ RISK MANAGER BLOCKED ENTRY: Total active trades cap reached (%d/%d). Skipping entry for %s",
 				activeTradesCount, MaxConcurrentTrades, symbol)
-			return
+			return // Rejected by bounds; proposedState workspace is dropped safely
 		}
 
 		if exitTime, ok := rm.lastExitTime[symbol]; ok {
@@ -134,13 +149,8 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			return
 		}
 
-		// ✅ FIX: Dynamic Capital Allocation Calculation Engine
-		// Max allowed risk capital per trade based on portfolio weight restrictions
 		capitalAllocationForStock := InitialCapital * MaxCapitalPerStockPct
-		// Total purchasing buying power augmented by 5x MIS Intraday Leverage
 		totalBuyingPowerLeveraged := capitalAllocationForStock * MaxLeverage
-
-		// Determine exact dynamic share quantities to buy/sell
 		calculatedQty := int(math.Floor(totalBuyingPowerLeveraged / rawTick.LastPrice))
 
 		if calculatedQty <= 0 {
@@ -159,7 +169,8 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		pos.Side = posSide
 		pos.AveragePrice = rawTick.LastPrice
 
-		rm.strategyEngine.CommitEntryTransaction(symbol, barSignal, calculatedQty, rawTick.Timestamp)
+		// ✅ COMMIT ENTRY TRANSACTION
+		rm.strategyEngine.CommitTransaction(symbol, proposedState, barSignal, "Strategy_Entry_Condition_Met", calculatedQty)
 
 		logger.Infof("🚀 DYNAMIC RISK MANAGER DISPATCHING EXECUTION ORDER: %s %s Qty: %d (Leveraged Capital Invested: %.2f INR)",
 			txType, symbol, calculatedQty, float64(calculatedQty)*rawTick.LastPrice)
@@ -172,11 +183,6 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			Quantity:        calculatedQty,
 			UserEmail:       AgentEmail,
 		})
-
-	} else if (barSignal == "EXIT_LONG" || barSignal == "EXIT_SHORT") && pos.NetQuantity != 0 {
-		if (barSignal == "EXIT_LONG" && pos.Side == "LONG") || (barSignal == "EXIT_SHORT" && pos.Side == "SHORT") {
-			rm.executeBrokerOrder(symbol, pos, "Strategy Interface Mandated Direction Flip", rawTick.Timestamp)
-		}
 	}
 }
 

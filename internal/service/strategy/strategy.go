@@ -1,6 +1,8 @@
 package strategy
 
 import (
+	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -40,8 +42,6 @@ func NewEngine(
 	}
 }
 
-// validateTimeAndCooldowns is the common helper function checking market times and order breaks.
-// It returns (isAllowed, shouldAutoSquareOff, currentHM).
 func (e *Engine) validateTimeAndCooldowns(state *InstrumentState, marketTime time.Time, isFlat bool) (bool, bool, int) {
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
@@ -62,14 +62,12 @@ func (e *Engine) validateTimeAndCooldowns(state *InstrumentState, marketTime tim
 	// 2. 🛡️ HANDLE TIME CUTOFF AT OR AFTER 3:00 PM
 	if currentHM >= cutoffHM {
 		if !isFlat {
-			// Signal an active position should be immediately auto-squared off
 			return false, true, currentHM
 		}
-		// Block any new entry allocations
 		return false, false, currentHM
 	}
 
-	// 3. 🛡️ ENFORCE 5-MINUTE COOLDOWN BREAK AFTER EXIT
+	// 3. 🛡️ ENFORCE COOLDOWN BREAK AFTER EXIT
 	if isFlat && !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 3*time.Minute {
 		return false, false, currentHM
 	}
@@ -89,56 +87,44 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Unlock()
 }
 
-func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) string {
+// UpdateContext evaluates streaming tick context on an isolated copy. NO SIDE EFFECTS.
+func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) (string, *InstrumentState) {
 	e.mu.Lock()
-	symbol := enrichedTick.Raw.StockName
-	state := e.getOrInitializeState(symbol)
-	marketTime := enrichedTick.Raw.Timestamp
+	realState := e.getOrInitializeState(enrichedTick.Raw.StockName)
+	state := realState.Clone()
+	e.mu.Unlock()
 
+	marketTime := enrichedTick.Raw.Timestamp
 	state.LatestPrice = enrichedTick.Raw.LastPrice
 	state.ActiveSide = currentSide
 	state.ActiveAvgPrice = averagePrice
 	state.LastTickTime = marketTime
 
-	isFlatNow := currentSide == "FLAT" || currentSide == "" || state.CurrentSetupPhase == PhaseNeutral
+	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 
 	isAllowed, shouldSquareOff, _ := e.validateTimeAndCooldowns(state, marketTime, isFlatNow)
-
 	if shouldSquareOff {
-		// Real square-offs by the engine are executed actions, so we log them
-		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Auto_Square_Off_Hour_Reached", netQty, marketTime)
 		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
 		state.LastExitSignalTime = marketTime
-		e.mu.Unlock()
-		return "EXIT_" + currentSide
+		return "EXIT_" + currentSide, state
 	}
-
 	if !isAllowed {
-		e.mu.Unlock()
-		return "HOLD"
+		return "HOLD", state
 	}
 
-	if state.CurrentSetupPhase == PhaseActiveTrade && (currentSide == "FLAT" || netQty == 0) {
-		if marketTime.Sub(state.LastExitSignalTime) > 3*time.Second {
-			logger.Warnf("⚠️ Asynchronous State Sync: Position for %s closed externally. Strategy will auto-heal on next tick.", symbol)
-		}
-
-		e.logStrategyDecision(state, symbol, "EXIT_"+state.ActiveSide, "External_Manual_Close_Detected", netQty, marketTime)
+	// Handle continuous asynchronous external closure updates on the workspace snapshot
+	if state.CurrentSetupPhase == PhaseActiveTrade && isFlatNow {
 		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
 		state.EntryTimestamp = time.Time{}
 		state.LastExitSignalTime = marketTime
-		isFlatNow = true
-	}
-
-	if !isFlatNow && state.CurrentSetupPhase != PhaseActiveTrade {
-		state.CurrentSetupPhase = PhaseActiveTrade
 	}
 
 	if !isFlatNow {
+		state.CurrentSetupPhase = PhaseActiveTrade
 		if currentSide == "LONG" {
 			state.CurrentPnL = state.LatestPrice - averagePrice
 		} else if currentSide == "SHORT" {
@@ -156,78 +142,55 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 	if isFlatNow && e.ActiveStrategy != nil {
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
-			// ❌ STATE MUTATIONS REMOVED FROM HERE TO PREVENT LOGGING BLOCKED ENTRIES
-			e.mu.Unlock()
-			return signal
+			return signal, state
 		}
 	} else if !isFlatNow && e.ActiveStrategy != nil {
 		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
-			e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Stop_Loss_Hit", netQty, marketTime)
-			state.CurrentSetupPhase = PhaseNeutral
-			state.CurrentPnL = 0.0
-			state.PeakPnL = 0.0
-			state.LastExitSignalTime = marketTime
-			e.mu.Unlock()
-			return "EXIT_" + currentSide
+			return "EXIT_" + currentSide, state
 		}
-
 		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
 			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
-				e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Take_Profit_Hit", netQty, marketTime)
-				state.CurrentSetupPhase = PhaseNeutral
-				state.CurrentPnL = 0.0
-				state.PeakPnL = 0.0
-				state.LastExitSignalTime = marketTime
-				e.mu.Unlock()
-				return "EXIT_" + currentSide
+				return "EXIT_" + currentSide, state
 			}
 		}
-
 		exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
 		if exitSignal == "EXIT_LONG" || exitSignal == "EXIT_SHORT" {
-			e.logStrategyDecision(state, symbol, exitSignal, "Strategy_Condition_Exit", netQty, marketTime)
-			state.CurrentSetupPhase = PhaseNeutral
-			state.CurrentPnL = 0.0
-			state.PeakPnL = 0.0
-			state.LastExitSignalTime = marketTime
-			e.mu.Unlock()
-			return exitSignal
+			return exitSignal, state
 		}
 	}
 
-	e.mu.Unlock()
-	return "HOLD"
+	return "HOLD", state
 }
 
-func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice float64, netQty int) string {
-	e.mu.Lock()
-	state, exists := e.Registry[symbol]
-	if !exists || e.ActiveStrategy == nil {
-		e.mu.Unlock()
-		return "HOLD"
-	}
+// GenerateSignal calculates technical indications on top of an existing state context reference. NO SIDE EFFECTS.
+func (e *Engine) GenerateSignal(symbol string, workingState *InstrumentState, currentSide string, averagePrice float64, netQty int) (string, *InstrumentState) {
+	state := workingState.Clone()
 
 	marketTime := state.LastTickTime
 	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 
 	isAllowed, shouldSquareOff, _ := e.validateTimeAndCooldowns(state, marketTime, isFlatNow)
-
 	if shouldSquareOff {
-		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Auto_Square_Off_Hour_Reached", netQty, marketTime)
 		state.CurrentSetupPhase = PhaseNeutral
 		state.CurrentPnL = 0.0
 		state.PeakPnL = 0.0
 		state.LastExitSignalTime = marketTime
-		e.mu.Unlock()
-		return "EXIT_" + currentSide
+		return "EXIT_" + currentSide, state
 	}
-
 	if !isAllowed {
-		e.mu.Unlock()
-		return "HOLD"
+		return "HOLD", state
 	}
 
-	e.updateSignalPhaseAndExtensions(state, currentSide, averagePrice, netQty)
+	// Update internal metadata structures matching target inputs
+	if isFlatNow {
+		state.CurrentSetupPhase = PhaseNeutral
+		state.EntryVwapAnchor = 0.0
+	} else {
+		state.CurrentSetupPhase = PhaseActiveTrade
+		if state.EntryVwapAnchor == 0 {
+			state.EntryVwapAnchor = state.LiveSessionVWAP
+		}
+	}
 
 	if currentSide != "FLAT" && currentSide != "" && netQty > 0 {
 		if currentSide == "LONG" {
@@ -240,64 +203,90 @@ func (e *Engine) GenerateSignal(symbol string, currentSide string, averagePrice 
 		}
 	}
 
-	if isFlatNow {
+	if isFlatNow && e.ActiveStrategy != nil {
 		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
-			// ❌ STATE MUTATIONS REMOVED FROM HERE TO PREVENT TRANSACTION VIOLATIONS
-			e.mu.Unlock()
-			return signal
+			return signal, state
 		}
-
-		e.mu.Unlock()
-		return "HOLD"
+		return "HOLD", state
 	}
 
-	if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
-		e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Stop_Loss", netQty, marketTime)
-		state.CurrentSetupPhase = PhaseNeutral
-		state.CurrentPnL = 0.0
-		state.PeakPnL = 0.0
-		state.LastExitSignalTime = marketTime
-		e.mu.Unlock()
-		return "EXIT_" + currentSide
-	}
-
-	if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
-		if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
-			e.logStrategyDecision(state, symbol, "EXIT_"+currentSide, "Take_Profit", netQty, marketTime)
-			state.CurrentSetupPhase = PhaseNeutral
-			state.CurrentPnL = 0.0
-			state.PeakPnL = 0.0
-			state.LastExitSignalTime = marketTime
-			e.mu.Unlock()
-			return "EXIT_" + currentSide
+	if e.ActiveStrategy != nil {
+		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+			return "EXIT_" + currentSide, state
+		}
+		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
+			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+				return "EXIT_" + currentSide, state
+			}
+		}
+		exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
+		if exitSignal != "HOLD" && exitSignal != "" {
+			return exitSignal, state
 		}
 	}
 
-	exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
-	if exitSignal != "HOLD" && exitSignal != "" {
-		e.logStrategyDecision(state, symbol, exitSignal, "Strategy_Exit", netQty, marketTime)
-		state.CurrentSetupPhase = PhaseNeutral
-		state.CurrentPnL = 0.0
-		state.PeakPnL = 0.0
-		state.LastExitSignalTime = marketTime
-		e.mu.Unlock()
-		return exitSignal
-	}
-
-	e.mu.Unlock()
-	return "HOLD"
+	return "HOLD", state
 }
 
-func (e *Engine) CommitEntryTransaction(symbol string, signal string, netQty int, marketTime time.Time) {
+// CommitTransaction safely pushes the fully derived final proposed state to global active memory.
+func (e *Engine) CommitTransaction(symbol string, proposedState *InstrumentState, signal string, reason string, qty int) {
 	e.mu.Lock()
-	defer e.mu.Unlock()
 
-	state := e.getOrInitializeState(symbol)
-	state.CurrentSetupPhase = PhaseActiveTrade
-	state.EntryTimestamp = marketTime
-	state.CurrentPnL = 0.0
-	state.PeakPnL = 0.0
+	isEntry := signal == "GO_LONG" || signal == "GO_SHORT"
+	isExit := strings.HasPrefix(signal, "EXIT_")
 
-	e.logStrategyDecision(state, symbol, signal, "Strategy_Entry_Approved_By_Risk", netQty, marketTime)
+	if isEntry {
+		proposedState.CurrentSetupPhase = PhaseActiveTrade
+		proposedState.EntryTimestamp = proposedState.LastTickTime
+		proposedState.EntryVwapAnchor = proposedState.LiveSessionVWAP
+		proposedState.CurrentTradeID = fmt.Sprintf("TRD_%s_%d", symbol, proposedState.LastTickTime.UnixNano())
+		proposedState.PeakPnL = 0.0
+		proposedState.CurrentPnL = 0.0
+	} else if isExit {
+		proposedState.CurrentSetupPhase = PhaseNeutral
+		proposedState.LastExitSignalTime = proposedState.LastTickTime
+	}
+
+	e.Registry[symbol] = proposedState
+	e.mu.Unlock()
+
+	// 📊 Persist transaction histories explicitly on definitive Entry/Exit executions
+	if isEntry || isExit {
+		marketSnapshot := map[string]interface{}{
+			"session_vwap":      proposedState.LiveSessionVWAP,
+			"vwap_deviation":    proposedState.LatestPrice - proposedState.LiveSessionVWAP,
+			"entry_vwap_anchor": proposedState.EntryVwapAnchor,
+			"timeframe_phase":   proposedState.CurrentSetupPhase,
+		}
+
+		if history, ok := proposedState.BarHistory["1m"]; ok && len(history) > 0 {
+			latestBar := history[len(history)-1]
+			marketSnapshot["bar_context"] = map[string]interface{}{
+				"volume":  latestBar.Volume,
+				"poc":     latestBar.POC,
+				"vah":     latestBar.VAH,
+				"val":     latestBar.VAL,
+				"signals": latestBar.Analytics,
+			}
+		}
+
+		txRecord := models.StrategyTransaction{
+			TradeID:        proposedState.CurrentTradeID,
+			StrategyName:   e.ActiveStrategy.Name(),
+			Instrument:     strings.ToUpper(symbol),
+			ActionType:     strings.ToUpper(signal),
+			Price:          proposedState.LatestPrice,
+			Quantity:       float64(qty),
+			ExecutionTime:  proposedState.LastTickTime,
+			TriggerReason:  reason,
+			CurrentPnL:     proposedState.CurrentPnL,
+			PeakPnL:        proposedState.PeakPnL,
+			MarketSnapshot: marketSnapshot,
+		}
+
+		if e.dbWriter != nil {
+			go e.dbWriter.PersistStrategyTransaction(txRecord)
+		}
+	}
 }
