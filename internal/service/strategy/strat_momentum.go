@@ -22,11 +22,10 @@ func NewVwapEfficiencyMomentumStrategy() *VwapEfficiencyMomentumStrategy {
 		strategyName:          "High_Momentum_Scalp",
 		effScalpThreshold:     40.0,
 		maxEffScalpThreshold:  95.0,
-		minVolumePriceRank:    6,
 		longTimeAboveVwapPct:  85.0,
 		shortTimeAboveVwapPct: 15.0,
 		exitEffThreshold:      50.0,
-		takeProfitINR:         500.0,
+		takeProfitINR:         1000.0,
 	}
 }
 
@@ -53,35 +52,25 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	eff := latestBar.Analytics.NetEfficiency
 	dir := latestBar.Analytics.Direction // Cast to string for safety if it's a custom type
 
-	// FILTER: Require authentic institutional volume and price displacement
-	if volumeRank < s.minVolumePriceRank && priceRank < s.minVolumePriceRank {
-		return "HOLD"
-	}
-
-	// 🚀 LONG SCALP IGNITION
-	// 1. Efficiency is between 40 and 95
-	// 2. Slope > 8.0 (momentum is violently accelerating upwards)
-	// 3. Time > 85% above VWAP
-	// 4. Bar direction is explicitly Bullish
-	if eff > s.effScalpThreshold && eff <= s.maxEffScalpThreshold {
-		if timePctAboveVwap >= s.longTimeAboveVwapPct {
-			if dir == models.DirBullish || dir == models.DirStrongBullish {
-				return "GO_LONG"
+	if volumeRank == 6 && priceRank == 7 {
+		// 🚀 LONG SCALP IGNITION
+		if eff >= 35 && eff <= 95 {
+			if timePctAboveVwap >= 75 {
+				if dir == models.DirBullish || dir == models.DirStrongBullish {
+					return "GO_LONG"
+				}
 			}
 		}
-	}
 
-	// 📉 SHORT SCALP IGNITION
-	// 1. Efficiency is between -40 and -95
-	// 2. Slope < -8.0 (momentum is violently accelerating downwards)
-	// 3. Time < 15% above VWAP
-	// 4. Bar direction is explicitly Bearish
-	if eff < -s.effScalpThreshold && eff >= -s.maxEffScalpThreshold {
-		if timePctAboveVwap <= s.shortTimeAboveVwapPct {
-			if dir == models.DirBearish || dir == models.DirStrongBearish {
-				return "GO_SHORT"
+		// 📉 SHORT SCALP IGNITION
+		if eff <= -35 && eff >= -95 {
+			if timePctAboveVwap <= 25 {
+				if dir == models.DirBearish || dir == models.DirStrongBearish {
+					return "GO_SHORT"
+				}
 			}
 		}
+
 	}
 
 	return "HOLD"
@@ -89,7 +78,7 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 
 // CheckExit shifts from a simple VWAP cross to cutting trends when speed completely dies
 func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	tf := "1m"
+	tf := "5m"
 	history, exists := state.BarHistory[tf]
 	if !exists || len(history) == 0 {
 		return "HOLD"
@@ -97,17 +86,18 @@ func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, curre
 
 	latestBar := history[len(history)-1]
 	eff := latestBar.Analytics.NetEfficiency
+	dir := latestBar.Analytics.Direction
 
 	// 📉 LONG EXIT: Momentum reverses heavily downward
 	if currentSide == "LONG" {
-		if eff < -s.exitEffThreshold {
+		if eff < 10 || dir == models.DirStrongBearish {
 			return "EXIT_LONG"
 		}
 	}
 
 	// 📈 SHORT EXIT: Momentum reverses heavily upward
 	if currentSide == "SHORT" {
-		if eff > s.exitEffThreshold {
+		if eff > -10 || dir == models.DirStrongBullish {
 			return "EXIT_SHORT"
 		}
 	}

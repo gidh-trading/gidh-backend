@@ -14,11 +14,11 @@ import (
 
 const (
 	MaxDailyLossAllowed   = 3000.0
-	InitialCapital        = 70000.0
+	InitialCapital        = 60000.0
 	MaxLeverage           = 5.0
-	MaxCapitalPerStockPct = 0.25
+	MaxCapitalPerStockPct = 0.45
 	AgentEmail            = "algo.trader@gidh.tech"
-	MaxConcurrentTrades   = 4
+	MaxConcurrentTrades   = 3
 )
 
 type UIContractNotePayload struct {
