@@ -125,10 +125,15 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	if !isFlatNow {
 		state.CurrentSetupPhase = PhaseActiveTrade
+		qtyPos := float64(netQty)
+		if qtyPos < 0 {
+			qtyPos = -qtyPos
+		}
+
 		if currentSide == "LONG" {
-			state.CurrentPnL = state.LatestPrice - averagePrice
+			state.CurrentPnL = (state.LatestPrice - averagePrice) * qtyPos
 		} else if currentSide == "SHORT" {
-			state.CurrentPnL = averagePrice - state.LatestPrice
+			state.CurrentPnL = (averagePrice - state.LatestPrice) * qtyPos
 		}
 		if state.CurrentPnL > state.PeakPnL {
 			state.PeakPnL = state.CurrentPnL
@@ -193,10 +198,15 @@ func (e *Engine) GenerateSignal(symbol string, workingState *InstrumentState, cu
 	}
 
 	if currentSide != "FLAT" && currentSide != "" && netQty > 0 {
+		qtyPos := float64(netQty)
+		if qtyPos < 0 {
+			qtyPos = -qtyPos
+		}
+
 		if currentSide == "LONG" {
-			state.CurrentPnL = state.LatestPrice - averagePrice
+			state.CurrentPnL = (state.LatestPrice - averagePrice) * qtyPos
 		} else {
-			state.CurrentPnL = averagePrice - state.LatestPrice
+			state.CurrentPnL = (averagePrice - state.LatestPrice) * qtyPos
 		}
 		if state.CurrentPnL > state.PeakPnL {
 			state.PeakPnL = state.CurrentPnL
