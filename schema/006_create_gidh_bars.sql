@@ -9,9 +9,9 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     timeframe        TEXT             NOT NULL,
 
     -- OHLC & Core Transaction Activity Data
-    open             DOUBLE PRECISION NOT NULL,
-    high             DOUBLE PRECISION NOT NULL,
-    low              DOUBLE PRECISION NOT NULL,
+    open             DOUBLE PRECISION NOT NULL, High,
+    high            DOUBLE PRECISION NOT NULL, Low,
+    low              DOUBLE PRECISION NOT NULL, Close,
     close            DOUBLE PRECISION NOT NULL,
     volume           DOUBLE PRECISION NOT NULL DEFAULT 0,
     tick_count       BIGINT           NOT NULL DEFAULT 0, -- Upgraded to BIGINT to safeguard heavy multi-hour tick windows
@@ -31,10 +31,27 @@ CREATE TABLE IF NOT EXISTS gidh_bars
     PRIMARY KEY (timestamp, instrument_token, timeframe)
 );
 
--- Convert to a TimescaleDB hypertable for optimized time-series chunking
+-- 1. Convert to a TimescaleDB hypertable for optimized time-series chunking
 SELECT create_hypertable('gidh_bars', 'timestamp', if_not_exists => TRUE);
 
--- Primary compound indexing configurations for timeframe retrieval patterns
+
+-- 2. 🛡️ TIMESCALEDB NATIVE COMPRESSION POLICY
+-- This compresses chunks older than 7 days, shrinking your JSONB footprints by up to 90%
+ALTER TABLE gidh_bars SET (
+    timescaledb.compress,
+    timescaledb.compress_segmentby = 'instrument_token, timeframe',
+    timescaledb.compress_orderby = 'timestamp DESC'
+    );
+
+SELECT add_compression_policy('gidh_bars', INTERVAL '7 days', if_not_exists => TRUE);
+
+
+-- 3. 🕒 TIMESCALEDB NATIVE DATA RETENTION POLICY
+-- This automatically drops entire expired chunks older than 30 days cleanly at the disk level
+SELECT add_retention_policy('gidh_bars', INTERVAL '30 days', if_not_exists => TRUE);
+
+
+-- 4. Primary compound indexing configurations for timeframe retrieval patterns
 CREATE INDEX IF NOT EXISTS idx_gidh_bars_token_time
     ON gidh_bars (instrument_token, timestamp DESC);
 
