@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	EfficiencySlopeLookback = 10
-	DecayConstant           = 0.90
+	DecayConstant   = 0.90
+	EmpiricalMaxCap = 150.0 // 📊 Standardizes real-world breakout velocity to a strict -100 to +100 scale
 )
 
 // EfficiencyLedger tracks structural buy/sell absorption metrics per timeframe
@@ -45,7 +45,6 @@ func NewBarAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, profiles map[uin
 	}
 }
 
-// getOrInitTimeframeHistory guarantees deep metric isolation per stock and timeframe safely
 func (bae *BarAnalyticsEngine) getOrInitTimeframeHistory(stockName string, timeframe string) *TimeframeAnalyticsHistory {
 	if bae.history[stockName] == nil {
 		bae.history[stockName] = make(map[string]*TimeframeAnalyticsHistory)
@@ -64,6 +63,35 @@ func (bae *BarAnalyticsEngine) getOrInitTimeframeHistory(stockName string, timef
 	return h
 }
 
+// 📐 CORE EXTRACTED MATHEMATICAL FUNCTION 1: Standardized Continuous Scale
+func (bae *BarAnalyticsEngine) calculateNetEfficiency(bull, bear float64) float64 {
+	rawNetEff := bull - bear
+	netEff := (rawNetEff / EmpiricalMaxCap) * 100.0
+
+	// Strict mathematical boundary capping
+	if netEff > 100.0 {
+		return 100.0
+	}
+	if netEff < -100.0 {
+		return -100.0
+	}
+	return netEff
+}
+
+// 📐 CORE EXTRACTED MATHEMATICAL FUNCTION 2: Trailing Linear Regression Slope Resolver
+func (bae *BarAnalyticsEngine) calculateTrajectorySlope(history []float64, livePoint float64, lookbackLimit int) float64 {
+	// Construct a temporary window projection to include the live tracking point without mutating stored history
+	projectedSeries := make([]float64, len(history), len(history)+1)
+	copy(projectedSeries, history)
+	projectedSeries = append(projectedSeries, livePoint)
+
+	if len(projectedSeries) > lookbackLimit {
+		projectedSeries = projectedSeries[1:]
+	}
+
+	return bae.calculateLinearRegressionSlope(projectedSeries)
+}
+
 // GetLiveSnapshot safely exposes current real-time mathematical states for live streaming egress/UI
 func (bae *BarAnalyticsEngine) GetLiveSnapshot(stockName string, timeframe string) (netEff float64, slope float64) {
 	bae.mu.Lock()
@@ -74,14 +102,18 @@ func (bae *BarAnalyticsEngine) GetLiveSnapshot(stockName string, timeframe strin
 	}
 
 	h := bae.history[stockName][timeframe]
-	netEff = h.Ledger.BullEfficient - h.Ledger.BearEfficient
-	slope = bae.calculateLinearRegressionSlope(h.NetEfficiencyHistory)
+
+	// 🚀 Shared Helper Call: Resolves real-time live efficiency
+	netEff = bae.calculateNetEfficiency(h.Ledger.BullEfficient, h.Ledger.BearEfficient)
+
+	// 🚀 Shared Helper Call: Project current real-time tick velocity onto the trajectory line
+	slope = bae.calculateTrajectorySlope(h.NetEfficiencyHistory, netEff, bae.getSlopeLookback(timeframe))
+
 	return netEff, slope
 }
 
-// AnalyzeTick updates the candle analytics layer on every single live streaming tick update
+// AnalyzeTick updates continuous peak transaction intensities and real-time distance metrics
 func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.EnrichedTick) {
-	// 1. Accumulate PEAK Intensities for cumulative transaction metrics
 	if tick.Enrichment.VolumeRank > bar.Analytics.VolumeRank {
 		bar.Analytics.VolumeRank = tick.Enrichment.VolumeRank
 	}
@@ -89,17 +121,7 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 		bar.Analytics.TickRank = tick.Enrichment.TickRank
 	}
 
-	// 2. Calculate the specific bar's internal tracking context (Scaled 0-100)
-	if bar.VWAP > 0 && bar.TickCount > 0 {
-		previousTotalTicks := float64(bar.TickCount - 1)
-		previousTicksAbove := (bar.Analytics.TimePctAboveVwap / 100.0) * previousTotalTicks
-
-		if tick.Raw.LastPrice > bar.VWAP {
-			previousTicksAbove++
-		}
-
-	}
-
+	// TICK LEVEL: Continuous distance evaluation
 	bar.Analytics.NormalizedVwapDistance = bae.calculateDistance(bar.Close, bar.VWAP, uint32(bar.InstrumentToken))
 
 	bae.computeMacroTimeframeRanksAndDirection(bar)
@@ -109,14 +131,12 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	bae.mu.Lock()
 
-	// 1. Calculate macro baseline ranks and direction classification
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 
-	// 2. Fetch the isolated timeframe tracking state history
 	tf := bar.Timeframe
 	h := bae.getOrInitTimeframeHistory(bar.StockName, tf)
 
-	// 3. Update isolated time percentages above VWAP
+	// BAR CLOSE LEVEL: Percentage above VWAP tracking
 	h.TotalBars++
 	totalTfBars := float64(h.TotalBars)
 
@@ -127,7 +147,7 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	h.TimePctAboveVwap = (previousBarsAbove / totalTfBars) * 100.0
 	bar.Analytics.TimePctAboveVwap = h.TimePctAboveVwap
 
-	// 4. TIMEFRAME ISOLATED MOMENTUM LEDGER PROCESSING
+	// MOMENTUM LEDGER PROCESSING
 	h.Ledger.BullEfficient *= DecayConstant
 	h.Ledger.BearEfficient *= DecayConstant
 	h.Ledger.LastUpdated = bar.Timestamp
@@ -150,11 +170,14 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 		}
 	}
 
-	// 5. Calculate Linear Regression Slope for this specific timeframe history slice
-	netEff := h.Ledger.BullEfficient - h.Ledger.BearEfficient
+	// 🚀 Shared Helper Call: Calculate Standardized Net Efficiency via Bounding
+	netEff := bae.calculateNetEfficiency(h.Ledger.BullEfficient, h.Ledger.BearEfficient)
+
 	h.NetEfficiencyHistory = append(h.NetEfficiencyHistory, netEff)
 
-	if len(h.NetEfficiencyHistory) > EfficiencySlopeLookback {
+	// Keep the lookback array constraint checked
+	lookbackLimit := bae.getSlopeLookback(tf)
+	if len(h.NetEfficiencyHistory) > lookbackLimit {
 		h.NetEfficiencyHistory = h.NetEfficiencyHistory[1:]
 	}
 
@@ -163,13 +186,9 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	bar.Analytics.NetEfficiencySlope = bae.calculateLinearRegressionSlope(h.NetEfficiencyHistory)
 	bae.mu.Unlock()
 
-	// 6. Automatically pass through to Database Writer Archive Layer
 	if bae.dbWriter != nil {
 		bae.dbWriter.AddBar(*bar)
 	}
-
-	// NOTE: Your streaming/WebSocket broadcast server hook can be fired directly from here as well:
-	// ws.BroadcastBarUpdate(bar)
 }
 
 func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *models.Bar) {
@@ -311,7 +330,6 @@ func (bae *BarAnalyticsEngine) calculateLinearRegressionSlope(series []float64) 
 	return ((n * sumXY) - (sumX * sumY)) / denominator
 }
 
-// Add a quick internal math helper to un-scale distance relative to asset ADR percentage limits
 func (bae *BarAnalyticsEngine) calculateDistance(price, vwap float64, token uint32) float64 {
 	if vwap <= 0 {
 		return 0.0
@@ -321,4 +339,8 @@ func (bae *BarAnalyticsEngine) calculateDistance(price, vwap float64, token uint
 		return rawPct / profile.ADRPct
 	}
 	return rawPct
+}
+
+func (bae *BarAnalyticsEngine) getSlopeLookback(timeframe string) int {
+	return 5
 }
