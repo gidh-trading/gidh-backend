@@ -49,21 +49,22 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	tf := "1m"
 	history, exists := state.BarHistory[tf]
 
+	// ✅ FIX: Check guard clauses FIRST before accessing array elements
+	if !exists || len(history) == 0 {
+		return "HOLD"
+	}
+
+	// Now it is perfectly safe to read the last slice element
 	latestBar := history[len(history)-1]
 
 	istTime := latestBar.Timestamp.In(loc)
 	currentHM := (istTime.Hour() * 100) + istTime.Minute()
 
 	if currentHM < 920 {
-
 		return "HOLD"
 	}
 
 	if currentHM > 1015 {
-		return "HOLD"
-	}
-
-	if !exists || len(history) < 1 {
 		return "HOLD"
 	}
 
