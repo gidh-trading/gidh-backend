@@ -142,13 +142,7 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 
 	if isFlatNow && e.ActiveStrategy != nil {
 
-		// 1. Fetch the latest 1-minute bar context from history
-		var latestBar *models.Bar
-		if history, ok := state.BarHistory["1m"]; ok && len(history) > 0 {
-			latestBar = history[len(history)-1]
-		}
-
-		signal := e.ActiveStrategy.CheckEntry(state, latestBar)
+		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			return signal, state
 		}
@@ -217,12 +211,8 @@ func (e *Engine) GenerateSignal(symbol string, workingState *InstrumentState, cu
 	}
 
 	if isFlatNow && e.ActiveStrategy != nil {
-		// 1. Fetch the latest 1-minute bar context from history
-		var latestBar *models.Bar
-		if history, ok := state.BarHistory["1m"]; ok && len(history) > 0 {
-			latestBar = history[len(history)-1]
-		}
-		signal := e.ActiveStrategy.CheckEntry(state, latestBar)
+
+		signal := e.ActiveStrategy.CheckEntry(state)
 		if signal == "GO_LONG" || signal == "GO_SHORT" {
 			return signal, state
 		}

@@ -114,14 +114,16 @@ func (bae *BarAnalyticsEngine) GetLiveSnapshot(stockName string, timeframe strin
 	h := bae.history[stockName][timeframe]
 
 	// -------------------------------------------------------------
-	// RESOLVE CURRENT REAL-TIME STANDARDIZED SCORES (-100 to +100)
+	// RESOLVE CURRENT REAL-TIME STANDARDIZED SCORES
 	// -------------------------------------------------------------
-	const StateMaxCap = 20.0 // Matches the normalization scale used in AnalyzeClose
+	const StateMaxCap = 20.0
 
 	netPriceEff = ((h.Ledger.BullPriceState - h.Ledger.BearPriceState) / StateMaxCap) * 100.0
 	netVolEff = ((h.Ledger.BullVolumeState - h.Ledger.BearVolumeState) / StateMaxCap) * 100.0
 	meanRev = (h.Ledger.MeanReversionState / StateMaxCap) * 100.0
-	absForce = (h.Ledger.AbsorptionState / StateMaxCap) * 100.0
+
+	// ⚡ MATCHED FIX: Scaled by 400.0 to properly normalize the raw percentage accumulation
+	absForce = (h.Ledger.AbsorptionState / 400.0) * 100.0
 
 	// Apply bounding safety-nets [-100.0, 100.0]
 	if netPriceEff > 100.0 {
@@ -139,8 +141,12 @@ func (bae *BarAnalyticsEngine) GetLiveSnapshot(stockName string, timeframe strin
 	} else if meanRev < -100.0 {
 		meanRev = -100.0
 	}
+
+	// Bounded safely between 0 and 100 (Absorption cannot be negative)
 	if absForce > 100.0 {
 		absForce = 100.0
+	} else if absForce < 0.0 {
+		absForce = 0.0
 	}
 
 	return netPriceEff, netVolEff, meanRev, absForce
@@ -211,32 +217,23 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	// -------------------------------------------------------------
 	switch bar.Analytics.Direction {
 	case models.DirStrongBullish, models.DirBullish:
-		// State 1 (Price): Full bodies boost price efficiency instantly
 		h.Ledger.BullPriceState += float64(bar.Analytics.PriceRank) * bodyToRangeRatio
-		// State 2 (Volume): Volume participation vector
 		h.Ledger.BullVolumeState += float64(bar.Analytics.VolumeRank)
-
-		// State 3 (Mean Reversion): Push state positive for green runs
 		h.Ledger.MeanReversionState += float64(bar.Analytics.PriceRank)
 
-		// State 4 (Absorption): If going up but leaving heavy upper wicks, spike absorption
-		h.Ledger.AbsorptionState += upperWickRatio * float64(bar.Analytics.RangeRank)
+		// ⚡ OPTIMIZED: Scale the pure wick ratio by 100 directly to give it significant weight
+		h.Ledger.AbsorptionState += upperWickRatio * 100.0
 
 	case models.DirStrongBearish, models.DirBearish:
-		// State 1 (Price)
 		h.Ledger.BearPriceState += float64(bar.Analytics.PriceRank) * bodyToRangeRatio
-		// State 2 (Volume)
 		h.Ledger.BearVolumeState += float64(bar.Analytics.VolumeRank)
-
-		// State 3 (Mean Reversion): Push state negative for red runs
 		h.Ledger.MeanReversionState -= float64(bar.Analytics.PriceRank)
 
-		// State 4 (Absorption): If flushing down but leaving heavy lower wicks (buying back), spike absorption
-		h.Ledger.AbsorptionState += lowerWickRatio * float64(bar.Analytics.RangeRank)
+		// ⚡ OPTIMIZED: Scale the pure wick ratio by 100 directly
+		h.Ledger.AbsorptionState += lowerWickRatio * 100.0
 
 	default: // Sideways / Neutral Dojis
-		// Dampen states during absolute gridlock or minimal price movement
-		h.Ledger.AbsorptionState += (upperWickRatio + lowerWickRatio) * 0.5
+		h.Ledger.AbsorptionState += ((upperWickRatio + lowerWickRatio) * 0.5) * 100.0
 	}
 
 	// -------------------------------------------------------------
@@ -247,7 +244,7 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	netPriceEff := ((h.Ledger.BullPriceState - h.Ledger.BearPriceState) / StateMaxCap) * 100.0
 	netVolEff := ((h.Ledger.BullVolumeState - h.Ledger.BearVolumeState) / StateMaxCap) * 100.0
 	meanRevPressure := (h.Ledger.MeanReversionState / StateMaxCap) * 100.0
-	absorptionForce := (h.Ledger.AbsorptionState / StateMaxCap) * 100.0
+	absorptionForce := (h.Ledger.AbsorptionState / 400.0) * 100.0
 
 	// Apply bounding limits [-100.0, 100.0] Safetynet
 	if netPriceEff > 100.0 {

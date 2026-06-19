@@ -1,13 +1,11 @@
 package strategy
 
-import "gidh-backend/internal/service/models"
-
 // Strategy isolates execution decisions into clean, distinct logical tracks.
 type Strategy interface {
 	Name() string
 
 	// CheckEntry evaluates setups when the position is FLAT
-	CheckEntry(state *InstrumentState, bar *models.Bar) string // Returns "GO_LONG", "GO_SHORT", or "HOLD"
+	CheckEntry(state *InstrumentState) string // Returns "GO_LONG", "GO_SHORT", or "HOLD"
 
 	// CheckExit evaluates indicator trend breakdowns when in an ACTIVE trade
 	CheckExit(state *InstrumentState, currentSide string) string // Returns "EXIT_LONG", "EXIT_SHORT", or "HOLD"

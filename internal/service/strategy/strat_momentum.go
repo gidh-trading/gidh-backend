@@ -9,7 +9,9 @@ import (
 const (
 	// Entry Window
 	StartTradingTime = 925  // Adjusted to 09:25
-	EndTradingTime   = 1500 // Extended to 15:00 or your custom session end
+	EndTradingTime   = 1030 // Extended to 15:00 or your custom session end
+	MinRank          = 4
+	MaxRank          = 5
 
 	// Risk Management
 	HardStopLossINR      = -400.0
@@ -42,41 +44,63 @@ func (s *VwapEfficiencyMomentumStrategy) UpdateConfigs(newConfigs map[string]*mo
 	s.configs = newConfigs
 }
 
-func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState, bar *models.Bar) string {
+func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// Prevent over-trading the same instrument in a session
+	tf := "1m"
+	// 1. Guard Condition: Extract the latest 1-minute bar from the Instrument State history
+	var bar, tMinusOneBar, tMinusTwoBar *models.Bar
+	if history, ok := state.BarHistory[tf]; ok && len(history) > 2 {
+		bar = history[len(history)-1]
+		tMinusOneBar = history[len(history)-2]
+		tMinusTwoBar = history[len(history)-3]
+	}
+
+	// If no 1-minute data has been accumulated yet, safely skip evaluation
+	if bar == nil {
+		return "HOLD"
+	}
+
+	// 2. Prevent over-trading the same instrument in a session
 	if s.tradedStocks[bar.StockName] {
 		return "HOLD"
 	}
 
-	// 1. Session Chronological Time Filter
+	// 3. Session Chronological Time Filter (09:25 to 10:30)
 	t := bar.Timestamp
 	currentTimeInt := t.Hour()*100 + t.Minute()
 	if currentTimeInt < StartTradingTime || currentTimeInt > EndTradingTime {
 		return "HOLD"
 	}
 
-	// 2. Multi-Dimensional Continuous State Filters
+	// 4. Multi-Dimensional Continuous State Filters
 
 	// Rule A: High Directional Price Conviction (Clean Body Breakouts > 30%)
-	priceConvictionValid := bar.Analytics.NetPriceEfficiency > 30.0
+	priceConvictionValid := bar.Analytics.NetPriceEfficiency > 30.0 && bar.Analytics.NetPriceEfficiency < 60.0
 
-	// Rule B: Buyer Volume Participation Confirmation
-	volumeParticipationValid := bar.Analytics.NetVolumeEfficiency > 0.0
+	// Rule B: Buyer Volume Participation Confirmation (> 25% Institutional Backing)
+	volumeParticipationValid := bar.Analytics.NetVolumeEfficiency > 25.0 && bar.Analytics.NetVolumeEfficiency < 70
 
 	// Rule C: Overextension Protection (Prevents chasing top of massive runups)
-	notOverextended := bar.Analytics.MeanReversionPressure < 80.0
+	notOverextended := bar.Analytics.MeanReversionPressure < 70.0
 
-	// Rule D: Heavy Wick Rejection Shield (Blocks immediate absorption zones)
-	noHeavyAbsorption := bar.Analytics.AbsorptionForce < 45.0
+	// Rule D: Structural Trend Floor (Price spent over 70% of the session above VWAP)
+	vwapValid := bar.Close > bar.VWAP && bar.Analytics.NormalizedVwapDistance < 0.25 && tMinusOneBar.Close > tMinusOneBar.VWAP && tMinusTwoBar.Close > tMinusTwoBar.VWAP
+
+	// Rule E: Direction check
+	directionValid := bar.Analytics.Direction == models.DirBullish || bar.Analytics.Direction == models.DirStrongBullish
+
+	volumeRankValid := bar.Analytics.VolumeRank >= MinRank && bar.Analytics.VolumeRank <= MaxRank
+	priceRankValid := bar.Analytics.PriceRank >= MinRank && bar.Analytics.PriceRank <= MaxRank
+
+	rankValid := volumeRankValid && priceRankValid
 
 	// Trigger entry when vectors line up cleanly
-	if priceConvictionValid && volumeParticipationValid && notOverextended && noHeavyAbsorption {
-		logger.Infof("[STRATEGY] GO_LONG breakout entry triggered for %s. PriceEff: %.2f, VolEff: %.2f, MeanRev: %.2f, AbsForce: %.2f",
+	if priceConvictionValid && volumeParticipationValid && notOverextended && vwapValid && directionValid && rankValid {
+		logger.Infof("[STRATEGY] GO_LONG breakout entry triggered for %s. PriceEff: %.2f, VolEff: %.2f, MeanRev: %.2f, AbsForce: %.2f, TimeVwapPct: %.2f",
 			bar.StockName, bar.Analytics.NetPriceEfficiency, bar.Analytics.NetVolumeEfficiency,
-			bar.Analytics.MeanReversionPressure, bar.Analytics.AbsorptionForce)
+			bar.Analytics.MeanReversionPressure, bar.Analytics.AbsorptionForce, bar.Analytics.TimePctAboveVwap)
 		return "GO_LONG"
 	}
 
