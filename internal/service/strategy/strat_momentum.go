@@ -2,14 +2,16 @@ package strategy
 
 import (
 	"gidh-backend/internal/service/models"
+	"gidh-backend/pkg/logger"
 	"sync"
+	"time"
 )
 
 const (
-	InitialTakeProfitINR = 650.0  // Starting take profit target ceiling
-	DecayRatePerMinute   = 15.0   // Linear decay modifier per minute passed
-	MinTakeProfitFloor   = 200.0  // The absolute minimum profit target allowed after decay
-	HardStopLossINR      = -400.0 // Strict monetary guillotine (1:2.5 base Risk/Reward)
+	InitialTakeProfitINR = 500.0  // Lower ceiling to catch realistic momentum peaks
+	DecayRatePerMinute   = 15.0   // Faster decay forces the algo to take profit if momentum stalls
+	MinTakeProfitFloor   = 150.0  // Never exit a winner for less than 200
+	HardStopLossINR      = -400.0 // The Guillotine
 )
 
 type VwapEfficiencyMomentumStrategy struct {
@@ -37,14 +39,33 @@ func (s *VwapEfficiencyMomentumStrategy) UpdateConfigs(newConfigs map[string]*mo
 
 // CheckEntry executes mathematically proven Absorption setups
 func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) string {
+
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		logger.Warnf("cannot load time location: %v", err)
+		loc = time.UTC
+	}
+
 	tf := "1m"
 	history, exists := state.BarHistory[tf]
+
+	latestBar := history[len(history)-1]
+
+	istTime := latestBar.Timestamp.In(loc)
+	currentHM := (istTime.Hour() * 100) + istTime.Minute()
+
+	if currentHM < 920 {
+
+		return "HOLD"
+	}
+
+	if currentHM > 1015 {
+		return "HOLD"
+	}
 
 	if !exists || len(history) < 1 {
 		return "HOLD"
 	}
-
-	latestBar := history[len(history)-1]
 
 	// Extract the raw features
 	volRank := latestBar.Analytics.VolumeRank
