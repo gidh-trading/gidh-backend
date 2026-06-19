@@ -9,8 +9,9 @@ import (
 )
 
 const (
-	DecayConstant   = 0.75
-	EmpiricalMaxCap = 150.0 // 📊 Standardizes real-world breakout velocity to a strict -100 to +100 scale
+	DecayConstant    = 0.80
+	StructuralMaxCap = 75.0 // 🎯 PERFECT ALIGNMENT: Max State (75) / Cap (75) * 100 = 100%
+	MeanRevMaxCap    = 75.0
 )
 
 // EfficiencyLedger tracks structural buy/sell absorption metrics per timeframe
@@ -36,6 +37,12 @@ type TimeframeAnalyticsHistory struct {
 	Ledger           ContinuousLivingLedger
 	TotalBars        int
 	TimePctAboveVwap float64
+
+	// 📊 Running stats for Adaptive 3-Sigma Capping
+	MeanPriceDiff float64 // Running mean of (BullPriceState - BearPriceState)
+	VarPriceDiff  float64 // Running variance of price state differential
+	MeanVolDiff   float64 // Running mean of (BullVolumeState - BearVolumeState)
+	VarVolDiff    float64 // Running variance of volume state differential
 }
 
 type BarAnalyticsEngine struct {
@@ -72,10 +79,13 @@ func (bae *BarAnalyticsEngine) getOrInitTimeframeHistory(stockName string, timef
 	return h
 }
 
-// 📐 CORE EXTRACTED MATHEMATICAL FUNCTION 1: Standardized Continuous Scale
-func (bae *BarAnalyticsEngine) calculateNetEfficiency(bull, bear float64) float64 {
-	rawNetEff := bull - bear
-	netEff := (rawNetEff / EmpiricalMaxCap) * 100.0
+// calculateNetEfficiency safely handles continuous scaling against a specified capacity baseline
+func (bae *BarAnalyticsEngine) calculateNetEfficiency(bull, bear, maxCap float64) float64 {
+	if maxCap <= 0 {
+		maxCap = 1.0 // Prevent division by zero panic anomalies
+	}
+
+	netEff := ((bull - bear) / maxCap) * 100.0
 
 	// Strict mathematical boundary capping
 	if netEff > 100.0 {
@@ -116,33 +126,11 @@ func (bae *BarAnalyticsEngine) GetLiveSnapshot(stockName string, timeframe strin
 	// -------------------------------------------------------------
 	// RESOLVE CURRENT REAL-TIME STANDARDIZED SCORES
 	// -------------------------------------------------------------
-	const StateMaxCap = 20.0
+	netPriceEff = bae.calculateNetEfficiency(h.Ledger.BullPriceState, h.Ledger.BearPriceState, StructuralMaxCap)
+	netVolEff = bae.calculateNetEfficiency(h.Ledger.BullVolumeState, h.Ledger.BearVolumeState, StructuralMaxCap)
+	meanRev = bae.calculateNetEfficiency(h.Ledger.MeanReversionState, 0.0, MeanRevMaxCap)
 
-	netPriceEff = ((h.Ledger.BullPriceState - h.Ledger.BearPriceState) / StateMaxCap) * 100.0
-	netVolEff = ((h.Ledger.BullVolumeState - h.Ledger.BearVolumeState) / StateMaxCap) * 100.0
-	meanRev = (h.Ledger.MeanReversionState / StateMaxCap) * 100.0
-
-	// ⚡ MATCHED FIX: Scaled by 400.0 to properly normalize the raw percentage accumulation
 	absForce = (h.Ledger.AbsorptionState / 400.0) * 100.0
-
-	// Apply bounding safety-nets [-100.0, 100.0]
-	if netPriceEff > 100.0 {
-		netPriceEff = 100.0
-	} else if netPriceEff < -100.0 {
-		netPriceEff = -100.0
-	}
-	if netVolEff > 100.0 {
-		netVolEff = 100.0
-	} else if netVolEff < -100.0 {
-		netVolEff = -100.0
-	}
-	if meanRev > 100.0 {
-		meanRev = 100.0
-	} else if meanRev < -100.0 {
-		meanRev = -100.0
-	}
-
-	// Bounded safely between 0 and 100 (Absorption cannot be negative)
 	if absForce > 100.0 {
 		absForce = 100.0
 	} else if absForce < 0.0 {
@@ -213,57 +201,67 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	}
 
 	// -------------------------------------------------------------
-	// CONTINUOUS STATE STEP 3: INJECT KINETIC PULSES
+	// CONTINUOUS STATE STEP 3: INJECT KINETIC PULSES WITH NON-LINEAR WEIGHTS
 	// -------------------------------------------------------------
-	switch bar.Analytics.Direction {
-	case models.DirStrongBullish, models.DirBullish:
-		h.Ledger.BullPriceState += float64(bar.Analytics.PriceRank) * bodyToRangeRatio
-		h.Ledger.BullVolumeState += float64(bar.Analytics.VolumeRank)
-		h.Ledger.MeanReversionState += float64(bar.Analytics.PriceRank)
+	priceWeight := bae.getRankWeight(bar.Analytics.PriceRank)
+	volumeWeight := bae.getRankWeight(bar.Analytics.VolumeRank)
 
-		// ⚡ OPTIMIZED: Scale the pure wick ratio by 100 directly to give it significant weight
+	dir := bar.Analytics.Direction
+	switch {
+	// 🟢 Standard Bullish Trend: Add strictly to the Bull vectors
+	case dir == models.DirStrongBullish || dir == models.DirBullish:
+		h.Ledger.BullPriceState += priceWeight * bodyToRangeRatio
+		h.Ledger.BullVolumeState += volumeWeight
+		h.Ledger.MeanReversionState += priceWeight
 		h.Ledger.AbsorptionState += upperWickRatio * 100.0
 
-	case models.DirStrongBearish, models.DirBearish:
-		h.Ledger.BearPriceState += float64(bar.Analytics.PriceRank) * bodyToRangeRatio
-		h.Ledger.BearVolumeState += float64(bar.Analytics.VolumeRank)
-		h.Ledger.MeanReversionState -= float64(bar.Analytics.PriceRank)
-
-		// ⚡ OPTIMIZED: Scale the pure wick ratio by 100 directly
+	// 🔴 Standard Bearish Trend: Add strictly to the Bear vectors
+	case dir == models.DirStrongBearish || dir == models.DirBearish:
+		h.Ledger.BearPriceState += priceWeight * bodyToRangeRatio
+		h.Ledger.BearVolumeState += volumeWeight
+		h.Ledger.MeanReversionState -= priceWeight
 		h.Ledger.AbsorptionState += lowerWickRatio * 100.0
 
-	default: // Sideways / Neutral Dojis
+	// 🩵 BULLISH ABSORPTION: Iceberg selling halts upward price progress
+	// Action: Split the price weight evenly on both sides to neutralize net efficiency
+	case dir == "BULLISH_ABSORPTION":
+		h.Ledger.BullVolumeState += volumeWeight * 0.5
+		h.Ledger.BearVolumeState += volumeWeight * 0.5
+
+		// 🎯 FIX: Apply the price weight to BOTH sides as a friction clamp
+		h.Ledger.BullPriceState += (priceWeight * bodyToRangeRatio) * 0.5
+		h.Ledger.BearPriceState += (priceWeight * bodyToRangeRatio) * 0.5
+
+		h.Ledger.AbsorptionState += upperWickRatio * 100.0
+
+	// 🩷 BEARISH ABSORPTION: Iceberg buying halts downward price progress
+	// Action: Split the price weight evenly on both sides to neutralize net efficiency
+	case dir == "BEARISH_ABSORPTION":
+		h.Ledger.BullVolumeState += volumeWeight * 0.5
+		h.Ledger.BearVolumeState += volumeWeight * 0.5
+
+		// 🎯 FIX: Apply the price weight to BOTH sides as a friction clamp
+		h.Ledger.BullPriceState += (priceWeight * bodyToRangeRatio) * 0.5
+		h.Ledger.BearPriceState += (priceWeight * bodyToRangeRatio) * 0.5
+
+		h.Ledger.AbsorptionState += lowerWickRatio * 100.0
+
+	default: // True Sideways / Neutral Dojis
 		h.Ledger.AbsorptionState += ((upperWickRatio + lowerWickRatio) * 0.5) * 100.0
 	}
 
 	// -------------------------------------------------------------
-	// CONTINUOUS STATE STEP 4: RESOLVE NET STANDARDIZED SCORES (-100 to +100)
+	// CONTINUOUS STATE STEP 4: RESOLVE STRUCTURAL SCORES (-100 to +100)
 	// -------------------------------------------------------------
-	const StateMaxCap = 20.0 // Normalization scale for standalone vectors
+	netPriceEff := bae.calculateNetEfficiency(h.Ledger.BullPriceState, h.Ledger.BearPriceState, StructuralMaxCap)
+	netVolEff := bae.calculateNetEfficiency(h.Ledger.BullVolumeState, h.Ledger.BearVolumeState, StructuralMaxCap)
+	meanRevPressure := bae.calculateNetEfficiency(h.Ledger.MeanReversionState, 0.0, MeanRevMaxCap)
 
-	netPriceEff := ((h.Ledger.BullPriceState - h.Ledger.BearPriceState) / StateMaxCap) * 100.0
-	netVolEff := ((h.Ledger.BullVolumeState - h.Ledger.BearVolumeState) / StateMaxCap) * 100.0
-	meanRevPressure := (h.Ledger.MeanReversionState / StateMaxCap) * 100.0
 	absorptionForce := (h.Ledger.AbsorptionState / 400.0) * 100.0
-
-	// Apply bounding limits [-100.0, 100.0] Safetynet
-	if netPriceEff > 100.0 {
-		netPriceEff = 100.0
-	} else if netPriceEff < -100.0 {
-		netPriceEff = -100.0
-	}
-	if netVolEff > 100.0 {
-		netVolEff = 100.0
-	} else if netVolEff < -100.0 {
-		netVolEff = -100.0
-	}
-	if meanRevPressure > 100.0 {
-		meanRevPressure = 100.0
-	} else if meanRevPressure < -100.0 {
-		meanRevPressure = -100.0
-	}
 	if absorptionForce > 100.0 {
 		absorptionForce = 100.0
+	} else if absorptionForce < 0.0 {
+		absorptionForce = 0.0
 	}
 
 	// -------------------------------------------------------------
@@ -431,4 +429,24 @@ func (bae *BarAnalyticsEngine) calculateDistance(price, vwap float64, token uint
 
 func (bae *BarAnalyticsEngine) getSlopeLookback(timeframe string) int {
 	return 5
+}
+
+// getRankWeight Helper method to resolve exponential breakout mapping parameters
+func (bae *BarAnalyticsEngine) getRankWeight(rank int) float64 {
+	switch rank {
+	case 7:
+		return 15.0 // 🚀 P97 Extreme Volume Breakout / Shock Block
+	case 6:
+		return 10.0 // 🔥 P90 Strong Momentum Velocity Expansion
+	case 5:
+		return 8.0 // P75 Above Average Flow
+	case 4:
+		return 2.0 // P50 Median Line Baseline
+	case 3:
+		return 1.0 // P25 Mild Flow Contraction
+	case 2:
+		return 0.5 // P10 Deep Value Compression
+	default:
+		return 0.1 // Negligible Structural Noise
+	}
 }
