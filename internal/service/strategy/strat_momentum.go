@@ -9,21 +9,17 @@ import (
 
 const (
 	// Entry Window
-	StartTradingTime = 925  // 09:25
+	StartTradingTime = 920  // 09:25
 	EndTradingTime   = 1030 // 09:50
 
 	// Entry Thresholds
 	MinRank = 5.0 // Updated threshold
 
 	// Risk Management
-	HardStopLossINR      = -300.0
-	InitialTakeProfitINR = 600.0
+	HardStopLossINR      = -400.0
+	InitialTakeProfitINR = 500.0
 	DecayRatePerMinute   = 15.0
-	MinTakeProfitFloor   = 200.0
-
-	// Trailing Stop Parameters
-	TrailingPeakThreshold = 200.0
-	TrailingStopLoss      = 25.0
+	TakeProfitGraceMins  = 1.0
 )
 
 type VwapEfficiencyMomentumStrategy struct {
@@ -86,14 +82,17 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	prevBarValid := prevBar.Analytics.VolumeRank >= MinRank &&
 		prevBar.Analytics.PriceRank >= MinRank &&
 		prevBar.Close > prevBar.VWAP &&
-		(prevBar.Analytics.Direction == models.DirBullish || prevBar.Analytics.Direction == models.DirStrongBullish)
+		(prevBar.Analytics.Direction == models.DirBullish || prevBar.Analytics.Direction == models.DirStrongBullish) &&
+		prevBar.Analytics.NetEfficiency > 20
 
 	latestBarValid := latestBar.Analytics.VolumeRank >= MinRank &&
 		latestBar.Analytics.PriceRank >= MinRank &&
 		latestBar.Close > latestBar.VWAP &&
-		(latestBar.Analytics.Direction == models.DirBullish || latestBar.Analytics.Direction == models.DirStrongBullish)
+		(latestBar.Analytics.Direction == models.DirBullish || latestBar.Analytics.Direction == models.DirStrongBullish) &&
+		prevBar.Analytics.NetEfficiency > 20 &&
+		latestBar.Analytics.NetEfficiencySlope > prevBar.Analytics.NetEfficiencySlope
 
-	if prevBarValid && latestBarValid {
+	if prevBarValid && latestBarValid && latestBar.Analytics.NetEfficiencySlope > 5 {
 		return "GO_LONG"
 	}
 
@@ -114,14 +113,18 @@ func (s *VwapEfficiencyMomentumStrategy) CheckTakeProfit(state *InstrumentState,
 	durationAlive := marketTime.Sub(state.EntryTimestamp)
 	minutesElapsed := durationAlive.Minutes()
 
-	decayAmount := minutesElapsed * DecayRatePerMinute
-	dynamicTargetProfit := InitialTakeProfitINR - decayAmount
-
-	if dynamicTargetProfit < MinTakeProfitFloor {
-		dynamicTargetProfit = MinTakeProfitFloor
+	// 🟢 Calculate elapsed minutes after the initial breathing space/grace period
+	minutesToDecay := minutesElapsed - TakeProfitGraceMins
+	if minutesToDecay < 0 {
+		minutesToDecay = 0
 	}
 
-	if state.CurrentPnL >= dynamicTargetProfit {
+	// 🟢 Calculate decay directly against InitialTakeProfitINR
+	decayAmount := minutesToDecay * DecayRatePerMinute
+	decayedTarget := InitialTakeProfitINR - decayAmount
+
+	// Check if current PnL has cleared the decayed benchmark
+	if state.CurrentPnL >= decayedTarget {
 		return true
 	}
 
@@ -129,12 +132,6 @@ func (s *VwapEfficiencyMomentumStrategy) CheckTakeProfit(state *InstrumentState,
 }
 
 func (s *VwapEfficiencyMomentumStrategy) CheckStopLoss(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
-	// Trailing Stop Logic
-	if state.PeakPnL >= TrailingPeakThreshold {
-		if state.CurrentPnL <= TrailingStopLoss {
-			return true
-		}
-	}
 
 	if state.CurrentPnL <= HardStopLossINR {
 		return true

@@ -249,6 +249,10 @@ func (e *Engine) CommitTransaction(symbol string, proposedState *InstrumentState
 		proposedState.CurrentTradeID = fmt.Sprintf("TRD_%s_%d", symbol, proposedState.LastTickTime.UnixNano())
 		proposedState.PeakPnL = 0.0
 		proposedState.CurrentPnL = 0.0
+		if e.ActiveStrategy != nil {
+			e.ActiveStrategy.OnEntryCommit(proposedState, symbol)
+		}
+
 	} else if isExit {
 		proposedState.CurrentSetupPhase = PhaseNeutral
 		proposedState.LastExitSignalTime = proposedState.LastTickTime
