@@ -9,26 +9,19 @@ import (
 
 const (
 	// Entry Window
-	StartTradingTime = 925 // 09:25
-	EndTradingTime   = 950 // 09:50
+	StartTradingTime = 925  // 09:25
+	EndTradingTime   = 1030 // 09:50
 
 	// Entry Thresholds
-	MinVolumeRank    = 7.0
-	MaxPriceRank     = 6.0
-	MinEfficiency    = 25.0
-	MinSlope         = 8.0
-	MinTimeAboveVWAP = 70.0
-	MaxTimeAboveVWAP = 30.0
+	MinRank = 5.0 // Updated threshold
 
 	// Risk Management
-	HardStopLossINR    = -350.0
-	InitialTakeProfit  = 500.0
-	DecayRatePerMinute = 15.0
-	MinTakeProfitFloor = 300.0
+	HardStopLossINR      = -300.0
+	InitialTakeProfitINR = 600.0
+	DecayRatePerMinute   = 15.0
+	MinTakeProfitFloor   = 200.0
 
-	// Exit/Trailing Stop Parameters
-	FailureExitMinutes    = 6.0
-	FailureExitProfit     = 50.0
+	// Trailing Stop Parameters
 	TrailingPeakThreshold = 200.0
 	TrailingStopLoss      = 25.0
 )
@@ -37,12 +30,15 @@ type VwapEfficiencyMomentumStrategy struct {
 	strategyName string
 	mu           sync.RWMutex
 	configs      map[string]*models.OptimizedStrategyConfig
+	tradedStocks map[string]bool // Track stocks that have been traded
+
 }
 
 func NewVwapEfficiencyMomentumStrategy(configs map[string]*models.OptimizedStrategyConfig) *VwapEfficiencyMomentumStrategy {
 	return &VwapEfficiencyMomentumStrategy{
 		strategyName: "Algorithmic_Absorption_Scalp_Optimized",
 		configs:      configs,
+		tradedStocks: make(map[string]bool),
 	}
 }
 
@@ -57,6 +53,13 @@ func (s *VwapEfficiencyMomentumStrategy) UpdateConfigs(newConfigs map[string]*mo
 }
 
 func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) string {
+	s.mu.RLock()
+	if s.tradedStocks[state.StockName] {
+		s.mu.RUnlock()
+		return "HOLD"
+	}
+	s.mu.RUnlock()
+
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
 		logger.Warnf("cannot load time location: %v", err)
@@ -80,68 +83,69 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 		return "HOLD"
 	}
 
-	volRank := latestBar.Analytics.VolumeRank
-	priceRank := latestBar.Analytics.PriceRank
-	efficiency := latestBar.Analytics.NetEfficiency
-	slope := latestBar.Analytics.NetEfficiencySlope
-	timePctVwap := latestBar.Analytics.TimePctAboveVwap
+	prevBarValid := prevBar.Analytics.VolumeRank >= MinRank &&
+		prevBar.Analytics.PriceRank >= MinRank &&
+		prevBar.Close > prevBar.VWAP &&
+		(prevBar.Analytics.Direction == models.DirBullish || prevBar.Analytics.Direction == models.DirStrongBullish)
 
-	if volRank < MinVolumeRank || priceRank > MaxPriceRank {
-		return "HOLD"
-	}
+	latestBarValid := latestBar.Analytics.VolumeRank >= MinRank &&
+		latestBar.Analytics.PriceRank >= MinRank &&
+		latestBar.Close > latestBar.VWAP &&
+		(latestBar.Analytics.Direction == models.DirBullish || latestBar.Analytics.Direction == models.DirStrongBullish)
 
-	// Bullish Absorption + Breakout
-	if efficiency >= MinEfficiency && slope >= MinSlope && latestBar.Close > latestBar.VWAP && timePctVwap > MinTimeAboveVWAP {
-		if latestBar.Close > prevBar.High {
-			return "GO_LONG"
-		}
-	}
-
-	// Bearish Absorption + Breakout
-	if efficiency <= -MinEfficiency && slope <= -MinSlope && latestBar.Close < latestBar.VWAP && timePctVwap < MaxTimeAboveVWAP {
-		if latestBar.Close < prevBar.Low {
-			return "GO_SHORT"
-		}
+	if prevBarValid && latestBarValid {
+		return "GO_LONG"
 	}
 
 	return "HOLD"
 }
 
 func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	if state.EntryTimestamp.IsZero() {
-		return "HOLD"
-	}
-
-	minutesElapsed := state.LastTickTime.Sub(state.EntryTimestamp).Minutes()
-
-	if minutesElapsed >= FailureExitMinutes && state.CurrentPnL < FailureExitProfit {
-		return "EXIT_" + currentSide
-	}
 
 	return "HOLD"
 }
 
 func (s *VwapEfficiencyMomentumStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
 	if state.EntryTimestamp.IsZero() {
-		return state.CurrentPnL >= InitialTakeProfit
+		return state.CurrentPnL >= InitialTakeProfitINR
 	}
 
-	minutesElapsed := state.LastTickTime.Sub(state.EntryTimestamp).Minutes()
-	dynamicTargetProfit := InitialTakeProfit - (minutesElapsed * DecayRatePerMinute)
+	marketTime := state.LastTickTime
+	durationAlive := marketTime.Sub(state.EntryTimestamp)
+	minutesElapsed := durationAlive.Minutes()
+
+	decayAmount := minutesElapsed * DecayRatePerMinute
+	dynamicTargetProfit := InitialTakeProfitINR - decayAmount
 
 	if dynamicTargetProfit < MinTakeProfitFloor {
 		dynamicTargetProfit = MinTakeProfitFloor
 	}
 
-	return state.CurrentPnL >= dynamicTargetProfit
+	if state.CurrentPnL >= dynamicTargetProfit {
+		return true
+	}
+
+	return false
 }
 
 func (s *VwapEfficiencyMomentumStrategy) CheckStopLoss(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
+	// Trailing Stop Logic
 	if state.PeakPnL >= TrailingPeakThreshold {
 		if state.CurrentPnL <= TrailingStopLoss {
 			return true
 		}
 	}
 
-	return state.CurrentPnL <= HardStopLossINR
+	if state.CurrentPnL <= HardStopLossINR {
+		return true
+	}
+
+	return false
+}
+
+func (s *VwapEfficiencyMomentumStrategy) OnEntryCommit(state *InstrumentState, symbol string) {
+	s.mu.Lock()
+	s.tradedStocks[symbol] = true
+	s.mu.Unlock()
+	logger.Infof("Strategy [%s] marked stock %s as traded for the session.", s.strategyName, symbol)
 }

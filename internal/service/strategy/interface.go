@@ -15,4 +15,6 @@ type Strategy interface {
 
 	// CheckStopLoss evaluates if your safety risk limits have been breached
 	CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool
+
+	OnEntryCommit(state *InstrumentState, symbol string)
 }

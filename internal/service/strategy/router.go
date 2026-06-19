@@ -34,3 +34,7 @@ func (r *TimeBasedRouter) CheckTakeProfit(state *InstrumentState, currentSide st
 func (r *TimeBasedRouter) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
 	return r.selectStrategy(state).CheckStopLoss(state, currentSide, averagePrice, netQty)
 }
+
+func (r *TimeBasedRouter) OnEntryCommit(state *InstrumentState, symbol string) {
+	r.selectStrategy(state).OnEntryCommit(state, symbol)
+}
