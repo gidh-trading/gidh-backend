@@ -8,10 +8,29 @@ import (
 )
 
 const (
-	InitialTakeProfitINR = 500.0
-	DecayRatePerMinute   = 15.0
-	MinTakeProfitFloor   = 300.0
-	HardStopLossINR      = -350.0
+	// Entry Window
+	StartTradingTime = 925 // 09:25
+	EndTradingTime   = 950 // 09:50
+
+	// Entry Thresholds
+	MinVolumeRank    = 7.0
+	MaxPriceRank     = 6.0
+	MinEfficiency    = 25.0
+	MinSlope         = 8.0
+	MinTimeAboveVWAP = 70.0
+	MaxTimeAboveVWAP = 30.0
+
+	// Risk Management
+	HardStopLossINR    = -350.0
+	InitialTakeProfit  = 500.0
+	DecayRatePerMinute = 15.0
+	MinTakeProfitFloor = 300.0
+
+	// Exit/Trailing Stop Parameters
+	FailureExitMinutes    = 6.0
+	FailureExitProfit     = 50.0
+	TrailingPeakThreshold = 200.0
+	TrailingStopLoss      = 25.0
 )
 
 type VwapEfficiencyMomentumStrategy struct {
@@ -22,7 +41,7 @@ type VwapEfficiencyMomentumStrategy struct {
 
 func NewVwapEfficiencyMomentumStrategy(configs map[string]*models.OptimizedStrategyConfig) *VwapEfficiencyMomentumStrategy {
 	return &VwapEfficiencyMomentumStrategy{
-		strategyName: "Algorithmic_Absorption_Scalp",
+		strategyName: "Algorithmic_Absorption_Scalp_Optimized",
 		configs:      configs,
 	}
 }
@@ -37,9 +56,7 @@ func (s *VwapEfficiencyMomentumStrategy) UpdateConfigs(newConfigs map[string]*mo
 	s.configs = newConfigs
 }
 
-// CheckEntry executes mathematically proven Absorption setups
 func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) string {
-
 	loc, err := time.LoadLocation("Asia/Kolkata")
 	if err != nil {
 		logger.Warnf("cannot load time location: %v", err)
@@ -49,58 +66,42 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	tf := "1m"
 	history, exists := state.BarHistory[tf]
 
-	// ✅ FIX: Check guard clauses FIRST before accessing array elements
-	if !exists || len(history) == 0 {
+	if !exists || len(history) < 2 {
 		return "HOLD"
 	}
 
-	// Now it is perfectly safe to read the last slice element
 	latestBar := history[len(history)-1]
+	prevBar := history[len(history)-2]
 
 	istTime := latestBar.Timestamp.In(loc)
 	currentHM := (istTime.Hour() * 100) + istTime.Minute()
 
-	if currentHM < 920 {
+	if currentHM < StartTradingTime || currentHM > EndTradingTime {
 		return "HOLD"
 	}
 
-	if currentHM > 1015 {
-		return "HOLD"
-	}
-
-	// Extract the raw features
 	volRank := latestBar.Analytics.VolumeRank
 	priceRank := latestBar.Analytics.PriceRank
 	efficiency := latestBar.Analytics.NetEfficiency
 	slope := latestBar.Analytics.NetEfficiencySlope
 	timePctVwap := latestBar.Analytics.TimePctAboveVwap
 
-	// 🛑 DATA RULE 1: If institutional volume isn't present, there is zero edge.
-	if volRank < 6 {
+	if volRank < MinVolumeRank || priceRank > MaxPriceRank {
 		return "HOLD"
 	}
 
-	// 🛑 DATA RULE 2: If the price has already expanded massively (Ignition), the pullback will
-	// hit our -400 INR stop loss >50% of the time. We ONLY trade coiled compression.
-	if priceRank > 4 {
-		return "HOLD"
+	// Bullish Absorption + Breakout
+	if efficiency >= MinEfficiency && slope >= MinSlope && latestBar.Close > latestBar.VWAP && timePctVwap > MinTimeAboveVWAP {
+		if latestBar.Close > prevBar.High {
+			return "GO_LONG"
+		}
 	}
 
-	// =========================================================================
-	// THE ABSORPTION COIL (The EV+ Setup)
-	// Institutional Volume + Small Price Expansion + High Efficiency
-	// =========================================================================
-
-	// BULLISH ABSORPTION:
-	// Buyers are passively absorbing sellers. Efficiency is highly positive despite price not expanding yet.
-	if efficiency > 20.0 && slope > 5.0 && latestBar.Close > latestBar.VWAP && timePctVwap > 60.0 {
-		return "GO_LONG"
-	}
-
-	// BEARISH ABSORPTION:
-	// Sellers are passively absorbing buyers. Efficiency is highly negative despite price not dropping yet.
-	if efficiency < -20.0 && slope < -5.0 && latestBar.Close < latestBar.VWAP && timePctVwap < 40.0 {
-		return "GO_SHORT"
+	// Bearish Absorption + Breakout
+	if efficiency <= -MinEfficiency && slope <= -MinSlope && latestBar.Close < latestBar.VWAP && timePctVwap < MaxTimeAboveVWAP {
+		if latestBar.Close < prevBar.Low {
+			return "GO_SHORT"
+		}
 	}
 
 	return "HOLD"
@@ -111,11 +112,9 @@ func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, curre
 		return "HOLD"
 	}
 
-	marketTime := state.LastTickTime
-	minutesElapsed := marketTime.Sub(state.EntryTimestamp).Minutes()
+	minutesElapsed := state.LastTickTime.Sub(state.EntryTimestamp).Minutes()
 
-	// If the trade hasn't moved into profit after 8 minutes, the absorption failed. Scratch the trade.
-	if minutesElapsed >= 8.0 && state.CurrentPnL < 100.0 {
+	if minutesElapsed >= FailureExitMinutes && state.CurrentPnL < FailureExitProfit {
 		return "EXIT_" + currentSide
 	}
 
@@ -124,41 +123,25 @@ func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, curre
 
 func (s *VwapEfficiencyMomentumStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
 	if state.EntryTimestamp.IsZero() {
-		return state.CurrentPnL >= InitialTakeProfitINR
+		return state.CurrentPnL >= InitialTakeProfit
 	}
 
-	marketTime := state.LastTickTime
-	durationAlive := marketTime.Sub(state.EntryTimestamp)
-	minutesElapsed := durationAlive.Minutes()
-
-	decayAmount := minutesElapsed * DecayRatePerMinute
-	dynamicTargetProfit := InitialTakeProfitINR - decayAmount
+	minutesElapsed := state.LastTickTime.Sub(state.EntryTimestamp).Minutes()
+	dynamicTargetProfit := InitialTakeProfit - (minutesElapsed * DecayRatePerMinute)
 
 	if dynamicTargetProfit < MinTakeProfitFloor {
 		dynamicTargetProfit = MinTakeProfitFloor
 	}
 
-	if state.CurrentPnL >= dynamicTargetProfit {
-		return true
-	}
-
-	return false
+	return state.CurrentPnL >= dynamicTargetProfit
 }
 
 func (s *VwapEfficiencyMomentumStrategy) CheckStopLoss(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
-	// 1. BREAKEVEN STOP LOSS: Protect profits
-	// If the trade went into solid profit (> 200 INR), move stop loss to breakeven to cover taxes/brokerage
-	if state.PeakPnL >= 200.0 {
-		// Assume ~150 INR covers brokerage/slippage
-		if state.CurrentPnL <= -150.0 {
-			return true // Exit before the massive -400 drop
+	if state.PeakPnL >= TrailingPeakThreshold {
+		if state.CurrentPnL <= TrailingStopLoss {
+			return true
 		}
 	}
 
-	// 2. THE MONETARY GUILLOTINE (Fallback)
-	if state.CurrentPnL <= HardStopLossINR {
-		return true
-	}
-
-	return false
+	return state.CurrentPnL <= HardStopLossINR
 }
