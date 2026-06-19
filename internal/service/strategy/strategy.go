@@ -28,9 +28,10 @@ type Engine struct {
 func NewEngine(
 	barLookback time.Duration,
 	profiles map[string]*models.InstrumentProfile,
+	stratConfigs map[string]*models.OptimizedStrategyConfig,
 	dbW *writer.DBWriter,
 ) *Engine {
-	masterStrat := NewVwapEfficiencyMomentumStrategy()
+	masterStrat := NewVwapEfficiencyMomentumStrategy(stratConfigs)
 	timeRouterWrapper := NewTimeBasedRouter(masterStrat)
 
 	return &Engine{
@@ -62,12 +63,12 @@ func (e *Engine) validateTimeAndCooldowns(state *InstrumentState, marketTime tim
 	// 2. 🛡️ HANDLE TIME CUTOFF AT OR AFTER 3:00 PM
 	if currentHM >= cutoffHM {
 		if !isFlat {
-			return false, true, currentHM
+			return false, true, currentHM // Signals shouldSquareOff = true to trigger panic exits
 		}
 		return false, false, currentHM
 	}
 
-	// 3. 🛡️ ENFORCE COOLDOWN BREAK AFTER EXIT
+	// 3. 🛡️ ENFORCE COOLDOWN BREAK AFTER EXIT (3 Minutes / 3 Candles breathing room)
 	if isFlat && !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 3*time.Minute {
 		return false, false, currentHM
 	}

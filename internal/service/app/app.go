@@ -200,8 +200,20 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
+	// 📊 NEW: Instantiate Strategy Config Reader and load optimized strategy matrix rows
+	// Using '1m' entry timeframe as baseline matching our momentum strategy parameters
+	configReader := reader.NewStrategyConfigReader(a.pool)
+	stratConfigs, err := configReader.FetchLatestConfigs(ctx)
+	if err != nil {
+		logger.Errorf("Failed to fetch latest optimized strategy configurations: %v", err)
+		// Optionally fallback to an empty map instead of failing initialization completely
+		stratConfigs = make(map[string]*models.OptimizedStrategyConfig)
+	} else {
+		logger.Infof("Successfully loaded %d dynamic optimized strategy parameters from database.", len(stratConfigs))
+	}
+
 	// Step A: Initialize the Strategy Engine universally across ALL runtime modes
-	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, a.DBWriter)
+	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, stratConfigs, a.DBWriter)
 
 	// Connect macro streaming listeners
 	barManager.MacroListener = a.StrategyEngine
