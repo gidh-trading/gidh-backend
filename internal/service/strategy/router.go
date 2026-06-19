@@ -1,5 +1,7 @@
 package strategy
 
+import "gidh-backend/internal/service/models"
+
 type TimeBasedRouter struct {
 	ledgerStrategy Strategy
 }
@@ -18,10 +20,10 @@ func (r *TimeBasedRouter) selectStrategy(state *InstrumentState) Strategy {
 	return r.ledgerStrategy
 }
 
-func (r *TimeBasedRouter) CheckEntry(state *InstrumentState) string {
+func (r *TimeBasedRouter) CheckEntry(state *InstrumentState, bar *models.Bar) string {
 	// Pass directly to the underlying ledger strategy card which manages its own
 	// chronological locks, opening ranges, and signed decay metrics safely.
-	return r.selectStrategy(state).CheckEntry(state)
+	return r.selectStrategy(state).CheckEntry(state, bar)
 }
 
 func (r *TimeBasedRouter) CheckExit(state *InstrumentState, currentSide string) string {

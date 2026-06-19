@@ -3,17 +3,23 @@ package models
 import "time"
 
 type BarAnalytics struct {
-	VolumeRank             int            `json:"volume_rank"`
-	TickRank               int            `json:"tick_rank"`
-	PriceRank              int            `json:"price_rank"`
-	RangeRank              int            `json:"range_rank"`
-	Direction              DirectionState `json:"direction"`
-	UpperWickRank          int            `json:"upper_wick_rank"`
-	LowerWickRank          int            `json:"lower_wick_rank"`
-	NetEfficiency          float64        `json:"net_efficiency"`
-	NetEfficiencySlope     float64        `json:"net_efficiency_slope"`
-	NormalizedVwapDistance float64        `json:"normalized_vwap_distance"`
-	TimePctAboveVwap       float64        `json:"time_pct_above_vwap"`
+	VolumeRank    int            `json:"volume_rank"`
+	TickRank      int            `json:"tick_rank"`
+	PriceRank     int            `json:"price_rank"`
+	RangeRank     int            `json:"range_rank"`
+	Direction     DirectionState `json:"direction"`
+	UpperWickRank int            `json:"upper_wick_rank"`
+	LowerWickRank int            `json:"lower_wick_rank"`
+
+	// --- The 4 Continuous Living States ---
+	NetPriceEfficiency    float64 `json:"net_price_efficiency"`    // State 1: Clean body expansion
+	NetVolumeEfficiency   float64 `json:"net_volume_efficiency"`   // State 2: Transaction participation depth
+	MeanReversionPressure float64 `json:"mean_reversion_pressure"` // State 3: Kinetic stretch / Overextended strain
+	AbsorptionForce       float64 `json:"absorption_force"`        // State 4: Wick rejection counter-pressure
+
+	// Retained helper distances if needed by structural components
+	NormalizedVwapDistance float64 `json:"normalized_vwap_distance"`
+	TimePctAboveVwap       float64 `json:"time_pct_above_vwap"`
 }
 
 type Bar struct {

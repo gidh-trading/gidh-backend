@@ -9,23 +9,33 @@ import (
 )
 
 const (
-	DecayConstant   = 0.90
+	DecayConstant   = 0.75
 	EmpiricalMaxCap = 150.0 // 📊 Standardizes real-world breakout velocity to a strict -100 to +100 scale
 )
 
 // EfficiencyLedger tracks structural buy/sell absorption metrics per timeframe
-type EfficiencyLedger struct {
-	BullEfficient float64
-	BearEfficient float64
-	LastUpdated   time.Time
+type ContinuousLivingLedger struct {
+	// State 1: Price Vector Balances
+	BullPriceState float64
+	BearPriceState float64
+
+	// State 2: Volume Vector Balances
+	BullVolumeState float64
+	BearVolumeState float64
+
+	// State 3: Mean Reversion Vector Balance
+	MeanReversionState float64
+
+	// State 4: Absorption/Rejection Vector Balance
+	AbsorptionState float64
+
+	LastUpdated time.Time
 }
 
-// TimeframeAnalyticsHistory isolates historical indicators and tracking memory per timeframe
 type TimeframeAnalyticsHistory struct {
-	Ledger               EfficiencyLedger
-	NetEfficiencyHistory []float64
-	TotalBars            int
-	TimePctAboveVwap     float64
+	Ledger           ContinuousLivingLedger
+	TotalBars        int
+	TimePctAboveVwap float64
 }
 
 type BarAnalyticsEngine struct {
@@ -55,9 +65,8 @@ func (bae *BarAnalyticsEngine) getOrInitTimeframeHistory(stockName string, timef
 	}
 
 	h := &TimeframeAnalyticsHistory{
-		NetEfficiencyHistory: make([]float64, 0),
-		TotalBars:            0,
-		TimePctAboveVwap:     0.0,
+		TotalBars:        0,
+		TimePctAboveVwap: 0.0,
 	}
 	bae.history[stockName][timeframe] = h
 	return h
@@ -92,24 +101,49 @@ func (bae *BarAnalyticsEngine) calculateTrajectorySlope(history []float64, liveP
 	return bae.calculateLinearRegressionSlope(projectedSeries)
 }
 
-// GetLiveSnapshot safely exposes current real-time mathematical states for live streaming egress/UI
-func (bae *BarAnalyticsEngine) GetLiveSnapshot(stockName string, timeframe string) (netEff float64, slope float64) {
+// GetLiveSnapshot safely exposes current real-time continuous mathematical states for live streaming egress/UI
+func (bae *BarAnalyticsEngine) GetLiveSnapshot(stockName string, timeframe string) (netPriceEff float64, netVolEff float64, meanRev float64, absForce float64) {
 	bae.mu.Lock()
 	defer bae.mu.Unlock()
 
+	// Guard condition: If history doesn't exist yet, return neutral standing states
 	if bae.history[stockName] == nil || bae.history[stockName][timeframe] == nil {
-		return 0.0, 0.0
+		return 0.0, 0.0, 0.0, 0.0
 	}
 
 	h := bae.history[stockName][timeframe]
 
-	// 🚀 Shared Helper Call: Resolves real-time live efficiency
-	netEff = bae.calculateNetEfficiency(h.Ledger.BullEfficient, h.Ledger.BearEfficient)
+	// -------------------------------------------------------------
+	// RESOLVE CURRENT REAL-TIME STANDARDIZED SCORES (-100 to +100)
+	// -------------------------------------------------------------
+	const StateMaxCap = 20.0 // Matches the normalization scale used in AnalyzeClose
 
-	// 🚀 Shared Helper Call: Project current real-time tick velocity onto the trajectory line
-	slope = bae.calculateTrajectorySlope(h.NetEfficiencyHistory, netEff, bae.getSlopeLookback(timeframe))
+	netPriceEff = ((h.Ledger.BullPriceState - h.Ledger.BearPriceState) / StateMaxCap) * 100.0
+	netVolEff = ((h.Ledger.BullVolumeState - h.Ledger.BearVolumeState) / StateMaxCap) * 100.0
+	meanRev = (h.Ledger.MeanReversionState / StateMaxCap) * 100.0
+	absForce = (h.Ledger.AbsorptionState / StateMaxCap) * 100.0
 
-	return netEff, slope
+	// Apply bounding safety-nets [-100.0, 100.0]
+	if netPriceEff > 100.0 {
+		netPriceEff = 100.0
+	} else if netPriceEff < -100.0 {
+		netPriceEff = -100.0
+	}
+	if netVolEff > 100.0 {
+		netVolEff = 100.0
+	} else if netVolEff < -100.0 {
+		netVolEff = -100.0
+	}
+	if meanRev > 100.0 {
+		meanRev = 100.0
+	} else if meanRev < -100.0 {
+		meanRev = -100.0
+	}
+	if absForce > 100.0 {
+		absForce = 100.0
+	}
+
+	return netPriceEff, netVolEff, meanRev, absForce
 }
 
 // AnalyzeTick updates continuous peak transaction intensities and real-time distance metrics
@@ -130,16 +164,16 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 // AnalyzeClose isolates features, runs momentum ledgers, constructs regressions, and triggers DB writing
 func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	bae.mu.Lock()
+	defer bae.mu.Unlock()
 
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 
 	tf := bar.Timeframe
 	h := bae.getOrInitTimeframeHistory(bar.StockName, tf)
 
-	// BAR CLOSE LEVEL: Percentage above VWAP tracking
+	// VWAP Basic Tracker maintenance
 	h.TotalBars++
 	totalTfBars := float64(h.TotalBars)
-
 	previousBarsAbove := (h.TimePctAboveVwap / 100.0) * (totalTfBars - 1.0)
 	if bar.Close > bar.VWAP {
 		previousBarsAbove += 1.0
@@ -147,44 +181,101 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	h.TimePctAboveVwap = (previousBarsAbove / totalTfBars) * 100.0
 	bar.Analytics.TimePctAboveVwap = h.TimePctAboveVwap
 
-	// MOMENTUM LEDGER PROCESSING
-	h.Ledger.BullEfficient *= DecayConstant
-	h.Ledger.BearEfficient *= DecayConstant
+	// -------------------------------------------------------------
+	// CONTINUOUS STATE STEP 1: DECAY THE LIVING LEDGER
+	// -------------------------------------------------------------
+	h.Ledger.BullPriceState *= DecayConstant
+	h.Ledger.BearPriceState *= DecayConstant
+	h.Ledger.BullVolumeState *= DecayConstant
+	h.Ledger.BearVolumeState *= DecayConstant
+	h.Ledger.MeanReversionState *= DecayConstant
+	h.Ledger.AbsorptionState *= DecayConstant
 	h.Ledger.LastUpdated = bar.Timestamp
 
-	energy := float64(bar.Analytics.VolumeRank * bar.Analytics.PriceRank)
-	delta := bar.Analytics.PriceRank - bar.Analytics.VolumeRank
+	// -------------------------------------------------------------
+	// CONTINUOUS STATE STEP 2: CALCULATE INSTANTANEOUS INPUT PULSES
+	// -------------------------------------------------------------
+	candleRange := bar.High - bar.Low
+	bodyToRangeRatio := 0.0
+	upperWickRatio := 0.0
+	lowerWickRatio := 0.0
 
+	if candleRange > 0 {
+		bodyToRangeRatio = math.Abs(bar.Close-bar.Open) / candleRange
+		upperWickRatio = (bar.High - math.Max(bar.Open, bar.Close)) / candleRange
+		lowerWickRatio = (math.Min(bar.Open, bar.Close) - bar.Low) / candleRange
+	}
+
+	// -------------------------------------------------------------
+	// CONTINUOUS STATE STEP 3: INJECT KINETIC PULSES
+	// -------------------------------------------------------------
 	switch bar.Analytics.Direction {
 	case models.DirStrongBullish, models.DirBullish:
-		if math.Abs(float64(delta)) <= 1 {
-			h.Ledger.BullEfficient += energy
-		} else {
-			h.Ledger.BullEfficient += energy * 0.5
-		}
+		// State 1 (Price): Full bodies boost price efficiency instantly
+		h.Ledger.BullPriceState += float64(bar.Analytics.PriceRank) * bodyToRangeRatio
+		// State 2 (Volume): Volume participation vector
+		h.Ledger.BullVolumeState += float64(bar.Analytics.VolumeRank)
+
+		// State 3 (Mean Reversion): Push state positive for green runs
+		h.Ledger.MeanReversionState += float64(bar.Analytics.PriceRank)
+
+		// State 4 (Absorption): If going up but leaving heavy upper wicks, spike absorption
+		h.Ledger.AbsorptionState += upperWickRatio * float64(bar.Analytics.RangeRank)
+
 	case models.DirStrongBearish, models.DirBearish:
-		if math.Abs(float64(delta)) <= 1 {
-			h.Ledger.BearEfficient += energy
-		} else {
-			h.Ledger.BearEfficient += energy * 0.5
-		}
+		// State 1 (Price)
+		h.Ledger.BearPriceState += float64(bar.Analytics.PriceRank) * bodyToRangeRatio
+		// State 2 (Volume)
+		h.Ledger.BearVolumeState += float64(bar.Analytics.VolumeRank)
+
+		// State 3 (Mean Reversion): Push state negative for red runs
+		h.Ledger.MeanReversionState -= float64(bar.Analytics.PriceRank)
+
+		// State 4 (Absorption): If flushing down but leaving heavy lower wicks (buying back), spike absorption
+		h.Ledger.AbsorptionState += lowerWickRatio * float64(bar.Analytics.RangeRank)
+
+	default: // Sideways / Neutral Dojis
+		// Dampen states during absolute gridlock or minimal price movement
+		h.Ledger.AbsorptionState += (upperWickRatio + lowerWickRatio) * 0.5
 	}
 
-	// 🚀 Shared Helper Call: Calculate Standardized Net Efficiency via Bounding
-	netEff := bae.calculateNetEfficiency(h.Ledger.BullEfficient, h.Ledger.BearEfficient)
+	// -------------------------------------------------------------
+	// CONTINUOUS STATE STEP 4: RESOLVE NET STANDARDIZED SCORES (-100 to +100)
+	// -------------------------------------------------------------
+	const StateMaxCap = 20.0 // Normalization scale for standalone vectors
 
-	h.NetEfficiencyHistory = append(h.NetEfficiencyHistory, netEff)
+	netPriceEff := ((h.Ledger.BullPriceState - h.Ledger.BearPriceState) / StateMaxCap) * 100.0
+	netVolEff := ((h.Ledger.BullVolumeState - h.Ledger.BearVolumeState) / StateMaxCap) * 100.0
+	meanRevPressure := (h.Ledger.MeanReversionState / StateMaxCap) * 100.0
+	absorptionForce := (h.Ledger.AbsorptionState / StateMaxCap) * 100.0
 
-	// Keep the lookback array constraint checked
-	lookbackLimit := bae.getSlopeLookback(tf)
-	if len(h.NetEfficiencyHistory) > lookbackLimit {
-		h.NetEfficiencyHistory = h.NetEfficiencyHistory[1:]
+	// Apply bounding limits [-100.0, 100.0] Safetynet
+	if netPriceEff > 100.0 {
+		netPriceEff = 100.0
+	} else if netPriceEff < -100.0 {
+		netPriceEff = -100.0
+	}
+	if netVolEff > 100.0 {
+		netVolEff = 100.0
+	} else if netVolEff < -100.0 {
+		netVolEff = -100.0
+	}
+	if meanRevPressure > 100.0 {
+		meanRevPressure = 100.0
+	} else if meanRevPressure < -100.0 {
+		meanRevPressure = -100.0
+	}
+	if absorptionForce > 100.0 {
+		absorptionForce = 100.0
 	}
 
-	// Stamp structural assignments cleanly onto the outbound bar object frame
-	bar.Analytics.NetEfficiency = netEff
-	bar.Analytics.NetEfficiencySlope = bae.calculateLinearRegressionSlope(h.NetEfficiencyHistory)
-	bae.mu.Unlock()
+	// -------------------------------------------------------------
+	// CONTINUOUS STATE STEP 5: OUTBOUND ASSIGNMENT
+	// -------------------------------------------------------------
+	bar.Analytics.NetPriceEfficiency = netPriceEff
+	bar.Analytics.NetVolumeEfficiency = netVolEff
+	bar.Analytics.MeanReversionPressure = meanRevPressure
+	bar.Analytics.AbsorptionForce = absorptionForce
 
 	if bae.dbWriter != nil {
 		bae.dbWriter.AddBar(*bar)
