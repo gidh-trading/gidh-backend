@@ -33,6 +33,18 @@ func (s *InstrumentState) Clone() *InstrumentState {
 	if s == nil {
 		return nil
 	}
+
+	// Create a deep copy of the BarHistory map
+	clonedHistory := make(map[string][]*models.Bar)
+	if s.BarHistory != nil {
+		for tf, bars := range s.BarHistory {
+			// Copy the slice slice reference (safe if slice elements aren't mutated concurrently)
+			clonedBars := make([]*models.Bar, len(bars))
+			copy(clonedBars, bars)
+			clonedHistory[tf] = clonedBars
+		}
+	}
+
 	return &InstrumentState{
 		StockName:          s.StockName,
 		Profile:            s.Profile,
@@ -48,6 +60,6 @@ func (s *InstrumentState) Clone() *InstrumentState {
 		EntryTimestamp:     s.EntryTimestamp,
 		LastExitSignalTime: s.LastExitSignalTime,
 		LastTickTime:       s.LastTickTime,
-		BarHistory:         s.BarHistory, // Direct read reference safe for indicators
+		BarHistory:         clonedHistory, // Now truly isolated and thread-safe
 	}
 }
