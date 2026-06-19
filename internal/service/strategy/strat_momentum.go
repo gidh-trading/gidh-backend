@@ -8,10 +8,10 @@ import (
 )
 
 const (
-	InitialTakeProfitINR = 500.0  // Lower ceiling to catch realistic momentum peaks
-	DecayRatePerMinute   = 15.0   // Faster decay forces the algo to take profit if momentum stalls
-	MinTakeProfitFloor   = 150.0  // Never exit a winner for less than 200
-	HardStopLossINR      = -400.0 // The Guillotine
+	InitialTakeProfitINR = 500.0
+	DecayRatePerMinute   = 15.0
+	MinTakeProfitFloor   = 300.0
+	HardStopLossINR      = -350.0
 )
 
 type VwapEfficiencyMomentumStrategy struct {
@@ -72,6 +72,7 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 	priceRank := latestBar.Analytics.PriceRank
 	efficiency := latestBar.Analytics.NetEfficiency
 	slope := latestBar.Analytics.NetEfficiencySlope
+	timePctVwap := latestBar.Analytics.TimePctAboveVwap
 
 	// 🛑 DATA RULE 1: If institutional volume isn't present, there is zero edge.
 	if volRank < 6 {
@@ -91,13 +92,13 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 
 	// BULLISH ABSORPTION:
 	// Buyers are passively absorbing sellers. Efficiency is highly positive despite price not expanding yet.
-	if efficiency > 20.0 && slope > 5.0 && latestBar.Close > latestBar.VWAP {
+	if efficiency > 20.0 && slope > 5.0 && latestBar.Close > latestBar.VWAP && timePctVwap > 60.0 {
 		return "GO_LONG"
 	}
 
 	// BEARISH ABSORPTION:
 	// Sellers are passively absorbing buyers. Efficiency is highly negative despite price not dropping yet.
-	if efficiency < -20.0 && slope < -5.0 && latestBar.Close < latestBar.VWAP {
+	if efficiency < -20.0 && slope < -5.0 && latestBar.Close < latestBar.VWAP && timePctVwap < 40.0 {
 		return "GO_SHORT"
 	}
 
@@ -105,6 +106,18 @@ func (s *VwapEfficiencyMomentumStrategy) CheckEntry(state *InstrumentState) stri
 }
 
 func (s *VwapEfficiencyMomentumStrategy) CheckExit(state *InstrumentState, currentSide string) string {
+	if state.EntryTimestamp.IsZero() {
+		return "HOLD"
+	}
+
+	marketTime := state.LastTickTime
+	minutesElapsed := marketTime.Sub(state.EntryTimestamp).Minutes()
+
+	// If the trade hasn't moved into profit after 8 minutes, the absorption failed. Scratch the trade.
+	if minutesElapsed >= 8.0 && state.CurrentPnL < 100.0 {
+		return "EXIT_" + currentSide
+	}
+
 	return "HOLD"
 }
 
@@ -131,12 +144,17 @@ func (s *VwapEfficiencyMomentumStrategy) CheckTakeProfit(state *InstrumentState,
 	return false
 }
 
-// CheckStopLoss now relies ENTIRELY on the monetary guillotine
 func (s *VwapEfficiencyMomentumStrategy) CheckStopLoss(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
-	// 1. THE MONETARY GUILLOTINE
-	// We removed the structural "Candle Low" stop loss because Python proved
-	// the absorption coil requires slight breathing room, and tight structural stops
-	// were yielding a 70% false-positive wick-out rate.
+	// 1. BREAKEVEN STOP LOSS: Protect profits
+	// If the trade went into solid profit (> 200 INR), move stop loss to breakeven to cover taxes/brokerage
+	if state.PeakPnL >= 200.0 {
+		// Assume ~150 INR covers brokerage/slippage
+		if state.CurrentPnL <= -150.0 {
+			return true // Exit before the massive -400 drop
+		}
+	}
+
+	// 2. THE MONETARY GUILLOTINE (Fallback)
 	if state.CurrentPnL <= HardStopLossINR {
 		return true
 	}
