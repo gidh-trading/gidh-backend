@@ -3,6 +3,7 @@ package reader
 import (
 	"context"
 	"gidh-backend/internal/service/models"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -109,17 +110,19 @@ func (ir *InstrumentReader) FetchConfigsByStockNames(ctx context.Context, stockN
 	return configs, nil
 }
 
-// FetchInstrumentProfiles retrieves complete parameter maps directly from the profile properties data table.
-func (ir *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[uint32]*models.InstrumentProfile, error) {
+// FetchInstrumentProfiles retrieves complete parameter maps directly from the profile properties data table
+// for a specific trading session date.
+func (ir *InstrumentReader) FetchInstrumentProfiles(ctx context.Context, targetDate time.Time) (map[uint32]*models.InstrumentProfile, error) {
 	profilesMap := make(map[uint32]*models.InstrumentProfile)
 
-	// Using the explicit inner join directly to resolve stock names at raw fetch speed
+	// Join on the static instrument_token, and filter by the daily snapshot date from instrument_profile
 	query := `
        SELECT ic.stock_name, ip.instrument_token, ip.bucket_size, ip.atr_14, ip.adr_pct, ip.adv_30d, ip.adv_val_30d 
        FROM instrument_profile ip
-       INNER JOIN instrument_configs ic ON ip.instrument_token = ic.instrument_token`
+       INNER JOIN instrument_configs ic ON ip.instrument_token = ic.instrument_token
+       WHERE ip.trading_date = $1::date`
 
-	rows, err := ir.pool.Query(ctx, query)
+	rows, err := ir.pool.Query(ctx, query, targetDate)
 	if err != nil {
 		return nil, err
 	}
@@ -127,7 +130,6 @@ func (ir *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[ui
 
 	for rows.Next() {
 		var p models.InstrumentProfile
-		// Scan the stock_name string right alongside the profile metrics
 		if err := rows.Scan(
 			&p.StockName,
 			&p.InstrumentToken,
@@ -141,6 +143,11 @@ func (ir *InstrumentReader) FetchInstrumentProfiles(ctx context.Context) (map[ui
 		}
 		profilesMap[p.InstrumentToken] = &p
 	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
 	return profilesMap, nil
 }
 

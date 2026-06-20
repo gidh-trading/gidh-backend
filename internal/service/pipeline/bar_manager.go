@@ -93,6 +93,10 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 		for _, stateMap := range timeframes {
 			cs := stateMap[token]
 			if cs != nil && cs.bar != nil {
+
+				// Dynamically populate real-time analytics calculations before dispatching packet
+				bm.analyticsEngine.PopulateLiveAnalytics(cs.bar)
+
 				// Broadcasts the fully updated structural models.Bar packet instantly down to the UI
 				bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
 					"type": "bar",

@@ -2,14 +2,13 @@ package strategy
 
 import (
 	"gidh-backend/internal/service/models"
-	"gidh-backend/pkg/logger"
 	"sync"
 )
 
 const (
 	// Entry Time Optimization Window
-	StartTradingTime = 925
-	EndTradingTime   = 1030
+	StartTradingTime = 918
+	EndTradingTime   = 1005
 
 	// 🛑 THE UNCROWDED FILTER ENCLOSURE
 	// We precisely isolate the stealth ignition zone (P50 to P75)
@@ -51,14 +50,12 @@ func (s *UncrowdedEfficiencyStrategy) CheckEntry(state *InstrumentState) string 
 	defer s.mu.RUnlock()
 
 	tf := "1m"
-	var bar, tMinusOneBar, tMinusTwoBar *models.Bar
+	var bar *models.Bar
 	if history, ok := state.BarHistory[tf]; ok && len(history) > 2 {
 		bar = history[len(history)-1]
-		tMinusOneBar = history[len(history)-2]
-		tMinusTwoBar = history[len(history)-3]
 	}
 
-	if bar == nil || tMinusOneBar == nil || tMinusTwoBar == nil {
+	if bar == nil {
 		return "HOLD"
 	}
 
@@ -72,47 +69,15 @@ func (s *UncrowdedEfficiencyStrategy) CheckEntry(state *InstrumentState) string 
 		return "HOLD"
 	}
 
-	// -------------------------------------------------------------
-	// THE DECOUPLED "UNCROWDED" ALGO LOGIC RULES
-	// -------------------------------------------------------------
+	volumeCommitmentValid := bar.Analytics.NetVolumeMood > 30.0 && bar.Analytics.NetVolumeMood < 80.0
 
-	// Rule A: Dynamic Stealth Volume Check
-	// Volume mood must show active steady buildup but can't be at crowded panic levels
-	volumeCommitmentValid := bar.Analytics.NetVolumeMood >= 15.0 && bar.Analytics.NetVolumeMood <= 50.0
+	vwapValid := bar.Analytics.NormalizedVwapDistance > 0.05 &&
+		bar.Analytics.NormalizedVwapDistance < 0.2 &&
+		bar.Analytics.TimePctAboveVwap > 90.0
 
-	// Rule B: Pure Low-Friction Price Expansion Velocity
-	// Because it's not crowded, price should be highly efficient, displacing cleanly upwards
-	priceVelocityValid := bar.Analytics.NetPriceMood >= 30.0 && bar.Analytics.NetPriceMood <= 70.0
+	directionValid := bar.Analytics.Direction == models.DirBullish || bar.Analytics.Direction == models.DirStrongBullish
 
-	// Rule C: The "Path of Least Resistance" Divergence Filter
-	// In an uncrowded breakout, Price Efficiency MUST outpace Volume Commitment.
-	// If VolumeMood > PriceMood, it means heavy crowded churning/absorption—We DO NOT buy that.
-	isLowFrictionIgnition := bar.Analytics.NetPriceMood > bar.Analytics.NetVolumeMood
-
-	// Rule D: Anchored Structural Support Floor
-	// Price must be cleanly drifting and holding above the volume-weighted baseline
-	vwapValid := bar.Close > bar.VWAP &&
-		bar.Analytics.NormalizedVwapDistance < 0.20 &&
-		tMinusOneBar.Close > tMinusOneBar.VWAP
-
-	// Rule E: Order Flow Execution State
-	// Sideways or absorption states are completely filtered out. We want standard, clean progression.
-	directionValid := bar.Analytics.Direction == models.DirBullish
-
-	// Rule F: Hard Rank Filters (Enforces your precise 4-5 uncrowded target zone)
-	rankValid := (bar.Analytics.VolumeRank >= MinVolumeRank && bar.Analytics.VolumeRank <= MaxVolumeRank) &&
-		(bar.Analytics.PriceRank >= MinPriceRank && bar.Analytics.PriceRank <= MaxPriceRank)
-
-	// Trigger Long scalp entry when the uncrowded parameters hit perfectly
-	if volumeCommitmentValid && priceVelocityValid && isLowFrictionIgnition && vwapValid && directionValid && rankValid {
-		logger.Infof("[UNCROWDED-ENTRY] Stealth Long Triggered for %s. VolRank: %d, PriceRank: %d | NetPriceMood: %.2f, NetVolumeMood: %.2f (Friction Delta: %.2f)",
-			bar.StockName,
-			bar.Analytics.VolumeRank,
-			bar.Analytics.PriceRank,
-			bar.Analytics.NetPriceMood,
-			bar.Analytics.NetVolumeMood,
-			bar.Analytics.NetPriceMood-bar.Analytics.NetVolumeMood,
-		)
+	if volumeCommitmentValid && vwapValid && directionValid {
 		return "GO_LONG"
 	}
 

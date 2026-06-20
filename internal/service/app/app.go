@@ -138,7 +138,7 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 		a.instrumentList, _ = instReader.FetchBacktestConfigs(ctx)
 	}
 
-	profilesMap, err := instReader.FetchInstrumentProfiles(ctx)
+	profilesMap, err := instReader.FetchInstrumentProfiles(ctx, targetDate)
 	if err != nil {
 		logger.Errorf("FAILED TO LOAD INSTRUMENT PROFILES: %v", err)
 		profilesMap = make(map[uint32]*models.InstrumentProfile)

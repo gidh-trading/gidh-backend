@@ -1,7 +1,6 @@
 create table public.instrument_configs
 (
     instrument_token integer               not null primary key,
-    trading_date         DATE    NOT NULL,
     stock_name       text                  not null,
     is_backtest      boolean default false not null
 );
@@ -29,7 +28,7 @@ CREATE TABLE public.instrument_profile
 
 
 insert into public.instrument_configs (instrument_token, stock_name, is_backtest)
-values (232961, 'EICHERMOT', false),
+values (232961, 'EICHERMOT', true),
        (2941697, 'APARINDS', false),
        (140033, 'BRITANNIA', false),
        (900609, 'TORNTPHARM', false),
@@ -60,4 +59,20 @@ values (232961, 'EICHERMOT', false),
        (345089, 'HEROMOTOCO', false),
        (4296449, 'GVT&D', false),
        (502785, 'TRENT', false),
-       (303361, 'AMBER', true);
+       (303361, 'AMBER', false),
+       (256265, 'NIFTY50', false);
+
+
+CREATE VIEW public.instrument_full_summary AS
+SELECT
+    c.instrument_token,
+    c.stock_name,
+    p.trading_date,
+    p.bucket_size,
+    p.atr_14,
+    p.adr_pct,
+    p.adv_30d,
+    p.adv_val_30d
+FROM public.instrument_configs c
+         LEFT JOIN public.instrument_profile p
+                   ON c.instrument_token = p.instrument_token;
