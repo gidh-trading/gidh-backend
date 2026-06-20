@@ -11,6 +11,8 @@ type BarAnalytics struct {
 	UpperWickRank int            `json:"upper_wick_rank"`
 	LowerWickRank int            `json:"lower_wick_rank"`
 
+	VolumeStrength float64 `json:"volume_strength"`
+
 	// --- The 4 Continuous Living States ---
 	NetPriceEfficiency    float64 `json:"net_price_efficiency"`    // State 1: Clean body expansion
 	NetVolumeEfficiency   float64 `json:"net_volume_efficiency"`   // State 2: Transaction participation depth

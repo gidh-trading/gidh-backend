@@ -9,8 +9,8 @@ import (
 )
 
 const (
-	DecayConstant    = 0.80
-	StructuralMaxCap = 75.0 // 🎯 PERFECT ALIGNMENT: Max State (75) / Cap (75) * 100 = 100%
+	DecayConstant    = 0.90 // 🔄 Updated to 50% decay (faster decay/higher decay factor)
+	StructuralMaxCap = 75.0
 	MeanRevMaxCap    = 75.0
 )
 
@@ -34,15 +34,10 @@ type ContinuousLivingLedger struct {
 }
 
 type TimeframeAnalyticsHistory struct {
-	Ledger           ContinuousLivingLedger
-	TotalBars        int
-	TimePctAboveVwap float64
-
-	// 📊 Running stats for Adaptive 3-Sigma Capping
-	MeanPriceDiff float64 // Running mean of (BullPriceState - BearPriceState)
-	VarPriceDiff  float64 // Running variance of price state differential
-	MeanVolDiff   float64 // Running mean of (BullVolumeState - BearVolumeState)
-	VarVolDiff    float64 // Running variance of volume state differential
+	Ledger            ContinuousLivingLedger
+	TotalBars         int
+	TimePctAboveVwap  float64
+	RollingVolumeMean float64
 }
 
 type BarAnalyticsEngine struct {
@@ -168,6 +163,20 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	// VWAP Basic Tracker maintenance
 	h.TotalBars++
 	totalTfBars := float64(h.TotalBars)
+
+	if h.RollingVolumeMean == 0 {
+		h.RollingVolumeMean = bar.Volume
+	} else {
+		// Simple running moving average update
+		h.RollingVolumeMean = ((h.RollingVolumeMean * (totalTfBars - 1)) + bar.Volume) / totalTfBars
+	}
+
+	volumeStrength := 1.0
+	if h.RollingVolumeMean > 0 {
+		volumeStrength = bar.Volume / h.RollingVolumeMean
+	}
+	bar.Analytics.VolumeStrength = volumeStrength
+
 	previousBarsAbove := (h.TimePctAboveVwap / 100.0) * (totalTfBars - 1.0)
 	if bar.Close > bar.VWAP {
 		previousBarsAbove += 1.0
@@ -203,47 +212,33 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	// -------------------------------------------------------------
 	// CONTINUOUS STATE STEP 3: INJECT KINETIC PULSES WITH NON-LINEAR WEIGHTS
 	// -------------------------------------------------------------
-	priceWeight := bae.getRankWeight(bar.Analytics.PriceRank)
-	volumeWeight := bae.getRankWeight(bar.Analytics.VolumeRank)
+	priceWeight := bae.getRankWeight(bar.Analytics.PriceRank) * bodyToRangeRatio
+	volumeWeight := bae.getRankWeight(bar.Analytics.VolumeRank) * volumeStrength
 
 	dir := bar.Analytics.Direction
 	switch {
 	// 🟢 Standard Bullish Trend: Add strictly to the Bull vectors
 	case dir == models.DirStrongBullish || dir == models.DirBullish:
-		h.Ledger.BullPriceState += priceWeight * bodyToRangeRatio
+		h.Ledger.BullPriceState += priceWeight
 		h.Ledger.BullVolumeState += volumeWeight
 		h.Ledger.MeanReversionState += priceWeight
 		h.Ledger.AbsorptionState += upperWickRatio * 100.0
 
 	// 🔴 Standard Bearish Trend: Add strictly to the Bear vectors
 	case dir == models.DirStrongBearish || dir == models.DirBearish:
-		h.Ledger.BearPriceState += priceWeight * bodyToRangeRatio
+		h.Ledger.BearPriceState += priceWeight
 		h.Ledger.BearVolumeState += volumeWeight
 		h.Ledger.MeanReversionState -= priceWeight
 		h.Ledger.AbsorptionState += lowerWickRatio * 100.0
 
 	// 🩵 BULLISH ABSORPTION: Iceberg selling halts upward price progress
-	// Action: Split the price weight evenly on both sides to neutralize net efficiency
-	case dir == "BULLISH_ABSORPTION":
-		h.Ledger.BullVolumeState += volumeWeight * 0.5
-		h.Ledger.BearVolumeState += volumeWeight * 0.5
-
-		// 🎯 FIX: Apply the price weight to BOTH sides as a friction clamp
-		h.Ledger.BullPriceState += (priceWeight * bodyToRangeRatio) * 0.5
-		h.Ledger.BearPriceState += (priceWeight * bodyToRangeRatio) * 0.5
-
+	// Action: No efficiency is added. Drop price and volume contributions completely.
+	case dir == models.DirBullishAbsorption:
 		h.Ledger.AbsorptionState += upperWickRatio * 100.0
 
 	// 🩷 BEARISH ABSORPTION: Iceberg buying halts downward price progress
-	// Action: Split the price weight evenly on both sides to neutralize net efficiency
-	case dir == "BEARISH_ABSORPTION":
-		h.Ledger.BullVolumeState += volumeWeight * 0.5
-		h.Ledger.BearVolumeState += volumeWeight * 0.5
-
-		// 🎯 FIX: Apply the price weight to BOTH sides as a friction clamp
-		h.Ledger.BullPriceState += (priceWeight * bodyToRangeRatio) * 0.5
-		h.Ledger.BearPriceState += (priceWeight * bodyToRangeRatio) * 0.5
-
+	// Action: No efficiency is added. Drop price and volume contributions completely.
+	case dir == models.DirBearishAbsorption:
 		h.Ledger.AbsorptionState += lowerWickRatio * 100.0
 
 	default: // True Sideways / Neutral Dojis
