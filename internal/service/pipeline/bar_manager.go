@@ -93,16 +93,6 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 		for _, stateMap := range timeframes {
 			cs := stateMap[token]
 			if cs != nil && cs.bar != nil {
-				if bm.analyticsEngine != nil {
-					netPriceEff, netVolEff, meanRev, absForce := bm.analyticsEngine.GetLiveSnapshot(cs.bar.StockName, cs.bar.Timeframe)
-
-					// Map parameters cleanly to our new analytical model frame properties
-					cs.bar.Analytics.NetPriceEfficiency = netPriceEff
-					cs.bar.Analytics.NetVolumeEfficiency = netVolEff
-					cs.bar.Analytics.MeanReversionPressure = meanRev
-					cs.bar.Analytics.AbsorptionForce = absForce
-				}
-
 				// Broadcasts the fully updated structural models.Bar packet instantly down to the UI
 				bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
 					"type": "bar",

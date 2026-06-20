@@ -31,7 +31,7 @@ func NewEngine(
 	stratConfigs map[string]*models.OptimizedStrategyConfig,
 	dbW *writer.DBWriter,
 ) *Engine {
-	masterStrat := NewVwapEfficiencyMomentumStrategy(stratConfigs)
+	masterStrat := NewUncrowdedEfficiencyStrategy(stratConfigs)
 	timeRouterWrapper := NewTimeBasedRouter(masterStrat)
 
 	return &Engine{

@@ -11,13 +11,9 @@ type BarAnalytics struct {
 	UpperWickRank int            `json:"upper_wick_rank"`
 	LowerWickRank int            `json:"lower_wick_rank"`
 
-	VolumeStrength float64 `json:"volume_strength"`
-
-	// --- The 4 Continuous Living States ---
-	NetPriceEfficiency    float64 `json:"net_price_efficiency"`    // State 1: Clean body expansion
-	NetVolumeEfficiency   float64 `json:"net_volume_efficiency"`   // State 2: Transaction participation depth
-	MeanReversionPressure float64 `json:"mean_reversion_pressure"` // State 3: Kinetic stretch / Overextended strain
-	AbsorptionForce       float64 `json:"absorption_force"`        // State 4: Wick rejection counter-pressure
+	// --- Decoupled & Bounded Order Flow Metrics (-100 to +100) ---
+	NetVolumeMood float64 `json:"net_volume_mood"` // Volume commitment score
+	NetPriceMood  float64 `json:"net_price_mood"`  // Price displacement velocity
 
 	// Retained helper distances if needed by structural components
 	NormalizedVwapDistance float64 `json:"normalized_vwap_distance"`
