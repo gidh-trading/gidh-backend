@@ -7,17 +7,8 @@ import (
 
 const (
 	// Entry Time Optimization Window
-	StartTradingTime = 918
+	StartTradingTime = 920
 	EndTradingTime   = 1005
-
-	// 🛑 THE UNCROWDED FILTER ENCLOSURE
-	// We precisely isolate the stealth ignition zone (P50 to P75)
-	MinVolumeRank = 4
-	MaxVolumeRank = 5
-
-	// Price must show real, validated structural displacement (P50 to P90)
-	MinPriceRank = 4
-	MaxPriceRank = 6
 
 	// Risk Engine Parameters
 	HardStopLossINR      = -400.0
@@ -69,15 +60,15 @@ func (s *UncrowdedEfficiencyStrategy) CheckEntry(state *InstrumentState) string 
 		return "HOLD"
 	}
 
-	volumeCommitmentValid := bar.Analytics.NetVolumeMood > 30.0 && bar.Analytics.NetVolumeMood < 80.0
+	volumeCommitmentValid := bar.Analytics.NetVolumeMood > 25.0 && bar.Analytics.NetVolumeMood < 80.0
+	priceMovementValid := bar.Analytics.NetPriceMood > 10.0 && bar.Analytics.NetPriceMood < 50.0
 
-	vwapValid := bar.Analytics.NormalizedVwapDistance > 0.05 &&
-		bar.Analytics.NormalizedVwapDistance < 0.2 &&
-		bar.Analytics.TimePctAboveVwap > 90.0
+	vwapValid := bar.Analytics.NormalizedVwapDistance > 0.1 &&
+		bar.Analytics.NormalizedVwapDistance < 0.2 && bar.Analytics.TimePctAboveVwap < 95
 
 	directionValid := bar.Analytics.Direction == models.DirBullish || bar.Analytics.Direction == models.DirStrongBullish
 
-	if volumeCommitmentValid && vwapValid && directionValid {
+	if volumeCommitmentValid && priceMovementValid && vwapValid && directionValid {
 		return "GO_LONG"
 	}
 
