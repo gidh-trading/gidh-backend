@@ -31,8 +31,8 @@ func NewEngine(
 	stratConfigs map[string]*models.OptimizedStrategyConfig,
 	dbW *writer.DBWriter,
 ) *Engine {
-	masterStrat := NewUncrowdedEfficiencyStrategy(stratConfigs)
-	timeRouterWrapper := NewTimeBasedRouter(masterStrat)
+	combinedMoodStrat := NewCombinedMoodStrategy(stratConfigs)
+	timeRouterWrapper := NewTimeBasedRouter(combinedMoodStrat)
 
 	return &Engine{
 		Registry:       make(map[string]*InstrumentState),

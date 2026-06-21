@@ -1,13 +1,13 @@
 package strategy
 
 type TimeBasedRouter struct {
-	ledgerStrategy Strategy
+	combinedMoodStrategy Strategy
 }
 
 // NewTimeBasedRouter instantiates the system router wrapped around a single strategy core.
-func NewTimeBasedRouter(ledger Strategy) *TimeBasedRouter {
+func NewTimeBasedRouter(combinedMoodStrat Strategy) *TimeBasedRouter {
 	return &TimeBasedRouter{
-		ledgerStrategy: ledger,
+		combinedMoodStrategy: combinedMoodStrat,
 	}
 }
 
@@ -15,7 +15,7 @@ func (r *TimeBasedRouter) Name() string { return "Institutional_Ledger_PassThrou
 
 func (r *TimeBasedRouter) selectStrategy(state *InstrumentState) Strategy {
 	// Directly pass through to our single institutional ledger strategy card
-	return r.ledgerStrategy
+	return r.combinedMoodStrategy
 }
 
 func (r *TimeBasedRouter) CheckEntry(state *InstrumentState) string {
