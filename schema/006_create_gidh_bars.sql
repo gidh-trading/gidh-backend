@@ -69,3 +69,5 @@ CREATE INDEX IF NOT EXISTS idx_gidh_bars_jsonb_peak_vol
 -- 🔥 Performance Expression Index: Instant filtering for compressed or institutional absorption tracking states
 CREATE INDEX IF NOT EXISTS idx_gidh_bars_jsonb_absorption_seek
     ON gidh_bars (((analytics->>'volume_rank')::integer), ((analytics->>'price_rank')::integer), timestamp DESC);
+
+
