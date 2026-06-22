@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"math"
 	"time"
 
 	"gidh-backend/internal/service/models"
@@ -127,4 +128,63 @@ func (e *Engine) logStrategyDecision(state *InstrumentState, symbol string, acti
 	if action == "EXIT_LONG" || action == "EXIT_SHORT" {
 		state.CurrentTradeID = ""
 	}
+}
+
+// CheckTakeProfitWithDecay evaluates if the current PnL meets a time-decaying target.
+// - baseTakeProfit: The initial profit target (e.g., 500.0 or 600.0 INR)
+// - decayPerMinute: The amount of INR subtracted from the profit target for every minute elapsed.
+// - minTakeProfit: The lower bound/floor target to ensure it never decays to zero or negative.
+func CheckTakeProfitWithDecay(state *InstrumentState, baseTakeProfit float64, decayPerMinute float64, minTakeProfit float64) bool {
+	// Fallback if timestamps are missing
+	if state.EntryTimestamp.IsZero() || state.LastTickTime.IsZero() {
+		return state.CurrentPnL >= baseTakeProfit
+	}
+
+	// Calculate exact minutes elapsed since entry
+	elapsedDuration := state.LastTickTime.Sub(state.EntryTimestamp)
+	minutesElapsed := elapsedDuration.Minutes()
+
+	// Calculate the dynamically reduced profit target
+	decayedTarget := baseTakeProfit - (minutesElapsed * decayPerMinute)
+
+	// Enforce the baseline floor value
+	if decayedTarget < minTakeProfit {
+		decayedTarget = minTakeProfit
+	}
+
+	return state.CurrentPnL >= decayedTarget
+}
+
+// CheckTakeProfitWithIntervalDecay evaluates if the current PnL meets a stepped, time-decaying target.
+// - baseTakeProfit: The initial profit target (e.g., 500.0 or 600.0 INR)
+// - decayPerInterval: The amount of INR subtracted per step (e.g., 100.0 INR)
+// - intervalDuration: The length of each decay step (e.g., 30 * time.Minute)
+// - minTakeProfit: The absolute lowest the profit target can fall (floor cap)
+func CheckTakeProfitWithIntervalDecay(
+	state *InstrumentState,
+	baseTakeProfit float64,
+	decayPerInterval float64,
+	intervalDuration time.Duration,
+	minTakeProfit float64,
+) bool {
+	// Fallback if timestamps are missing
+	if state.EntryTimestamp.IsZero() || state.LastTickTime.IsZero() {
+		return state.CurrentPnL >= baseTakeProfit
+	}
+
+	// Calculate exact duration elapsed since entry
+	elapsedDuration := state.LastTickTime.Sub(state.EntryTimestamp)
+
+	// Determine how many full intervals have passed (e.g., 45 mins / 30 mins = 1.5 -> math.Floor = 1 interval)
+	intervalsPassed := math.Floor(elapsedDuration.Seconds() / intervalDuration.Seconds())
+
+	// Calculate the dynamically reduced profit target
+	decayedTarget := baseTakeProfit - (intervalsPassed * decayPerInterval)
+
+	// Enforce the floor value so profit requirements never drop beneath safety limits
+	if decayedTarget < minTakeProfit {
+		decayedTarget = minTakeProfit
+	}
+
+	return state.CurrentPnL >= decayedTarget
 }

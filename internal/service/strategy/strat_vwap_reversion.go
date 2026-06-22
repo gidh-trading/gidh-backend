@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"sync"
+	"time"
 )
 
 const (
@@ -107,7 +108,8 @@ func (s *VWAPPercentileReversionStrategy) CheckExit(state *InstrumentState, curr
 }
 
 func (s *VWAPPercentileReversionStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
-	return state.CurrentPnL >= ReversionTakeProfitINR
+	// Starts at 600.0, subtracts 100.0 for every completed 30-minute interval, caps floor at 300.0
+	return CheckTakeProfitWithIntervalDecay(state, ReversionTakeProfitINR, 100.0, 30*time.Minute, 300.0)
 }
 
 func (s *VWAPPercentileReversionStrategy) CheckStopLoss(state *InstrumentState, currentSide string, avgPrice float64, netQty int) bool {
