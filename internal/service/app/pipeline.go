@@ -18,6 +18,7 @@ type Pipeline struct {
 	lastVolRankMap  map[uint32]int // ⚡ Added for velocity tracking
 	lastTickRankMap map[uint32]int // ⚡ Added for velocity tracking
 	indexMu         sync.Mutex
+	tokenLocks      [256]sync.Mutex
 	AlgoAgent       interface {
 		ProcessSequentialTick(enrichedTick *models.EnrichedTick)
 	}
@@ -44,6 +45,10 @@ func NewPipeline(
 
 // Process implements the stream.TickProcessor interface
 func (p *Pipeline) Process(rawTick models.TickData) error {
+
+	shardIdx := rawTick.InstrumentToken % 256
+	p.tokenLocks[shardIdx].Lock()
+	defer p.tokenLocks[shardIdx].Unlock()
 
 	// 1. RAW STRUCT ARCHIVE WRITER STORAGE
 	if p.dbWriter != nil {
