@@ -85,7 +85,7 @@ func (s *CombinedMoodStrategy) evaluateLongEntry(latestBar *models.Bar) bool {
 	vwapTime := latestBar.Analytics.TimePctAboveVwap
 
 	isRankValid := volumeRank > 3 && volumeRank < 7 && priceRank > 3 && priceRank < 7
-	validCombinedMood := combinedMood > 70.0 && combinedMood < 120.0 && volumeMood > priceMood
+	validCombinedMood := combinedMood > 70.0 && combinedMood < 130.0 && volumeMood > priceMood
 	isBullish := latestBar.Analytics.Direction == models.DirBullish || latestBar.Analytics.Direction == models.DirStrongBullish
 	isVwapValid := vwapDistance < 0.2 && vwapDistance > 0.09 && vwapTime > 70
 
@@ -105,7 +105,7 @@ func (s *CombinedMoodStrategy) evaluateShortEntry(latestBar *models.Bar) bool {
 
 	// Place matching short-side structural checks here:
 	isRankValid := volumeRank > 3 && volumeRank < 7 && priceRank > 3 && priceRank < 7
-	validCombinedMood := combinedMood < -70.0 && combinedMood > -120.0 && volumeMood < priceMood
+	validCombinedMood := combinedMood < -70.0 && combinedMood > -130.0 && volumeMood < priceMood
 	isBearish := latestBar.Analytics.Direction == models.DirBearish || latestBar.Analytics.Direction == models.DirStrongBearish
 	isVwapValid := vwapDistance > -0.2 && vwapDistance < 0.09 && vwapTime < 30
 
