@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 
 	"gidh-backend/internal/service/app"
@@ -13,6 +14,8 @@ import (
 )
 
 func main() {
+
+	runtime.GOMAXPROCS(1)
 
 	// Load environment variables
 	if err := env.Load(".env"); err != nil {
