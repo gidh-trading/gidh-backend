@@ -1,10 +1,10 @@
 package pipeline
 
 import (
+	"time"
+
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
-	"sync"
-	"time"
 )
 
 const (
@@ -14,15 +14,11 @@ const (
 
 // ContinuousLivingLedger tracks un-netted structural order flow states
 type ContinuousLivingLedger struct {
-	// State 1: Pure Price Vector Balances
-	BullPriceState float64
-	BearPriceState float64
-
-	// State 2: Pure Volume Vector Balances
+	BullPriceState  float64
+	BearPriceState  float64
 	BullVolumeState float64
 	BearVolumeState float64
-
-	LastUpdated time.Time
+	LastUpdated     time.Time
 }
 
 type TimeframeAnalyticsHistory struct {
@@ -32,28 +28,23 @@ type TimeframeAnalyticsHistory struct {
 	RollingVolumeMean float64
 }
 
+// BarAnalyticsEngine implements the stateless calculations layer across multi-thread pipelines.
 type BarAnalyticsEngine struct {
 	dnaMap   map[uint32]*models.MarketDNA
 	profiles map[uint32]*models.InstrumentProfile
-	history  map[string]map[string]*TimeframeAnalyticsHistory // stock -> timeframe -> history
 	dbWriter *writer.DBWriter
-	mu       sync.Mutex
 }
 
 func NewBarAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, profiles map[uint32]*models.InstrumentProfile, dbW *writer.DBWriter) *BarAnalyticsEngine {
 	return &BarAnalyticsEngine{
 		dnaMap:   dnaMap,
 		profiles: profiles,
-		history:  make(map[string]map[string]*TimeframeAnalyticsHistory),
 		dbWriter: dbW,
 	}
 }
 
 // AnalyzeTick updates continuous peak transaction intensities and real-time distance metrics
 func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.EnrichedTick) {
-	bae.mu.Lock()
-	defer bae.mu.Unlock()
-
 	if tick.Enrichment.VolumeRank > bar.Analytics.VolumeRank {
 		bar.Analytics.VolumeRank = tick.Enrichment.VolumeRank
 	}
@@ -66,14 +57,8 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 }
 
 // AnalyzeClose processes the macro metrics ledger steps on bar expiration
-func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
-	bae.mu.Lock()
-	defer bae.mu.Unlock()
-
+func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyticsHistory) {
 	bae.computeMacroTimeframeRanksAndDirection(bar)
-
-	tf := bar.Timeframe
-	h := bae.getOrInitTimeframeHistory(bar.StockName, tf)
 
 	h.TotalBars++
 	totalTfBars := float64(h.TotalBars)
@@ -101,7 +86,7 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 	h.Ledger.LastUpdated = bar.Timestamp
 
 	// -------------------------------------------------------------
-	// CONTINUOUS STATE STEP 2: METRIC EFFICIENCY (VIA SHARED HELPER)
+	// CONTINUOUS STATE STEP 2: METRIC EFFICIENCY
 	// -------------------------------------------------------------
 	rawVolEff, rawPriceEff := bae.calculateProfileBlendedEfficiencies(bar)
 
@@ -154,18 +139,9 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar) {
 }
 
 // PopulateLiveAnalytics evaluates real-time, intermediate ranks, directions, and continuous moods
-// for an active unclosed bar without modifying permanent historical analytics tracking history.
-func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar) {
-	bae.mu.Lock()
-	defer bae.mu.Unlock()
-
-	// 1. Calculate standard real-time percentile ranks and directions based on current state parameters
+func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *TimeframeAnalyticsHistory) {
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 
-	tf := bar.Timeframe
-	h := bae.getOrInitTimeframeHistory(bar.StockName, tf)
-
-	// 2. Compute a real-time estimation of TimePctAboveVwap
 	totalTfBars := float64(h.TotalBars + 1)
 	previousBarsAbove := (h.TimePctAboveVwap / 100.0) * float64(h.TotalBars)
 	if bar.Close > bar.VWAP {
@@ -173,12 +149,8 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar) {
 	}
 	bar.Analytics.TimePctAboveVwap = (previousBarsAbove / totalTfBars) * 100.0
 
-	// 3. Extract efficiency parameters using the shared context calculation helper
 	rawVolEff, rawPriceEff := bae.calculateProfileBlendedEfficiencies(bar)
 
-	// -------------------------------------------------------------
-	// LIVE ESTIMATION: SIMULATE LEDGER INJECTION ON DECAYED BLOCKS
-	// -------------------------------------------------------------
 	liveBullPrice := h.Ledger.BullPriceState * DecayConstant
 	liveBearPrice := h.Ledger.BearPriceState * DecayConstant
 	liveBullVol := h.Ledger.BullVolumeState * DecayConstant
@@ -212,9 +184,6 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar) {
 		liveBearPrice += 1.0 * rawPriceEff
 	}
 
-	// -------------------------------------------------------------
-	// LIVE ESTIMATION: CALCULATE INTERMEDIATE OUTPUTS
-	// -------------------------------------------------------------
 	bar.Analytics.NetPriceMood = bae.calculateNetEfficiency(liveBullPrice, liveBearPrice, TheoreticalMaxCeiling)
 	bar.Analytics.NetVolumeMood = bae.calculateNetEfficiency(liveBullVol, liveBearVol, TheoreticalMaxCeiling)
 }

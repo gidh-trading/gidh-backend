@@ -5,23 +5,6 @@ import (
 	"math"
 )
 
-func (bae *BarAnalyticsEngine) getOrInitTimeframeHistory(stockName string, timeframe string) *TimeframeAnalyticsHistory {
-	if bae.history[stockName] == nil {
-		bae.history[stockName] = make(map[string]*TimeframeAnalyticsHistory)
-	}
-
-	if h, exists := bae.history[stockName][timeframe]; exists {
-		return h
-	}
-
-	h := &TimeframeAnalyticsHistory{
-		TotalBars:        0,
-		TimePctAboveVwap: 0.0,
-	}
-	bae.history[stockName][timeframe] = h
-	return h
-}
-
 func (bae *BarAnalyticsEngine) calculateNetEfficiency(bull, bear, maxCap float64) float64 {
 	if maxCap <= 0 {
 		maxCap = 1.0
@@ -29,7 +12,6 @@ func (bae *BarAnalyticsEngine) calculateNetEfficiency(bull, bear, maxCap float64
 
 	netEff := ((bull - bear) / maxCap) * 100.0
 
-	// Safe mathematical protection boundaries
 	if netEff > 100.0 {
 		return 100.0
 	}
@@ -146,17 +128,13 @@ func (bae *BarAnalyticsEngine) calculateProfileBlendedEfficiencies(bar *models.B
 	if bar.Analytics.VolumeRank >= 6 {
 		token := uint32(bar.InstrumentToken)
 
-		// 1. DYNAMIC LOCALIZED PRICE SCALING (Using MarketDNA thresholds instead of ADRPct)
 		if dna, exists := bae.dnaMap[token]; exists && dna != nil && dna.IntervalPercentiles != nil {
 			if baseline1m, has1m := dna.IntervalPercentiles["1m"]; has1m && baseline1m.PriceP90 > 0 {
 				candleBody := math.Abs(bar.Close - bar.Open)
-
-				// How many units of standard 1m high-momentum range did this bar fulfill?
 				priceRatio := candleBody / baseline1m.PriceP90
 
 				var priceIntensity float64
 				if priceRatio > 1.0 {
-					// Quadratic acceleration to amplify large breakout candles instantly
 					priceIntensity = math.Pow(priceRatio, 1.5)
 				} else {
 					priceIntensity = priceRatio
@@ -166,9 +144,8 @@ func (bae *BarAnalyticsEngine) calculateProfileBlendedEfficiencies(bar *models.B
 			}
 		}
 
-		// 2. VOLUME SCALING (Retained from ADV30d)
 		if profile, ok := bae.profiles[token]; ok && profile != nil && profile.ADV30d > 0 {
-			var totalBarsPerDay float64 = 375.0 // Strict 1-minute session mapping
+			var totalBarsPerDay float64 = 375.0
 			expectedVolPerBar := float64(profile.ADV30d) / totalBarsPerDay
 			if expectedVolPerBar > 0 {
 				volumeIntensity := bar.Volume / expectedVolPerBar
@@ -210,7 +187,6 @@ func (bae *BarAnalyticsEngine) calculateDistance(price, vwap float64, token uint
 	return rawPct
 }
 
-// getRankWeight Helper method for underlying weighting distributions if required elsewhere
 func (bae *BarAnalyticsEngine) getRankWeight(rank int) float64 {
 	switch rank {
 	case 7:

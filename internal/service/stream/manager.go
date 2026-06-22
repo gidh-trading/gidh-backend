@@ -9,15 +9,17 @@ import (
 	"gidh-backend/pkg/logger"
 )
 
+const processorCount = 2 // Match your physical core layout or configuration
+
 type Manager struct {
-	source     TickDataSource
-	tickChan   chan models.TickData
-	workerPool *sync.WaitGroup
-	ctx        context.Context
-	cancel     context.CancelFunc
-	processor  TickProcessor
-	done       chan struct{} // Channel to signal completion
-	once       sync.Once     // Ensure done channel is closed only once
+	source      TickDataSource
+	workerChans []chan models.TickData // 🟢 Partitioned channels: one for each specific worker
+	workerPool  *sync.WaitGroup
+	ctx         context.Context
+	cancel      context.CancelFunc
+	processor   TickProcessor
+	done        chan struct{} // Channel to signal completion
+	once        sync.Once     // Ensure done channel is closed only once
 
 	mu          sync.RWMutex
 	currentDate string
@@ -30,14 +32,20 @@ type TickProcessor interface {
 func NewStreamManager(source TickDataSource, processor TickProcessor) *Manager {
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// 🟢 Initialize independent buffered worker channels for asset isolation
+	chans := make([]chan models.TickData, processorCount)
+	for i := 0; i < processorCount; i++ {
+		chans[i] = make(chan models.TickData, 5000)
+	}
+
 	return &Manager{
-		source:     source,
-		tickChan:   make(chan models.TickData, 10000),
-		workerPool: &sync.WaitGroup{},
-		ctx:        ctx,
-		cancel:     cancel,
-		processor:  processor,
-		done:       make(chan struct{}),
+		source:      source,
+		workerChans: chans,
+		workerPool:  &sync.WaitGroup{},
+		ctx:         ctx,
+		cancel:      cancel,
+		processor:   processor,
+		done:        make(chan struct{}),
 	}
 }
 
@@ -50,18 +58,17 @@ func (sm *Manager) Start() error {
 		return err
 	}
 
-	// Start reader goroutine
-	sm.workerPool.Add(1)
-	go sm.runReader()
-
-	// Start processor goroutines
-	processorCount := 20 // Could be made configurable
+	// 1. Start the sequential worker processing pools first
 	for i := 0; i < processorCount; i++ {
 		sm.workerPool.Add(1)
-		go sm.runProcessor(i)
+		go sm.runProcessor(i, sm.workerChans[i])
 	}
 
-	// Wait for all workers (reader + processors) to finish, then signal Done
+	// 2. Start the central reader dispatcher goroutine
+	sm.workerPool.Add(1)
+	go sm.runDispatcher()
+
+	// Wait for all workers (dispatcher + processors) to finish, then signal Done
 	go func() {
 		sm.workerPool.Wait()
 		sm.once.Do(func() {
@@ -69,7 +76,7 @@ func (sm *Manager) Start() error {
 		})
 	}()
 
-	logger.Infof("Stream manager started with %d processors", processorCount)
+	logger.Infof("Stream manager started with %d partitioned processors", processorCount)
 	return nil
 }
 
@@ -85,27 +92,61 @@ func (sm *Manager) updateStatus(date string) {
 	sm.currentDate = date
 }
 
-func (sm *Manager) runReader() {
+// 🟢 Reads ticks sequentially from the source and routes them deterministically via modulo hashing
+func (sm *Manager) runDispatcher() {
 	defer sm.workerPool.Done()
-	defer close(sm.tickChan)
 
-	logger.Infof("Stream reader started for source: %s", sm.source.Type())
+	// Ensure all downstream workers get their channels closed when dispatcher exits
+	defer func() {
+		for _, ch := range sm.workerChans {
+			close(ch)
+		}
+	}()
 
-	err := sm.source.ReadTicks(sm.ctx, sm.tickChan)
+	logger.Infof("Stream dispatcher started for source: %s", sm.source.Type())
 
-	switch {
-	case err == nil:
-		logger.Info("Stream reader finished normally")
-	case errors.Is(err, context.Canceled):
-		logger.Info("Stream reader cancelled")
-	case errors.Is(err, ErrBacktestFinished):
-		logger.Info("Backtest completed successfully")
-	default:
-		logger.Errorf("Stream reader error: %v", err)
+	// Temporary internal channel to read directly out of the stream source
+	sourceChan := make(chan models.TickData, 10000)
+
+	// Launch underlying Reader stream loop
+	go func() {
+		err := sm.source.ReadTicks(sm.ctx, sourceChan)
+		switch {
+		case err == nil:
+			logger.Info("Stream reader finished normally")
+		case errors.Is(err, context.Canceled):
+			logger.Info("Stream reader cancelled")
+		case errors.Is(err, ErrBacktestFinished):
+			logger.Info("Backtest completed successfully")
+		default:
+			logger.Errorf("Stream reader error: %v", err)
+		}
+		close(sourceChan)
+	}()
+
+	// Read and distribute ticks to the correct worker channel
+	for {
+		select {
+		case tick, ok := <-sourceChan:
+			if !ok {
+				return
+			}
+
+			// ⚡ Deterministic Token Modulo Routing: Guarantees chronological sequence per stock
+			workerID := tick.InstrumentToken % uint32(processorCount)
+
+			select {
+			case sm.workerChans[workerID] <- tick:
+			case <-sm.ctx.Done():
+				return
+			}
+		case <-sm.ctx.Done():
+			return
+		}
 	}
 }
 
-func (sm *Manager) runProcessor(processorID int) {
+func (sm *Manager) runProcessor(processorID int, ch <-chan models.TickData) {
 	defer sm.workerPool.Done()
 
 	logger.Infof("Tick processor %d started", processorID)
@@ -113,7 +154,7 @@ func (sm *Manager) runProcessor(processorID int) {
 
 	for {
 		select {
-		case tick, ok := <-sm.tickChan:
+		case tick, ok := <-ch:
 			if !ok {
 				logger.Infof("Tick processor %d stopped after processing %d ticks (channel closed)", processorID, processedCount)
 				return
@@ -132,7 +173,7 @@ func (sm *Manager) runProcessor(processorID int) {
 		case <-sm.ctx.Done():
 			// Context canceled via Stop API request!
 			// Drain remaining objects from channel quickly without hanging to unlock sm.workerPool.Wait()
-			for tick := range sm.tickChan {
+			for tick := range ch {
 				_ = sm.processor.Process(tick)
 			}
 			logger.Infof("Tick processor %d halted via cancellation context flag.", processorID)

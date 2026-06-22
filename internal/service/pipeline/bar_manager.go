@@ -10,13 +10,23 @@ import (
 	"gidh-backend/pkg/logger"
 )
 
+type InstrumentBarState struct {
+	mu       sync.Mutex
+	state1m  *candleState
+	state3m  *candleState
+	state5m  *candleState
+	state10m *candleState
+	state15m *candleState
+}
+
+type candleState struct {
+	bar     *models.Bar
+	history *TimeframeAnalyticsHistory // 🟢 History now lives completely isolated inside the token container!
+}
+
 type BarManager struct {
 	loc             *time.Location
-	state1m         map[uint32]*candleState
-	state3m         map[uint32]*candleState
-	state5m         map[uint32]*candleState
-	state10m        map[uint32]*candleState
-	state15m        map[uint32]*candleState
+	instruments     map[uint32]*InstrumentBarState
 	profiles        map[uint32]*models.InstrumentProfile
 	dnaMap          map[uint32]*models.MarketDNA
 	mu              sync.RWMutex
@@ -24,10 +34,6 @@ type BarManager struct {
 	dbWriter        *writer.DBWriter
 	analyticsEngine *BarAnalyticsEngine
 	MacroListener   interface{ IngestClosedBar(bar *models.Bar) }
-}
-
-type candleState struct {
-	bar *models.Bar
 }
 
 func NewBarManager(
@@ -39,11 +45,7 @@ func NewBarManager(
 	loc, _ := time.LoadLocation("Asia/Kolkata")
 	return &BarManager{
 		loc:             loc,
-		state1m:         make(map[uint32]*candleState),
-		state3m:         make(map[uint32]*candleState),
-		state5m:         make(map[uint32]*candleState),
-		state10m:        make(map[uint32]*candleState),
-		state15m:        make(map[uint32]*candleState),
+		instruments:     make(map[uint32]*InstrumentBarState),
 		profiles:        profiles,
 		dnaMap:          rawDnaMap,
 		wsHub:           hub,
@@ -52,52 +54,48 @@ func NewBarManager(
 	}
 }
 
-// Process handles incoming ticks along with pre-calculated analytical snapshots
 func (bm *BarManager) Process(tick *models.EnrichedTick) error {
-	bm.mu.Lock()
-	defer bm.mu.Unlock()
-
 	token := tick.Raw.InstrumentToken
 	price := tick.Raw.LastPrice
 	vol := float64(tick.TickVolume)
 	ts := tick.Raw.Timestamp.In(bm.loc)
 	name := tick.Raw.StockName
 
-	// Initialize states if they don't exist for the token
-	if bm.state1m[token] == nil {
-		bm.state1m[token] = newCandleState(ts.Truncate(time.Minute), price, token, name, "1m")
-	}
-	if bm.state3m[token] == nil {
-		bm.state3m[token] = newCandleState(ts.Truncate(3*time.Minute), price, token, name, "3m")
-	}
-	if bm.state5m[token] == nil {
-		bm.state5m[token] = newCandleState(ts.Truncate(5*time.Minute), price, token, name, "5m")
-	}
-	if bm.state10m[token] == nil {
-		bm.state10m[token] = newCandleState(ts.Truncate(10*time.Minute), price, token, name, "10m")
-	}
-	if bm.state15m[token] == nil {
-		bm.state15m[token] = newCandleState(ts.Truncate(15*time.Minute), price, token, name, "15m")
+	bm.mu.RLock()
+	ibs, exists := bm.instruments[token]
+	bm.mu.RUnlock()
+
+	if !exists {
+		bm.mu.Lock()
+		ibs, exists = bm.instruments[token]
+		if !exists {
+			ibs = &InstrumentBarState{
+				state1m:  newCandleState(ts.Truncate(time.Minute), price, token, name, "1m"),
+				state3m:  newCandleState(ts.Truncate(3*time.Minute), price, token, name, "3m"),
+				state5m:  newCandleState(ts.Truncate(5*time.Minute), price, token, name, "5m"),
+				state10m: newCandleState(ts.Truncate(10*time.Minute), price, token, name, "10m"),
+				state15m: newCandleState(ts.Truncate(15*time.Minute), price, token, name, "15m"),
+			}
+			bm.instruments[token] = ibs
+		}
+		bm.mu.Unlock()
 	}
 
-	// Route tracking to individual timeframes
-	bm.updateTimeframe(bm.state1m, token, ts, price, vol, time.Minute, "1m", tick)
-	bm.updateTimeframe(bm.state3m, token, ts, price, vol, 3*time.Minute, "3m", tick)
-	bm.updateTimeframe(bm.state5m, token, ts, price, vol, 5*time.Minute, "5m", tick)
-	bm.updateTimeframe(bm.state10m, token, ts, price, vol, 10*time.Minute, "10m", tick)
-	bm.updateTimeframe(bm.state15m, token, ts, price, vol, 15*time.Minute, "15m", tick)
+	ibs.mu.Lock()
+	defer ibs.mu.Unlock()
 
-	// Tick-by-Tick Continuous Broadcasting to WebSockets using standard Bar structures
+	bm.updateTimeframe(ibs, token, ts, price, vol, time.Minute, "1m", tick)
+	bm.updateTimeframe(ibs, token, ts, price, vol, 3*time.Minute, "3m", tick)
+	bm.updateTimeframe(ibs, token, ts, price, vol, 5*time.Minute, "5m", tick)
+	bm.updateTimeframe(ibs, token, ts, price, vol, 10*time.Minute, "10m", tick)
+	bm.updateTimeframe(ibs, token, ts, price, vol, 15*time.Minute, "15m", tick)
+
 	if bm.wsHub != nil {
-		timeframes := []map[uint32]*candleState{bm.state1m, bm.state3m, bm.state5m, bm.state10m, bm.state15m}
-		for _, stateMap := range timeframes {
-			cs := stateMap[token]
+		states := []*candleState{ibs.state1m, ibs.state3m, ibs.state5m, ibs.state10m, ibs.state15m}
+		for _, cs := range states {
 			if cs != nil && cs.bar != nil {
-
-				// Dynamically populate real-time analytics calculations before dispatching packet
-				bm.analyticsEngine.PopulateLiveAnalytics(cs.bar)
-
-				// Broadcasts the fully updated structural models.Bar packet instantly down to the UI
+				// 🟢 Pass the isolated history down to keep execution stateless
+				bm.analyticsEngine.PopulateLiveAnalytics(cs.bar, cs.history)
 				bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
 					"type": "bar",
 					"data": cs.bar,
@@ -111,23 +109,31 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 
 func (bm *BarManager) GetActiveBarsSnapshot(token uint32) map[string]*models.Bar {
 	bm.mu.RLock()
-	defer bm.mu.RUnlock()
+	ibs, ok := bm.instruments[token]
+	bm.mu.RUnlock()
 
 	snapshot := make(map[string]*models.Bar)
-	if cs, ok := bm.state1m[token]; ok && cs != nil {
-		snapshot["1m"] = cs.bar
+	if !ok || ibs == nil {
+		return snapshot
 	}
-	if cs, ok := bm.state3m[token]; ok && cs != nil {
-		snapshot["3m"] = cs.bar
+
+	ibs.mu.Lock()
+	defer ibs.mu.Unlock()
+
+	if ibs.state1m != nil {
+		snapshot["1m"] = ibs.state1m.bar
 	}
-	if cs, ok := bm.state5m[token]; ok && cs != nil {
-		snapshot["5m"] = cs.bar
+	if ibs.state3m != nil {
+		snapshot["3m"] = ibs.state3m.bar
 	}
-	if cs, ok := bm.state10m[token]; ok && cs != nil {
-		snapshot["10m"] = cs.bar
+	if ibs.state5m != nil {
+		snapshot["5m"] = ibs.state5m.bar
 	}
-	if cs, ok := bm.state15m[token]; ok && cs != nil {
-		snapshot["15m"] = cs.bar
+	if ibs.state10m != nil {
+		snapshot["10m"] = ibs.state10m.bar
+	}
+	if ibs.state15m != nil {
+		snapshot["15m"] = ibs.state15m.bar
 	}
 
 	return snapshot
@@ -135,13 +141,8 @@ func (bm *BarManager) GetActiveBarsSnapshot(token uint32) map[string]*models.Bar
 
 func (bm *BarManager) ClearState() {
 	bm.mu.Lock()
-	defer bm.mu.Unlock()
-
-	bm.state1m = make(map[uint32]*candleState)
-	bm.state3m = make(map[uint32]*candleState)
-	bm.state5m = make(map[uint32]*candleState)
-	bm.state10m = make(map[uint32]*candleState)
-	bm.state15m = make(map[uint32]*candleState)
+	bm.instruments = make(map[uint32]*InstrumentBarState)
+	bm.mu.Unlock()
 
 	logger.Info("Bar Manager historical window cache states wiped cleanly.")
 }
@@ -149,6 +150,10 @@ func (bm *BarManager) ClearState() {
 func newCandleState(ts time.Time, price float64, token uint32, name, timeframe string) *candleState {
 	return &candleState{
 		bar: newBar(ts, price, token, name, timeframe),
+		history: &TimeframeAnalyticsHistory{ // 🟢 Instantiated directly inside context tracking frame
+			TotalBars:        0,
+			TimePctAboveVwap: 0.0,
+		},
 	}
 }
 
@@ -212,7 +217,7 @@ func (bm *BarManager) processTickForCandle(
 }
 
 func (bm *BarManager) updateTimeframe(
-	stateMap map[uint32]*candleState,
+	ibs *InstrumentBarState,
 	token uint32,
 	ts time.Time,
 	price float64,
@@ -221,36 +226,42 @@ func (bm *BarManager) updateTimeframe(
 	timeframe string,
 	tick *models.EnrichedTick,
 ) {
-	cs := stateMap[token]
+	var cs *candleState
+	switch timeframe {
+	case "1m":
+		cs = ibs.state1m
+	case "3m":
+		cs = ibs.state3m
+	case "5m":
+		cs = ibs.state5m
+	case "10m":
+		cs = ibs.state10m
+	case "15m":
+		cs = ibs.state15m
+	}
+
 	candleStart := ts.Truncate(duration)
 
 	if cs.bar.Timestamp.Before(candleStart) {
 		closedBar := cs.bar
 
-		// 1. BarAnalyticsEngine computes final statistics, saves to DB, and broadcasts closed metrics
+		// 🟢 Pass the completely isolated nested history pointer to keep pipeline safe
 		if bm.analyticsEngine != nil {
-			bm.analyticsEngine.AnalyzeClose(closedBar)
+			bm.analyticsEngine.AnalyzeClose(closedBar, cs.history)
 		}
 
-		// 2. Pass fully populated bar seamlessly to the Strategy Engine execution listener
 		if bm.MacroListener != nil {
 			bm.MacroListener.IngestClosedBar(closedBar)
 		}
 
-		// 3. Instantiate the next ongoing candle context frame safely
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
 
-		// ✅ FIX: Seed the new active bar with the updated historical metric baseline
-		if bm.analyticsEngine != nil {
-			// Safely fetch from the engine's history cache
-			h := bm.analyticsEngine.getOrInitTimeframeHistory(tick.Raw.StockName, timeframe)
-			cs.bar.Analytics.TimePctAboveVwap = h.TimePctAboveVwap
-		}
+		// 🟢 Seed the newly instantiated candle with historical parameter values safely
+		cs.bar.Analytics.TimePctAboveVwap = cs.history.TimePctAboveVwap
 	}
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)
 
-	// Live tracking continuous updates on the active bar object frame
 	if bm.analyticsEngine != nil {
 		bm.analyticsEngine.AnalyzeTick(cs.bar, tick)
 	}

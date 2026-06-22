@@ -78,9 +78,10 @@ func (h *VolumeProfileStage) Process(tick *models.EnrichedTick) error {
 	p.TotalVolume += tick.TickVolume
 	p.TickCount++
 
-	// 3. Calculate POC (Point of Control)
+	// 3. Calculate POC (Point of Control) DETERMINISTICALLY
 	maxVol := int64(-1)
-	for price, vol := range p.Buckets {
+	for _, price := range p.SortedPrices { // 🟢 FIX: Iterating over slices guarantees predictable tie-breaks
+		vol := p.Buckets[price]
 		if vol > maxVol {
 			maxVol = vol
 			p.POC = price

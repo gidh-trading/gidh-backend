@@ -10,11 +10,12 @@ import (
 )
 
 type InstrumentContext struct {
+	mu                  sync.Mutex // 🟢 Granular per-token lock to decouple workers
 	LastVolume          int64
 	LastPrice           float64
 	Buffer              *TokenRollingBuffer
 	DNA                 map[int]models.TimeBucketDNA
-	IntervalPercentiles map[string]models.PercentileThresholds // 🔥 Baseline percentiles mapping for timeframe shapes
+	IntervalPercentiles map[string]models.PercentileThresholds
 	Profile             *models.InstrumentProfile
 }
 
@@ -22,7 +23,7 @@ type EnrichmentStage struct {
 	instruments     map[uint32]*InstrumentContext
 	positionManager order.PositionManager
 	loc             *time.Location
-	mu              sync.Mutex
+	mu              sync.RWMutex // 🟢 Changed to RWMutex for high-speed concurrent lookups
 }
 
 func NewEnrichmentStage(pm order.PositionManager, rawDnaMap map[uint32]*models.MarketDNA, profiles map[uint32]*models.InstrumentProfile) *EnrichmentStage {
@@ -38,7 +39,7 @@ func NewEnrichmentStage(pm order.PositionManager, rawDnaMap map[uint32]*models.M
 		instruments[token] = &InstrumentContext{
 			Buffer:              NewTokenRollingBuffer(),
 			DNA:                 fastDnaMap,
-			IntervalPercentiles: dna.IntervalPercentiles, // 🔥 Ingest multi-timeframe baseline shapes into context cache
+			IntervalPercentiles: dna.IntervalPercentiles,
 			LastVolume:          0,
 			LastPrice:           0.0,
 			Profile:             profiles[token],
@@ -53,24 +54,36 @@ func NewEnrichmentStage(pm order.PositionManager, rawDnaMap map[uint32]*models.M
 }
 
 func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
-	es.mu.Lock()
-	defer es.mu.Unlock()
-
 	token := tick.Raw.InstrumentToken
 	price := tick.Raw.LastPrice
 	ts := tick.Raw.Timestamp.In(es.loc)
 
+	// 1. Fast concurrent read-lock lookup
+	es.mu.RLock()
 	ctx, exists := es.instruments[token]
+	es.mu.RUnlock()
+
+	// 2. Safe lazy initialization if a completely unique unmapped token arrives
 	if !exists {
-		ctx = &InstrumentContext{
-			Buffer:              NewTokenRollingBuffer(),
-			DNA:                 make(map[int]models.TimeBucketDNA),
-			IntervalPercentiles: make(map[string]models.PercentileThresholds),
-			LastVolume:          0,
-			LastPrice:           price,
+		es.mu.Lock()
+		// Double-check after acquiring write lock
+		ctx, exists = es.instruments[token]
+		if !exists {
+			ctx = &InstrumentContext{
+				Buffer:              NewTokenRollingBuffer(),
+				DNA:                 make(map[int]models.TimeBucketDNA),
+				IntervalPercentiles: make(map[string]models.PercentileThresholds),
+				LastVolume:          0,
+				LastPrice:           price,
+			}
+			es.instruments[token] = ctx
 		}
-		es.instruments[token] = ctx
+		es.mu.Unlock()
 	}
+
+	// 3. ⚡ LOCK ONLY THIS INSTRUMENT: Other tokens proceed completely unhindered
+	ctx.mu.Lock()
+	defer ctx.mu.Unlock()
 
 	curr := tick.Raw.CumulativeVolume
 	prev := ctx.LastVolume
@@ -93,7 +106,6 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	ctx.LastPrice = price
 
-	// Push current trade details onto the sliding 60-second matrix
 	ctx.Buffer.Push(ts, price, float64(delta))
 	liveVolume, liveTickCount, liveDisplacement := ctx.Buffer.GetProductionMetrics()
 
@@ -107,57 +119,41 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	rangeRank := 4
 
 	if baseline, ok := ctx.DNA[minuteIndex]; ok {
-		// Calculate the baseline historical absolute pace per minute
 		var absoluteVolumeVelocityFloor float64 = 0.0
-		var globalPaceFloor float64 = 0.0 // Global daily baseline floor, completely ignoring midday dips
+		var globalPaceFloor float64 = 0.0
 
 		if ctx.Profile != nil && ctx.Profile.ADV30d > 0 {
 			averageVolPerMinute := float64(ctx.Profile.ADV30d) / 375.0
-
-			// 1. Establish a strict, un-multiplied global baseline floor for Rank 6/7 validation
-			// An institutional print (P90+) should be substantial compared to the *whole* day's average pace.
 			globalPaceFloor = averageVolPerMinute * 0.85
 
-			// 2. Identify the active session based on the localized time
 			currentHourMinute := (ts.Hour() * 100) + ts.Minute()
 			var sessionMultiplier float64 = 1.0
 
 			switch {
-			// Morning Session (09:15 - 10:30) -> Higher absolute threshold required
 			case currentHourMinute >= 915 && currentHourMinute < 1030:
 				sessionMultiplier = 0.97
-
-			// Midday Session (10:30 - 14:15) -> Absorb the natural volume dip safely
 			case currentHourMinute >= 1030 && currentHourMinute < 1415:
 				sessionMultiplier = 0.70
-
-			// Afternoon Session (14:15 - 15:30) -> Volume returning for the close
 			case currentHourMinute >= 1415 && currentHourMinute <= 1530:
 				sessionMultiplier = 0.97
 			}
 
-			// Apply the session multiplier along with your strict 95% institutional requirement
 			absoluteVolumeVelocityFloor = averageVolPerMinute * sessionMultiplier * 0.95
 		}
 
-		// Inject absolute liquidity floor and macro-pace validation alongside relative thresholds
 		switch {
 		case liveVolume >= baseline.VolumeP97:
-			// If it clears the relative local P97, it MUST clear the global day pace to get Rank 7
 			if liveVolume >= absoluteVolumeVelocityFloor && liveVolume >= globalPaceFloor {
 				volRank = 7
 			} else {
-				volRank = 5 // Degrade to a localized pop due to lack of absolute day-level impact
+				volRank = 5
 			}
-
 		case liveVolume >= baseline.VolumeP90:
-			// If it clears the relative local P90, it MUST clear the global day pace to get Rank 6
 			if liveVolume >= absoluteVolumeVelocityFloor && liveVolume >= globalPaceFloor {
 				volRank = 6
 			} else {
-				volRank = 5 // Degrade to a localized pop due to lack of absolute day-level impact
+				volRank = 5
 			}
-
 		case liveVolume >= baseline.VolumeP75:
 			volRank = 5
 		case liveVolume >= baseline.VolumeP50:
@@ -189,7 +185,6 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 	}
 
-	// Extract total peak-to-trough boundary range variables for ranking
 	_, _, rHigh, rLow, _ := ctx.Buffer.GetProductionStructure()
 	liveRollingRange := rHigh - rLow
 
@@ -231,10 +226,6 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 	}
 
-	// ========================================================================
-	// 🔥 CALCULATE TRUE MICROSTRUCTURAL DIRECTION (ADDED HERE)
-	// ========================================================================
-	// Since liveDisplacement = wClose - wOpen, we know that wOpen = wClose - liveDisplacement
 	wOpen := price - liveDisplacement
 	wClose := price
 	wHigh := rHigh
@@ -242,7 +233,6 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 
 	trueDirection := es.calculateDirection(wOpen, wHigh, wLow, wClose, volRank, priceRank)
 
-	// Ingest directional classification seamlessly straight onto the structured output sub-object
 	tick.Enrichment = models.TickEnrichment{
 		Timestamp:   ts,
 		MinuteIndex: minuteIndex,
@@ -250,15 +240,15 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		TickRank:    tickRank,
 		PriceRank:   priceRank,
 		RangeRank:   rangeRank,
-		Direction:   trueDirection, // Matches your updated TickEnrichment structural properties layout
+		Direction:   trueDirection,
 	}
 
 	return nil
 }
 
 func (es *EnrichmentStage) GetInstrumentProfile(token uint32) (*models.InstrumentProfile, bool) {
-	es.mu.Lock()
-	defer es.mu.Unlock()
+	es.mu.RLock()
+	defer es.mu.RUnlock()
 	ctx, exists := es.instruments[token]
 	if !exists || ctx == nil {
 		return nil, false
@@ -266,56 +256,33 @@ func (es *EnrichmentStage) GetInstrumentProfile(token uint32) (*models.Instrumen
 	return ctx.Profile, true
 }
 
-// calculateDirection applies pure mathematical range positioning and volume blockage checks to determine state
 func (es *EnrichmentStage) calculateDirection(wOpen, wHigh, wLow, wClose float64, volRank, priceRank int) models.DirectionState {
 	windowRange := wHigh - wLow
-
-	// Safety check for fresh tokens or perfectly illiquid static markets
 	if windowRange <= 0 {
 		return models.DirSideways
 	}
-
-	// Calculate where the current close price sits inside the 1-minute range as a percentage (0.0 to 1.0)
 	positionRatio := (wClose - wLow) / windowRange
-
-	// Evaluate displacement relative to the window open
 	isHigherThanOpen := wClose > wOpen
 	isLowerThanOpen := wClose < wOpen
 
-	// ========================================================================
-	// 🔥 MICROSTRUCTURAL RE-CLASSIFICATION: DETECT MICRO-ABSORPTION
-	// ========================================================================
-	// If participation volume is at abnormal institutional intensity (P90+)
-	// but price velocity/displacement remains completely capped (PriceRank <= 4)
 	if volRank >= 6 && priceRank <= 4 {
-		// High close position ratio within the rolling matrix = Passive limit buying absorption wall
 		if positionRatio >= 0.50 {
 			return models.DirBullishAbsorption
 		}
-		// Low close position ratio within the rolling matrix = Passive limit selling absorption ceiling
 		if positionRatio < 0.50 {
 			return models.DirBearishAbsorption
 		}
 	}
 
 	switch {
-	// Top 15% of the range + upward displacement = Severe Buying Urgency
 	case positionRatio >= 0.85 && isHigherThanOpen:
 		return models.DirStrongBullish
-
-	// Upper half of the range + upward displacement = Steady Accumulation
 	case positionRatio > 0.55 && isHigherThanOpen:
 		return models.DirBullish
-
-	// Bottom 15% of the range + downward displacement = Severe Liquidating Pressure
 	case positionRatio <= 0.15 && isLowerThanOpen:
 		return models.DirStrongBearish
-
-	// Lower half of the range + downward displacement = Steady Distribution
 	case positionRatio < 0.45 && isLowerThanOpen:
 		return models.DirBearish
-
-	// Normal rotational low-volume balance churn zone
 	default:
 		return models.DirSideways
 	}
