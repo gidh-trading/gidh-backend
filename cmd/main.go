@@ -13,6 +13,7 @@ import (
 )
 
 func main() {
+
 	// Load environment variables
 	if err := env.Load(".env"); err != nil {
 		logger.Warnf("No .env file found: %v", err)

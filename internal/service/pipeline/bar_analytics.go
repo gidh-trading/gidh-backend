@@ -51,6 +51,9 @@ func NewBarAnalyticsEngine(dnaMap map[uint32]*models.MarketDNA, profiles map[uin
 
 // AnalyzeTick updates continuous peak transaction intensities and real-time distance metrics
 func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.EnrichedTick) {
+	bae.mu.Lock()
+	defer bae.mu.Unlock()
+
 	if tick.Enrichment.VolumeRank > bar.Analytics.VolumeRank {
 		bar.Analytics.VolumeRank = tick.Enrichment.VolumeRank
 	}
