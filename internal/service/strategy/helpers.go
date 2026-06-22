@@ -18,6 +18,7 @@ func (e *Engine) getOrInitializeState(stockName string) *InstrumentState {
 		}
 		e.Registry[stockName] = state
 	}
+
 	return state
 }
 

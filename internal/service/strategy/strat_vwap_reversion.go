@@ -1,7 +1,6 @@
 package strategy
 
 import (
-	"math"
 	"sync"
 )
 
@@ -10,8 +9,8 @@ const (
 	ReversionEndTradingTime   = 1500
 	ReversionExitTime         = 1515
 
-	ReversionHardStopLossINR = -1500.0
-	ReversionTakeProfitINR   = 2000.0
+	ReversionHardStopLossINR = -300.0
+	ReversionTakeProfitINR   = 600.0
 )
 
 type VWAPPercentileReversionStrategy struct {
@@ -66,8 +65,8 @@ func (s *VWAPPercentileReversionStrategy) CheckEntry(state *InstrumentState) str
 
 	// 4. Extract the closed bar's normalized distance metric
 	vwapDistance := latestBar.Analytics.NormalizedVwapDistance
-	positiveMaxDistance := state.VwapPercentile.PosP97
-	negativeMaxDistance := state.VwapPercentile.NegP97
+	positiveMaxDistance := state.VwapPercentile.PosP99
+	negativeMaxDistance := -1 * state.VwapPercentile.NegP99
 
 	// 5. Mean-Reversion Evaluation Framework
 	if vwapDistance > 0 {
@@ -77,10 +76,7 @@ func (s *VWAPPercentileReversionStrategy) CheckEntry(state *InstrumentState) str
 			return "GO_SHORT"
 		}
 	} else if vwapDistance < 0 {
-		// Price has over-extended below VWAP.
-		// Compare absolute magnitude of deviation against negative P90 threshold to enter LONG.
-		absDistance := math.Abs(vwapDistance)
-		if absDistance >= negativeMaxDistance {
+		if vwapDistance <= negativeMaxDistance {
 			return "GO_LONG"
 		}
 	}

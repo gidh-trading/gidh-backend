@@ -38,20 +38,29 @@ func (s *InstrumentState) Clone() *InstrumentState {
 		return nil
 	}
 
-	// Create a deep copy of the BarHistory map
+	// 1. Create a deep copy of the BarHistory map
 	clonedHistory := make(map[string][]*models.Bar)
 	if s.BarHistory != nil {
 		for tf, bars := range s.BarHistory {
-			// Copy the slice slice reference (safe if slice elements aren't mutated concurrently)
 			clonedBars := make([]*models.Bar, len(bars))
 			copy(clonedBars, bars)
 			clonedHistory[tf] = clonedBars
 		}
 	}
 
+	// 2. 🌟 Create a deep copy of the StrategyHistory map to prevent map race conditions
+	clonedStrategyHistory := make(map[string]bool)
+	if s.StrategyHistory != nil {
+		for k, v := range s.StrategyHistory {
+			clonedStrategyHistory[k] = v
+		}
+	}
+
 	return &InstrumentState{
 		StockName:          s.StockName,
 		Profile:            s.Profile,
+		VwapPercentile:     s.VwapPercentile,      // 🌟 Fixed: Pass the baseline percentile parameters
+		StrategyHistory:    clonedStrategyHistory, // 🌟 Fixed: Pass the tracking history map safely
 		LatestPrice:        s.LatestPrice,
 		LiveSessionVWAP:    s.LiveSessionVWAP,
 		CurrentSetupPhase:  s.CurrentSetupPhase,
@@ -64,6 +73,6 @@ func (s *InstrumentState) Clone() *InstrumentState {
 		EntryTimestamp:     s.EntryTimestamp,
 		LastExitSignalTime: s.LastExitSignalTime,
 		LastTickTime:       s.LastTickTime,
-		BarHistory:         clonedHistory, // Now truly isolated and thread-safe
+		BarHistory:         clonedHistory,
 	}
 }
