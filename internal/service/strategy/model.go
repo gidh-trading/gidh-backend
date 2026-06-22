@@ -13,6 +13,7 @@ const (
 type InstrumentState struct {
 	StockName          string
 	Profile            *models.InstrumentProfile
+	VwapPercentile     *models.VWAPDistancePercentile
 	LatestPrice        float64
 	LiveSessionVWAP    float64
 	CurrentSetupPhase  string
@@ -26,6 +27,9 @@ type InstrumentState struct {
 	LastExitSignalTime time.Time
 	LastTickTime       time.Time
 	BarHistory         map[string][]*models.Bar
+
+	ActiveStrategyName string          `json:"active_strategy_name"` // e.g., "Combined_Mood_Velocity_Direct"
+	StrategyHistory    map[string]bool `json:"strategy_history"`     // Tracks which strategies have already traded this stock today
 }
 
 // Clone constructs an isolated memory footprint copy to prevent side-effect leaks

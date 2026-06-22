@@ -51,7 +51,7 @@ func (s *CombinedMoodStrategy) CheckEntry(state *InstrumentState) string {
 	}
 
 	// Avoid re-trading the same stock if already tracked
-	if s.tradedStocks[latestBar.StockName] {
+	if state.StrategyHistory[s.Name()] {
 		return "HOLD"
 	}
 
@@ -149,7 +149,6 @@ func (s *CombinedMoodStrategy) CheckStopLoss(state *InstrumentState, currentSide
 }
 
 func (s *CombinedMoodStrategy) OnEntryCommit(state *InstrumentState, symbol string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.tradedStocks[symbol] = true
+	// Left empty intentionally: Strategy tracking history is now isolated and
+	// managed centrally by the TimeBasedRouter inside state.StrategyHistory
 }

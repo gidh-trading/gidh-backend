@@ -7,17 +7,16 @@ import (
 )
 
 // getOrInitializeState extracts or boots context tracking registers cleanly
-func (e *Engine) getOrInitializeState(symbol string) *InstrumentState {
-	state, exists := e.Registry[symbol]
+func (e *Engine) getOrInitializeState(stockName string) *InstrumentState {
+	state, exists := e.Registry[stockName]
 	if !exists {
-		profile := e.profiles[symbol]
 		state = &InstrumentState{
-			StockName:         symbol,
-			Profile:           profile,
-			CurrentSetupPhase: PhaseNeutral,
-			BarHistory:        make(map[string][]*models.Bar),
+			StockName:      stockName,
+			Profile:        e.profiles[stockName],
+			VwapPercentile: e.vwapPercentiles[stockName],
+			BarHistory:     make(map[string][]*models.Bar),
 		}
-		e.Registry[symbol] = state
+		e.Registry[stockName] = state
 	}
 	return state
 }

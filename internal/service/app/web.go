@@ -144,10 +144,12 @@ func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
 
 	// 6. Reload Market Data & DNA for the specific date
 	parsedDate, _ := time.Parse("2006-01-02", req.Date)
-	dnaMap, profilesMap := a.loadMarketData(ctx, parsedDate)
+	// ⚡ FIXED: Added vwapPercentilesMap to match the new loadMarketData signature
+	dnaMap, profilesMap, vwapPercentilesMap := a.loadMarketData(ctx, parsedDate)
 
 	// 7. RE-INITIALIZE PIPELINE (This resets all internal memory/maps)
-	if err := a.initPipeline(ctx, dnaMap, profilesMap); err != nil {
+	// ⚡ FIXED: Passed vwapPercentilesMap into initPipeline to forward to strategy.NewEngine
+	if err := a.initPipeline(ctx, dnaMap, profilesMap, vwapPercentilesMap); err != nil {
 		a.managerMu.Unlock()
 		http.Error(w, "Pipeline init failed", http.StatusInternalServerError)
 		return

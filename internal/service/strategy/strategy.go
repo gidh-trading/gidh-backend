@@ -17,29 +17,36 @@ const (
 )
 
 type Engine struct {
-	mu             sync.RWMutex
-	Registry       map[string]*InstrumentState
-	ActiveStrategy Strategy
-	MaxBarLookback time.Duration
-	profiles       map[string]*models.InstrumentProfile
-	dbWriter       *writer.DBWriter
+	mu              sync.RWMutex
+	Registry        map[string]*InstrumentState
+	ActiveStrategy  Strategy
+	MaxBarLookback  time.Duration
+	profiles        map[string]*models.InstrumentProfile
+	vwapPercentiles map[string]*models.VWAPDistancePercentile
+	dbWriter        *writer.DBWriter
 }
 
 func NewEngine(
 	barLookback time.Duration,
 	profiles map[string]*models.InstrumentProfile,
+	vwapPercentiles map[string]*models.VWAPDistancePercentile,
 	stratConfigs map[string]*models.OptimizedStrategyConfig,
 	dbW *writer.DBWriter,
 ) *Engine {
+	// ⚡ Instantiate both strategies
 	combinedMoodStrat := NewCombinedMoodStrategy(stratConfigs)
-	timeRouterWrapper := NewTimeBasedRouter(combinedMoodStrat)
+	vwapReversionStrat := NewVWAPPercentileReversionStrategy() // ⚡ Added
+
+	// ⚡ Pass both instances into your updated router wrapper
+	timeRouterWrapper := NewTimeBasedRouter(combinedMoodStrat, vwapReversionStrat)
 
 	return &Engine{
-		Registry:       make(map[string]*InstrumentState),
-		ActiveStrategy: timeRouterWrapper,
-		MaxBarLookback: barLookback,
-		profiles:       profiles,
-		dbWriter:       dbW,
+		Registry:        make(map[string]*InstrumentState),
+		ActiveStrategy:  timeRouterWrapper,
+		MaxBarLookback:  barLookback,
+		profiles:        profiles,
+		vwapPercentiles: vwapPercentiles,
+		dbWriter:        dbW,
 	}
 }
 

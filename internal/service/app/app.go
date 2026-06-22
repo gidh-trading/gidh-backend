@@ -67,8 +67,8 @@ func NewApp(cfg *config.Config) (*App, error) {
 
 	if cfg.Mode == "live" {
 		app.initLiveState(ctx)
-		dnaMap, advMap := app.loadMarketData(ctx, time.Now())
-		if err := app.initPipeline(ctx, dnaMap, advMap); err != nil {
+		dnaMap, advMap, vwapPercentilesMap := app.loadMarketData(ctx, time.Now())
+		if err := app.initPipeline(ctx, dnaMap, advMap, vwapPercentilesMap); err != nil { // ⚡ Updated
 			return nil, err
 		}
 		if err := app.initStreamManager(); err != nil {
@@ -117,10 +117,14 @@ func (a *App) initOrderManager() {
 	}
 }
 
-// loadMarketData fetches instrument definitions, DNA baselines, and execution profiles for a target date.
-func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uint32]*models.MarketDNA, map[uint32]*models.InstrumentProfile) {
+// loadMarketData fetches instrument definitions, DNA baselines, execution profiles, and VWAP percentiles for a target date.
+func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (
+	map[uint32]*models.MarketDNA,
+	map[uint32]*models.InstrumentProfile,
+	map[uint32]*models.VWAPDistancePercentile, // ⚡ Added return field
+) {
 	if a.pool == nil {
-		return make(map[uint32]*models.MarketDNA), make(map[uint32]*models.InstrumentProfile)
+		return make(map[uint32]*models.MarketDNA), make(map[uint32]*models.InstrumentProfile), make(map[uint32]*models.VWAPDistancePercentile)
 	}
 
 	// 1. Load DNA Baselines
@@ -144,6 +148,14 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 		profilesMap = make(map[uint32]*models.InstrumentProfile)
 	}
 
+	// 3. ⚡ Load VWAP Distance Percentiles for the session
+	vpReader := reader.NewVWAPPercentileReader(a.pool)
+	vwapPercentilesMap, err := vpReader.FetchVWAPDistancePercentiles(ctx, targetDate)
+	if err != nil {
+		logger.Errorf("FAILED TO LOAD VWAP DISTANCE PERCENTILES: %v", err)
+		vwapPercentilesMap = make(map[uint32]*models.VWAPDistancePercentile)
+	}
+
 	// Rebuild fast token internal lookups
 	a.tokenToName = make(map[uint32]string)
 	a.nameToToken = make(map[string]uint32)
@@ -152,11 +164,15 @@ func (a *App) loadMarketData(ctx context.Context, targetDate time.Time) (map[uin
 		a.nameToToken[c.Name] = c.Token
 	}
 
-	return dnaMap, profilesMap
+	return dnaMap, profilesMap, vwapPercentilesMap
 }
 
-func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.MarketDNA, profilesMap map[uint32]*models.InstrumentProfile) error {
-
+func (a *App) initPipeline(
+	ctx context.Context,
+	dnaMap map[uint32]*models.MarketDNA,
+	profilesMap map[uint32]*models.InstrumentProfile,
+	vwapPercentilesMap map[uint32]*models.VWAPDistancePercentile, // ⚡ Added parameter
+) error {
 	// 1. Build the fast structural maps for historical parameters
 	advMap := make(map[uint32]float64)
 	bucketSizeMap := make(map[uint32]float64)
@@ -200,6 +216,13 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 		}
 	}
 
+	symbolVwapPercentiles := make(map[string]*models.VWAPDistancePercentile)
+	for _, vp := range vwapPercentilesMap {
+		if vp.StockName != "" {
+			symbolVwapPercentiles[vp.StockName] = vp
+		}
+	}
+
 	// 📊 NEW: Instantiate Strategy Config Reader and load optimized strategy matrix rows
 	// Using '1m' entry timeframe as baseline matching our momentum strategy parameters
 	configReader := reader.NewStrategyConfigReader(a.pool)
@@ -213,7 +236,7 @@ func (a *App) initPipeline(ctx context.Context, dnaMap map[uint32]*models.Market
 	}
 
 	// Step A: Initialize the Strategy Engine universally across ALL runtime modes
-	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, stratConfigs, a.DBWriter)
+	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, symbolVwapPercentiles, stratConfigs, a.DBWriter)
 
 	// Connect macro streaming listeners
 	barManager.MacroListener = a.StrategyEngine
