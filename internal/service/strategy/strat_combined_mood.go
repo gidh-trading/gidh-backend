@@ -6,14 +6,26 @@ import (
 )
 
 const (
-	// Entry Time Optimization Window
 	StartTradingTime = 920
 	EndTradingTime   = 950
 	ExitTime         = 1015
 
-	// Risk Engine Parameters
 	HardStopLossINR = -900.0
 	TakeProfitINR   = 500.0
+
+	MinVolumeRank = 4
+	MaxVolumeRank = 6
+	MinPriceRank  = 4
+	MaxPriceRank  = 7
+
+	MinCombinedMood = 60.0
+	MaxCombinedMood = 100.0
+
+	MinVolumeMoodThreshold = 30.0
+	MinPriceMoodThreshold  = 20.0
+
+	LongVwapTimeMinPct  = 70.0
+	ShortVwapTimeMaxPct = 30.0
 )
 
 type CombinedMoodStrategy struct {
@@ -61,55 +73,64 @@ func (s *CombinedMoodStrategy) CheckEntry(state *InstrumentState) string {
 		return "HOLD"
 	}
 
-	// 1. Evaluate Long Entry Rules
-	if s.evaluateLongEntry(latestBar) {
-		return "GO_LONG"
-	}
-
-	// 2. Evaluate Short Entry Rules
-	if s.evaluateShortEntry(latestBar) {
-		return "GO_SHORT"
-	}
-
 	return "HOLD"
 }
 
-// evaluateLongEntry isolates the specific technical conditions for initiating a long position
-func (s *CombinedMoodStrategy) evaluateLongEntry(latestBar *models.Bar) bool {
-	combinedMood := latestBar.Analytics.NetVolumeMood + latestBar.Analytics.NetPriceMood
-	volumeMood := latestBar.Analytics.NetVolumeMood
-	priceMood := latestBar.Analytics.NetPriceMood
-	volumeRank := latestBar.Analytics.VolumeRank
-	priceRank := latestBar.Analytics.PriceRank
-	vwapDistance := latestBar.Analytics.NormalizedVwapDistance
-	vwapTime := latestBar.Analytics.TimePctAboveVwap
+// evaluateEntrySide unifies long and short setups into a single mathematical evaluation path
+// evaluateEntrySide unifies long and short setups into a single mathematical evaluation path
+func (s *CombinedMoodStrategy) evaluateEntrySide(latestBar *models.Bar, state *InstrumentState, sideSign float64) bool {
+	analytics := latestBar.Analytics
 
-	isRankValid := volumeRank > 3 && volumeRank < 7 && priceRank > 3 && priceRank < 7
-	validCombinedMood := combinedMood > 70.0 && combinedMood < 130.0 && volumeMood > priceMood
-	isBullish := latestBar.Analytics.Direction == models.DirBullish || latestBar.Analytics.Direction == models.DirStrongBullish
-	isVwapValid := vwapDistance < 0.2 && vwapDistance > 0.09 && vwapTime > 70
+	// 1. Clean, Standard Inclusive Range Check for Ranks
+	if analytics.VolumeRank < MinVolumeRank || analytics.VolumeRank > MaxVolumeRank ||
+		analytics.PriceRank < MinPriceRank || analytics.PriceRank > MaxPriceRank {
+		return false
+	}
 
-	return validCombinedMood && isBullish && isRankValid && isVwapValid
-}
+	// 2. Directional & Temporal VWAP Alignment Filters
+	if sideSign > 0 { // Long Side Specifics
+		if analytics.Direction != models.DirBullish && analytics.Direction != models.DirStrongBullish {
+			return false
+		}
+		if analytics.TimePctAboveVwap <= LongVwapTimeMinPct {
+			return false
+		}
+	} else { // Short Side Specifics
+		if analytics.Direction != models.DirBearish && analytics.Direction != models.DirStrongBearish {
+			return false
+		}
+		if analytics.TimePctAboveVwap >= ShortVwapTimeMaxPct {
+			return false
+		}
+	}
 
-// evaluateShortEntry isolates the technical conditions for initiating a short position
-// Note: Customize these metrics (e.g., DirBearish, moods, ranks) to fit your shorting criteria.
-func (s *CombinedMoodStrategy) evaluateShortEntry(latestBar *models.Bar) bool {
-	combinedMood := latestBar.Analytics.NetVolumeMood + latestBar.Analytics.NetPriceMood
-	volumeMood := latestBar.Analytics.NetVolumeMood
-	priceMood := latestBar.Analytics.NetPriceMood
-	volumeRank := latestBar.Analytics.VolumeRank
-	priceRank := latestBar.Analytics.PriceRank
-	vwapDistance := latestBar.Analytics.NormalizedVwapDistance
-	vwapTime := latestBar.Analytics.TimePctAboveVwap
+	// 3. Normalized Momentum Mood Matrix Checks (Flipped cleanly using sideSign)
+	combinedMood := (analytics.NetVolumeMood + analytics.NetPriceMood) * sideSign
+	volumeMood := analytics.NetVolumeMood * sideSign
+	priceMood := analytics.NetPriceMood * sideSign
 
-	// Place matching short-side structural checks here:
-	isRankValid := volumeRank > 3 && volumeRank < 7 && priceRank > 3 && priceRank < 7
-	validCombinedMood := combinedMood < -70.0 && combinedMood > -130.0 && volumeMood < priceMood
-	isBearish := latestBar.Analytics.Direction == models.DirBearish || latestBar.Analytics.Direction == models.DirStrongBearish
-	isVwapValid := vwapDistance > -0.2 && vwapDistance < 0.09 && vwapTime < 30
+	if combinedMood <= MinCombinedMood || combinedMood >= MaxCombinedMood ||
+		volumeMood <= MinVolumeMoodThreshold || priceMood <= MinPriceMoodThreshold {
+		return false
+	}
 
-	return validCombinedMood && isBearish && isRankValid && isVwapValid
+	// 4. Clean Absolute VWAP Target Band Isolation
+	var p50, p75 float64
+	if sideSign > 0 {
+		p50 = state.VwapPercentile.PosP50
+		p75 = state.VwapPercentile.PosP75
+	} else {
+		// Pulled directly as absolute positive numbers from your DB percentiles schema
+		p50 = state.VwapPercentile.NegP50
+		p75 = state.VwapPercentile.NegP75
+	}
+
+	// Transform distance into a pure positive magnitude matching your absolute database pool bounds
+	// Long: positive * 1 = positive | Short: negative * -1 = positive
+	distanceMagnitude := analytics.NormalizedVwapDistance * sideSign
+
+	// Simple, clean, bulletproof inequality boundary verification
+	return distanceMagnitude >= p50 && distanceMagnitude < p75
 }
 
 func (s *CombinedMoodStrategy) CheckExit(state *InstrumentState, currentSide string) string {
@@ -127,10 +148,8 @@ func (s *CombinedMoodStrategy) CheckExit(state *InstrumentState, currentSide str
 		return "HOLD"
 	}
 
-	// Determine the precise exit signal string the engine expects ("EXIT_LONG" or "EXIT_SHORT")
 	engineExitSignal := "EXIT_" + currentSide
 
-	// 1. Time-based Cutoff Evaluation
 	t := latestBar.Timestamp
 	currentTimeInt := t.Hour()*100 + t.Minute()
 	if currentTimeInt > ExitTime {
@@ -149,6 +168,5 @@ func (s *CombinedMoodStrategy) CheckStopLoss(state *InstrumentState, currentSide
 }
 
 func (s *CombinedMoodStrategy) OnEntryCommit(state *InstrumentState, symbol string) {
-	// Left empty intentionally: Strategy tracking history is now isolated and
-	// managed centrally by the TimeBasedRouter inside state.StrategyHistory
+	// Managed centrally by the TimeBasedRouter
 }

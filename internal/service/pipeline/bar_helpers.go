@@ -121,39 +121,11 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 	}
 }
 
+// calculateProfileBlendedEfficiencies completely flattened to pure rank scaling
 func (bae *BarAnalyticsEngine) calculateProfileBlendedEfficiencies(bar *models.Bar) (float64, float64) {
+	// Simple linear normalization against max rank bucket (7.0)
 	rawVolEff := float64(bar.Analytics.VolumeRank) / 7.0
 	rawPriceEff := float64(bar.Analytics.PriceRank) / 7.0
-
-	if bar.Analytics.VolumeRank >= 6 {
-		token := uint32(bar.InstrumentToken)
-
-		if dna, exists := bae.dnaMap[token]; exists && dna != nil && dna.IntervalPercentiles != nil {
-			if baseline1m, has1m := dna.IntervalPercentiles["1m"]; has1m && baseline1m.PriceP90 > 0 {
-				candleBody := math.Abs(bar.Close - bar.Open)
-				priceRatio := candleBody / baseline1m.PriceP90
-
-				var priceIntensity float64
-				if priceRatio > 1.0 {
-					priceIntensity = math.Pow(priceRatio, 1.5)
-				} else {
-					priceIntensity = priceRatio
-				}
-
-				rawPriceEff = (rawPriceEff * 0.3) + (priceIntensity * 0.7)
-			}
-		}
-
-		if profile, ok := bae.profiles[token]; ok && profile != nil && profile.ADV30d > 0 {
-			var totalBarsPerDay float64 = 375.0
-			expectedVolPerBar := float64(profile.ADV30d) / totalBarsPerDay
-			if expectedVolPerBar > 0 {
-				volumeIntensity := bar.Volume / expectedVolPerBar
-				rawVolEff = (rawVolEff * 0.4) + (volumeIntensity * 0.6)
-			}
-		}
-	}
-
 	return rawVolEff, rawPriceEff
 }
 
