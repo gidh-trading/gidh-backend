@@ -22,10 +22,11 @@ type ContinuousLivingLedger struct {
 }
 
 type TimeframeAnalyticsHistory struct {
-	Ledger            ContinuousLivingLedger
-	TotalBars         int
-	TimePctAboveVwap  float64
-	RollingVolumeMean float64
+	Ledger                   ContinuousLivingLedger
+	TotalBars                int
+	TimePctAboveVwap         float64
+	RollingVolumeMean        float64
+	CurrentBarTicksAboveVwap int64
 }
 
 // BarAnalyticsEngine implements the stateless calculations layer across multi-thread pipelines.
@@ -61,6 +62,22 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 	// 1. Calculate structural ranks, direction boundaries, and current bar metrics
 	bae.CalculateContinuousAndStructuralMetrics(bar)
 
+	// Increment total bars tracked in history
+	h.TotalBars++
+
+	// Check if this finalized bar closed above VWAP
+	var weight float64 = 0.0
+	if bar.Close > bar.VWAP {
+		weight = 1.0
+	}
+
+	// Update running cumulative moving percentage
+	h.TimePctAboveVwap = ((h.TimePctAboveVwap * float64(h.TotalBars-1)) + weight) / float64(h.TotalBars)
+
+	if bar.TickCount > 0 {
+		bar.Analytics.TimePctAboveVwap = float64(h.CurrentBarTicksAboveVwap) / float64(bar.TickCount)
+	}
+
 	// 2. Advance the state of the Continuous Living Ledger using the compounding formula
 	decay := StandardDecayConstant
 	h.Ledger.ContinuousVolumeIntensity = (h.Ledger.ContinuousVolumeIntensity * decay) + bar.Analytics.VolumeIntensity
@@ -81,6 +98,10 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *TimeframeAnalyticsHistory) {
 	// Calculate base metrics on current raw forming bar state
 	bae.CalculateContinuousAndStructuralMetrics(bar)
+
+	if bar.TickCount > 0 {
+		bar.Analytics.TimePctAboveVwap = float64(h.CurrentBarTicksAboveVwap) / float64(bar.TickCount)
+	}
 
 	// Projected look-ahead calculation for real-time visualization (does not modify the ledger struct state)
 	decay := StandardDecayConstant

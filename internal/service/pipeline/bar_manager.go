@@ -256,11 +256,15 @@ func (bm *BarManager) updateTimeframe(
 
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
 
-		// 🟢 Seed the newly instantiated candle with historical parameter values safely
-		cs.bar.Analytics.TimePctAboveVwap = cs.history.TimePctAboveVwap
+		cs.history.CurrentBarTicksAboveVwap = 0
+		cs.bar.Analytics.TimePctAboveVwap = 0.0
 	}
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)
+
+	if tick.Raw.LastPrice > tick.Raw.AverageTradedPrice {
+		cs.history.CurrentBarTicksAboveVwap++
+	}
 
 	if bm.analyticsEngine != nil {
 		bm.analyticsEngine.AnalyzeTick(cs.bar, tick)
