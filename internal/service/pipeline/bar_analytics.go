@@ -19,10 +19,12 @@ type ContinuousLivingLedger struct {
 	LastUpdated               time.Time
 	ContinuousVolumeIntensity float64 // Smooth, compounding accumulation of market volume pressure
 	ContinuousPriceNormalized float64 // Smooth, compounding accumulation of directional momentum
+	VwapClosePct              float64
 }
 
 type TimeframeAnalyticsHistory struct {
 	Ledger            ContinuousLivingLedger
+	BarsAboveVwap     int
 	TotalBars         int
 	RollingVolumeMean float64
 }
@@ -63,15 +65,26 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 	// Increment total bars tracked in history
 	h.TotalBars++
 
+	// Check if this newly completed bar closed above VWAP
+	if bar.Close > bar.VWAP {
+		h.BarsAboveVwap++
+	}
+
+	// Compute running percentage based completely on closed bar history
+	if h.TotalBars > 0 {
+		h.Ledger.VwapClosePct = (float64(h.BarsAboveVwap) / float64(h.TotalBars)) * 100
+	}
+
 	// 2. Advance the state of the Continuous Living Ledger using the compounding formula
 	decay := StandardDecayConstant
 	h.Ledger.ContinuousVolumeIntensity = (h.Ledger.ContinuousVolumeIntensity * decay) + bar.Analytics.VolumeIntensity
 	h.Ledger.ContinuousPriceNormalized = (h.Ledger.ContinuousPriceNormalized * decay) + bar.Analytics.PriceNormalizedChange
 	h.Ledger.LastUpdated = bar.Timestamp
 
-	// 3. Bind the running state to the finalized bar container for down-stream applications and persistence
+	// 3. Bind the running state to the finalized bar container
 	bar.Analytics.ContinuousVolumeIntensity = h.Ledger.ContinuousVolumeIntensity
 	bar.Analytics.ContinuousPriceNormalized = h.Ledger.ContinuousPriceNormalized
+	bar.Analytics.VwapClosePct = h.Ledger.VwapClosePct
 
 	// 4. Persist bar to DB
 	if bae.dbWriter != nil {
@@ -84,10 +97,13 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *Timefra
 	// Calculate base metrics on current raw forming bar state
 	bae.CalculateContinuousAndStructuralMetrics(bar)
 
-	// Projected look-ahead calculation for real-time visualization (does not modify the ledger struct state)
+	// Projected look-ahead calculation for real-time visualization
 	decay := StandardDecayConstant
 	bar.Analytics.ContinuousVolumeIntensity = (h.Ledger.ContinuousVolumeIntensity * decay) + bar.Analytics.VolumeIntensity
 	bar.Analytics.ContinuousPriceNormalized = (h.Ledger.ContinuousPriceNormalized * decay) + bar.Analytics.PriceNormalizedChange
+
+	// Map the locked down historical value into the streaming active forming candle
+	bar.Analytics.VwapClosePct = h.Ledger.VwapClosePct
 }
 
 // CalculateContinuousAndStructuralMetrics maps continuous values for the heatmap and processes matrix blends
