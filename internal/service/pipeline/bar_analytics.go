@@ -8,18 +8,15 @@ import (
 )
 
 const (
-	StandardDecayConstant   = 0.80 // Baseline decay rate for trend bars
-	AbsorptionDecayConstant = 0.60 // Accelerated decay to forget past states faster during absorption
-	TheoreticalMaxCeiling   = 5.0  // 1.0 / (1.0 - 0.80)
+	StandardDecayConstant   = 0.80  // Baseline decay rate for trend bars
+	AbsorptionDecayConstant = 0.60  // Accelerated decay to forget past states faster during absorption
+	TheoreticalMaxCeiling   = 5.0   // 1.0 / (1.0 - 0.80)
+	ExpectedBarsPerSession  = 390.0 // Standard 6.5 hour equity session baseline (e.g., US Equities)
 )
 
-// ContinuousLivingLedger tracks un-netted structural order flow states
+// ContinuousLivingLedger tracks un-netted structural order flow states if needed by other components
 type ContinuousLivingLedger struct {
-	BullPriceState  float64
-	BearPriceState  float64
-	BullVolumeState float64
-	BearVolumeState float64
-	LastUpdated     time.Time
+	LastUpdated time.Time
 }
 
 type TimeframeAnalyticsHistory struct {
@@ -54,86 +51,43 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 	}
 
 	bar.Analytics.NormalizedVwapDistance = bae.calculateDistance(bar.Close, bar.VWAP, uint32(bar.InstrumentToken))
-	bae.computeMacroTimeframeRanksAndDirection(bar)
+	bae.CalculateContinuousAndStructuralMetrics(bar)
 }
 
+// AnalyzeClose processes the metrics at the close of the bar and commits to the database
 func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyticsHistory) {
-	bae.computeMacroTimeframeRanksAndDirection(bar)
+	// 1. Calculate structural ranks, direction boundaries, and continuous metrics
+	bae.CalculateContinuousAndStructuralMetrics(bar)
 
-	// Determine decay speed based on absorption structure
-	currentDecay := StandardDecayConstant
-	isAbsorption := bar.Analytics.Direction == models.DirBullishAbsorption || bar.Analytics.Direction == models.DirBearishAbsorption
-	if isAbsorption {
-		currentDecay = AbsorptionDecayConstant
-	}
-
-	// 1. DECAY BALANCES
-	h.Ledger.BullPriceState *= currentDecay
-	h.Ledger.BearPriceState *= currentDecay
-	h.Ledger.BullVolumeState *= currentDecay
-	h.Ledger.BearVolumeState *= currentDecay
-	h.Ledger.LastUpdated = bar.Timestamp
-
-	// 2. COMPUTE CLEAN RANK EFFICIENCIES
-	rawVolEff, rawPriceEff := bae.calculateProfileBlendedEfficiencies(bar)
-
-	// 3. MATRIX INJECTION WITH CONDITIONS
-	switch bar.Analytics.Direction {
-	case models.DirBullish, models.DirStrongBullish:
-		h.Ledger.BullVolumeState += rawVolEff
-		h.Ledger.BullPriceState += rawPriceEff
-
-	case models.DirBearish, models.DirStrongBearish:
-		h.Ledger.BearVolumeState += rawVolEff
-		h.Ledger.BearPriceState += rawPriceEff
-
-	case models.DirBullishAbsorption:
-		// Zero volume efficiency added during absorption periods
-		h.Ledger.BullPriceState += rawPriceEff
-
-	case models.DirBearishAbsorption:
-		// Zero volume efficiency added during absorption periods
-		h.Ledger.BearPriceState += rawPriceEff
-	}
-
-	// 4. RESOLVE MOOD
-	bar.Analytics.NetPriceMood = bae.calculateNetEfficiency(h.Ledger.BullPriceState, h.Ledger.BearPriceState, TheoreticalMaxCeiling)
-	bar.Analytics.NetVolumeMood = bae.calculateNetEfficiency(h.Ledger.BullVolumeState, h.Ledger.BearVolumeState, TheoreticalMaxCeiling)
-
+	// 3. Persist bar to DB
 	if bae.dbWriter != nil {
 		bae.dbWriter.AddBar(*bar)
 	}
 }
 
+// PopulateLiveAnalytics provides real-time population of metrics for live streams
 func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *TimeframeAnalyticsHistory) {
+	bae.CalculateContinuousAndStructuralMetrics(bar)
+}
+
+// CalculateContinuousAndStructuralMetrics maps continuous values for the heatmap and processes matrix blends
+func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *models.Bar) {
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 
-	currentDecay := StandardDecayConstant
-	isAbsorption := bar.Analytics.Direction == models.DirBullishAbsorption || bar.Analytics.Direction == models.DirBearishAbsorption
-	if isAbsorption {
-		currentDecay = AbsorptionDecayConstant
+	// 1. COMPUTE CONTINUOUS VOLUME INTENSITY (Dynamically scales by Timeframe)
+	var volumeIntensity float64 = 0.0
+	profile, exists := bae.profiles[uint32(bar.InstrumentToken)]
+	if exists && profile.ADV30d > 0 {
+		expectedBars := bae.getExpectedBarsForTimeframe(bar.Timeframe)
+		expectedBarVolumeBaseline := float64(profile.ADV30d) / expectedBars
+		volumeIntensity = float64(bar.Volume) / expectedBarVolumeBaseline
 	}
+	bar.Analytics.VolumeIntensity = volumeIntensity
 
-	rawVolEff, rawPriceEff := bae.calculateProfileBlendedEfficiencies(bar)
+	// 2. COMPUTE PRICE NORMALIZED CHANGE (-1.0 to +1.0)
+	bar.Analytics.PriceNormalizedChange = (float64(bar.Analytics.PriceRank) - 4.0) / 3.0
 
-	liveBullPrice := h.Ledger.BullPriceState * currentDecay
-	liveBearPrice := h.Ledger.BearPriceState * currentDecay
-	liveBullVol := h.Ledger.BullVolumeState * currentDecay
-	liveBearVol := h.Ledger.BearVolumeState * currentDecay
-
-	switch bar.Analytics.Direction {
-	case models.DirBullish, models.DirStrongBullish:
-		liveBullVol += rawVolEff
-		liveBullPrice += rawPriceEff
-	case models.DirBearish, models.DirStrongBearish:
-		liveBearVol += rawVolEff
-		liveBearPrice += rawPriceEff
-	case models.DirBullishAbsorption:
-		liveBullPrice += rawPriceEff
-	case models.DirBearishAbsorption:
-		liveBearPrice += rawPriceEff
-	}
-
-	bar.Analytics.NetPriceMood = bae.calculateNetEfficiency(liveBullPrice, liveBearPrice, TheoreticalMaxCeiling)
-	bar.Analytics.NetVolumeMood = bae.calculateNetEfficiency(liveBullVol, liveBearVol, TheoreticalMaxCeiling)
+	// 3. COMPUTE STRUCTURAL RANK BLENDS
+	bar.Analytics.Convergence = float64(bar.Analytics.VolumeRank+bar.Analytics.PriceRank) / 2.0
+	bar.Analytics.Divergence = float64(bar.Analytics.VolumeRank-bar.Analytics.PriceRank) / 2.0
 }

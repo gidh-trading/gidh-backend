@@ -5,22 +5,6 @@ import (
 	"math"
 )
 
-func (bae *BarAnalyticsEngine) calculateNetEfficiency(bull, bear, maxCap float64) float64 {
-	if maxCap <= 0 {
-		maxCap = 1.0
-	}
-
-	netEff := ((bull - bear) / maxCap) * 100.0
-
-	if netEff > 100.0 {
-		return 100.0
-	}
-	if netEff < -100.0 {
-		return -100.0
-	}
-	return netEff
-}
-
 func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *models.Bar) {
 	token := uint32(bar.InstrumentToken)
 	dna, exists := bae.dnaMap[token]
@@ -121,12 +105,15 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 	}
 }
 
-// calculateProfileBlendedEfficiencies completely flattened to pure rank scaling
-func (bae *BarAnalyticsEngine) calculateProfileBlendedEfficiencies(bar *models.Bar) (float64, float64) {
-	// Simple linear normalization against max rank bucket (7.0)
-	rawVolEff := float64(bar.Analytics.VolumeRank) / 7.0
-	rawPriceEff := float64(bar.Analytics.PriceRank) / 7.0
-	return rawVolEff, rawPriceEff
+func (bae *BarAnalyticsEngine) calculateDistance(price, vwap float64, token uint32) float64 {
+	if vwap <= 0 {
+		return 0.0
+	}
+	rawPct := ((price - vwap) / vwap) * 100.0
+	if profile, ok := bae.profiles[token]; ok && profile != nil && profile.ADRPct > 0 {
+		return rawPct / profile.ADRPct
+	}
+	return rawPct
 }
 
 func (bae *BarAnalyticsEngine) getWickRank(ratio float64) int {
@@ -148,15 +135,24 @@ func (bae *BarAnalyticsEngine) getWickRank(ratio float64) int {
 	}
 }
 
-func (bae *BarAnalyticsEngine) calculateDistance(price, vwap float64, token uint32) float64 {
-	if vwap <= 0 {
-		return 0.0
+func (bae *BarAnalyticsEngine) calculateNetEfficiency(bull, bear, maxCap float64) float64 {
+	if maxCap <= 0 {
+		maxCap = 1.0
 	}
-	rawPct := ((price - vwap) / vwap) * 100.0
-	if profile, ok := bae.profiles[token]; ok && profile != nil && profile.ADRPct > 0 {
-		return rawPct / profile.ADRPct
+	netEff := ((bull - bear) / maxCap) * 100.0
+	if netEff > 100.0 {
+		return 100.0
 	}
-	return rawPct
+	if netEff < -100.0 {
+		return -100.0
+	}
+	return netEff
+}
+
+func (bae *BarAnalyticsEngine) calculateProfileBlendedEfficiencies(bar *models.Bar) (float64, float64) {
+	rawVolEff := float64(bar.Analytics.VolumeRank) / 7.0
+	rawPriceEff := float64(bar.Analytics.PriceRank) / 7.0
+	return rawVolEff, rawPriceEff
 }
 
 func (bae *BarAnalyticsEngine) getRankWeight(rank int) float64 {
@@ -175,5 +171,25 @@ func (bae *BarAnalyticsEngine) getRankWeight(rank int) float64 {
 		return 0.5
 	default:
 		return 0.1
+	}
+}
+
+// getExpectedBarsForTimeframe calculates expected session bars based on a 250-minute session (09:15 - 15:25)
+func (bae *BarAnalyticsEngine) getExpectedBarsForTimeframe(timeframe string) float64 {
+	const TotalSessionMinutes = 250.0
+
+	switch timeframe {
+	case "1m":
+		return TotalSessionMinutes / 1.0 // 250 bars
+	case "3m":
+		return TotalSessionMinutes / 3.0 // 83.33 bars
+	case "5m":
+		return TotalSessionMinutes / 5.0 // 50 bars
+	case "10m":
+		return TotalSessionMinutes / 10.0 // 25 bars
+	case "15m":
+		return TotalSessionMinutes / 15.0 // 16.67 bars
+	default:
+		return TotalSessionMinutes / 1.0 // Fallback to 1m baseline
 	}
 }

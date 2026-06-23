@@ -11,9 +11,13 @@ type BarAnalytics struct {
 	UpperWickRank int            `json:"upper_wick_rank"`
 	LowerWickRank int            `json:"lower_wick_rank"`
 
-	// --- Decoupled & Bounded Order Flow Metrics (-100 to +100) ---
-	NetVolumeMood float64 `json:"net_volume_mood"` // Volume commitment score
-	NetPriceMood  float64 `json:"net_price_mood"`  // Price displacement velocity
+	// --- Continuous Heatmap Visualizers ---
+	VolumeIntensity       float64 `json:"volume_intensity"`        // Multiplier of ADV30D (e.g., 0.5 to 10.0+)
+	PriceNormalizedChange float64 `json:"price_normalized_change"` // Interval-bounded progress (-1.0 to +1.0)
+
+	// --- Structural Rank Blends ---
+	Convergence float64 `json:"convergence"` // (VolumeRank + PriceRank) / 2
+	Divergence  float64 `json:"divergence"`  // (VolumeRank - PriceRank) / 2
 
 	// Retained helper distances if needed by structural components
 	NormalizedVwapDistance float64 `json:"normalized_vwap_distance"`
