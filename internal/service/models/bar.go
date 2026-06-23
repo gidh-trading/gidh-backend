@@ -15,6 +15,10 @@ type BarAnalytics struct {
 	VolumeIntensity       float64 `json:"volume_intensity"`        // Multiplier of ADV30D (e.g., 0.5 to 10.0+)
 	PriceNormalizedChange float64 `json:"price_normalized_change"` // Interval-bounded progress (-1.0 to +1.0)
 
+	// --- Running Continuous Accumulators ---
+	ContinuousVolumeIntensity float64 `json:"continuous_volume_intensity"` // Compounding volume pressure (0.0 to +Inf)
+	ContinuousPriceNormalized float64 `json:"continuous_price_normalized"` // Compounding price momentum (-5.0 to +5.0)
+
 	// --- Structural Rank Blends ---
 	Convergence float64 `json:"convergence"` // (VolumeRank + PriceRank) / 2
 	Divergence  float64 `json:"divergence"`  // (VolumeRank - PriceRank) / 2

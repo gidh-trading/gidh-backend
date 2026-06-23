@@ -1,13 +1,13 @@
 package strategy
 
 type TimeBasedRouter struct {
-	combinedMoodStrategy  Strategy
+	momentumRunStrategy   Strategy
 	vwapReversionStrategy Strategy
 }
 
 func NewTimeBasedRouter(combinedMoodStrat Strategy, vwapReversionStrat Strategy) *TimeBasedRouter {
 	return &TimeBasedRouter{
-		combinedMoodStrategy:  combinedMoodStrat,
+		momentumRunStrategy:   combinedMoodStrat,
 		vwapReversionStrategy: vwapReversionStrat,
 	}
 }
@@ -18,8 +18,8 @@ func (r *TimeBasedRouter) Name() string { return "Institutional_Ledger_PassThrou
 func (r *TimeBasedRouter) selectStrategy(state *InstrumentState) Strategy {
 	// 🛡️ CRITICAL FIX: If an asset is actively trading, route strictly to the strategy that opened it!
 	if state.CurrentSetupPhase == PhaseActiveTrade && state.ActiveStrategyName != "" {
-		if state.ActiveStrategyName == r.combinedMoodStrategy.Name() {
-			return r.combinedMoodStrategy
+		if state.ActiveStrategyName == r.momentumRunStrategy.Name() {
+			return r.momentumRunStrategy
 		}
 		if state.ActiveStrategyName == r.vwapReversionStrategy.Name() {
 			return r.vwapReversionStrategy
@@ -30,14 +30,14 @@ func (r *TimeBasedRouter) selectStrategy(state *InstrumentState) Strategy {
 	tf := "1m"
 	history, ok := state.BarHistory[tf]
 	if !ok || len(history) < 1 {
-		return r.combinedMoodStrategy
+		return r.momentumRunStrategy
 	}
 
 	t := history[len(history)-1].Timestamp
 	currentTimeInt := t.Hour()*100 + t.Minute()
 
-	if currentTimeInt >= StartTradingTime && currentTimeInt < ReversionStartTradingTime {
-		return r.combinedMoodStrategy
+	if currentTimeInt >= MomentumStartTradingTime && currentTimeInt < ReversionStartTradingTime {
+		return r.momentumRunStrategy
 	}
 
 	return r.vwapReversionStrategy

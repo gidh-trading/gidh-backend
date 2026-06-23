@@ -34,11 +34,11 @@ func NewEngine(
 	dbW *writer.DBWriter,
 ) *Engine {
 	// ⚡ Instantiate both strategies
-	combinedMoodStrat := NewCombinedMoodStrategy(stratConfigs)
+	momentumRunStrat := NewMomentumRunStrategy(stratConfigs)
 	vwapReversionStrat := NewVWAPPercentileReversionStrategy() // ⚡ Added
 
 	// ⚡ Pass both instances into your updated router wrapper
-	timeRouterWrapper := NewTimeBasedRouter(combinedMoodStrat, vwapReversionStrat)
+	timeRouterWrapper := NewTimeBasedRouter(momentumRunStrat, vwapReversionStrat)
 
 	return &Engine{
 		Registry:        make(map[string]*InstrumentState),

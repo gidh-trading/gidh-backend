@@ -14,9 +14,11 @@ const (
 	ExpectedBarsPerSession  = 390.0 // Standard 6.5 hour equity session baseline (e.g., US Equities)
 )
 
-// ContinuousLivingLedger tracks un-netted structural order flow states if needed by other components
+// ContinuousLivingLedger tracks un-netted structural order flow states and compounding active heatmaps
 type ContinuousLivingLedger struct {
-	LastUpdated time.Time
+	LastUpdated               time.Time
+	ContinuousVolumeIntensity float64 // Smooth, compounding accumulation of market volume pressure
+	ContinuousPriceNormalized float64 // Smooth, compounding accumulation of directional momentum
 }
 
 type TimeframeAnalyticsHistory struct {
@@ -54,20 +56,36 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 	bae.CalculateContinuousAndStructuralMetrics(bar)
 }
 
-// AnalyzeClose processes the metrics at the close of the bar and commits to the database
+// AnalyzeClose processes the metrics at the close of the bar, advances the continuous ledger, and commits to DB
 func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyticsHistory) {
-	// 1. Calculate structural ranks, direction boundaries, and continuous metrics
+	// 1. Calculate structural ranks, direction boundaries, and current bar metrics
 	bae.CalculateContinuousAndStructuralMetrics(bar)
 
-	// 3. Persist bar to DB
+	// 2. Advance the state of the Continuous Living Ledger using the compounding formula
+	decay := StandardDecayConstant
+	h.Ledger.ContinuousVolumeIntensity = (h.Ledger.ContinuousVolumeIntensity * decay) + bar.Analytics.VolumeIntensity
+	h.Ledger.ContinuousPriceNormalized = (h.Ledger.ContinuousPriceNormalized * decay) + bar.Analytics.PriceNormalizedChange
+	h.Ledger.LastUpdated = bar.Timestamp
+
+	// 3. Bind the running state to the finalized bar container for down-stream applications and persistence
+	bar.Analytics.ContinuousVolumeIntensity = h.Ledger.ContinuousVolumeIntensity
+	bar.Analytics.ContinuousPriceNormalized = h.Ledger.ContinuousPriceNormalized
+
+	// 4. Persist bar to DB
 	if bae.dbWriter != nil {
 		bae.dbWriter.AddBar(*bar)
 	}
 }
 
-// PopulateLiveAnalytics provides real-time population of metrics for live streams
+// PopulateLiveAnalytics provides real-time population of metrics for live UI streams without mutating history
 func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *TimeframeAnalyticsHistory) {
+	// Calculate base metrics on current raw forming bar state
 	bae.CalculateContinuousAndStructuralMetrics(bar)
+
+	// Projected look-ahead calculation for real-time visualization (does not modify the ledger struct state)
+	decay := StandardDecayConstant
+	bar.Analytics.ContinuousVolumeIntensity = (h.Ledger.ContinuousVolumeIntensity * decay) + bar.Analytics.VolumeIntensity
+	bar.Analytics.ContinuousPriceNormalized = (h.Ledger.ContinuousPriceNormalized * decay) + bar.Analytics.PriceNormalizedChange
 }
 
 // CalculateContinuousAndStructuralMetrics maps continuous values for the heatmap and processes matrix blends
