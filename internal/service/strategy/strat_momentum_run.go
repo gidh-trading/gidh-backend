@@ -60,17 +60,16 @@ func (s *MomentumRunStrategy) CheckEntry(state *InstrumentState) string {
 
 	volIntensity := latestBar.Analytics.ContinuousVolumeIntensity
 	priceNorm := latestBar.Analytics.ContinuousPriceNormalized
-	timePctAboveVwap := latestBar.Analytics.TimePctAboveVwap
 
 	// 🎯 Volume energy sweet-spot
 	if volIntensity > 3.0 && volIntensity < 5.0 {
 
 		// 🎯 Corrected: Return GO_LONG / GO_SHORT to match the Engine expectations
-		if priceNorm > 1.5 && timePctAboveVwap > 80 {
+		if priceNorm > 1.5 {
 			return "GO_LONG"
 		}
 
-		if priceNorm < -1.5 && timePctAboveVwap < 20 {
+		if priceNorm < -1.5 {
 			return "GO_SHORT"
 		}
 	}

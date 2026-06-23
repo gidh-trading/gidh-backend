@@ -151,8 +151,7 @@ func newCandleState(ts time.Time, price float64, token uint32, name, timeframe s
 	return &candleState{
 		bar: newBar(ts, price, token, name, timeframe),
 		history: &TimeframeAnalyticsHistory{ // 🟢 Instantiated directly inside context tracking frame
-			TotalBars:        0,
-			TimePctAboveVwap: 0.0,
+			TotalBars: 0,
 		},
 	}
 }
@@ -256,15 +255,9 @@ func (bm *BarManager) updateTimeframe(
 
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
 
-		cs.history.CurrentBarTicksAboveVwap = 0
-		cs.bar.Analytics.TimePctAboveVwap = 0.0
 	}
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)
-
-	if tick.Raw.LastPrice > tick.Raw.AverageTradedPrice {
-		cs.history.CurrentBarTicksAboveVwap++
-	}
 
 	if bm.analyticsEngine != nil {
 		bm.analyticsEngine.AnalyzeTick(cs.bar, tick)

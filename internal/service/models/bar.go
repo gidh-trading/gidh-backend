@@ -25,7 +25,6 @@ type BarAnalytics struct {
 
 	// Retained helper distances if needed by structural components
 	NormalizedVwapDistance float64 `json:"normalized_vwap_distance"`
-	TimePctAboveVwap       float64 `json:"time_pct_above_vwap"`
 }
 
 type Bar struct {
