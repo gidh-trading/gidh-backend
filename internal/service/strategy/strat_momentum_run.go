@@ -58,20 +58,6 @@ func (s *MomentumRunStrategy) CheckEntry(state *InstrumentState) string {
 		return "HOLD"
 	}
 
-	//volIntensity := latestBar.Analytics.ContinuousVolumeIntensity
-	//priceNorm := latestBar.Analytics.ContinuousPriceNormalized
-	//
-	//if volIntensity > 10.0 && volIntensity < 20.0 {
-	//
-	//	if priceNorm > 10 {
-	//		return "GO_LONG"
-	//	}
-	//
-	//	if priceNorm < -10 {
-	//		return "GO_SHORT"
-	//	}
-	//}
-
 	return "HOLD"
 }
 
