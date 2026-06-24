@@ -1,41 +1,81 @@
-CREATE OR REPLACE VIEW view_stock_daily_extreme_vwap_percentiles AS
-WITH daily_extremes AS (
-    SELECT
-        DATE(timestamp) AS trading_day,
-        instrument_token,
-        stock_name,
-        timeframe,
-        MAX((analytics->>'normalized_vwap_distance')::DOUBLE PRECISION) AS daily_max_positive,
-        -- Take the ABSOLUTE value of the negative stretch so it sorts intuitively (e.g., -0.50 becomes 0.50)
-        ABS(MIN((analytics->>'normalized_vwap_distance')::DOUBLE PRECISION)) AS daily_max_negative_abs
-    FROM gidh_bars
-    GROUP BY DATE(timestamp), instrument_token, stock_name, timeframe
-)
+DROP VIEW IF EXISTS v_gidh_bars_1m_analytics;
+CREATE OR REPLACE VIEW v_gidh_bars_1m_analytics AS
 SELECT
+    timestamp,
     instrument_token,
     stock_name,
     timeframe,
+    open,
+    high,
+    low,
+    close,
+    volume,
+    tick_count,
+    vwap,
+    poc,
+    vah,
+    val,
+    total_buy_qty,
+    total_sell_qty,
+    change_pct,
 
-    -- --- Upper Extreme Percentiles (Unchanged) ---
-    percentile_cont(0.05) WITHIN GROUP (ORDER BY daily_max_positive) AS upper_p05,
-    percentile_cont(0.10) WITHIN GROUP (ORDER BY daily_max_positive) AS upper_p10,
-    percentile_cont(0.25) WITHIN GROUP (ORDER BY daily_max_positive) AS upper_p25,
-    percentile_cont(0.50) WITHIN GROUP (ORDER BY daily_max_positive) AS upper_p50_median,
-    percentile_cont(0.75) WITHIN GROUP (ORDER BY daily_max_positive) AS upper_p75,
-    percentile_cont(0.90) WITHIN GROUP (ORDER BY daily_max_positive) AS upper_p90,
-    percentile_cont(0.95) WITHIN GROUP (ORDER BY daily_max_positive) AS upper_p95,
+    -- Flattened Structural Rank Blends
+    (analytics->>'volume_rank')::INTEGER            AS volume_rank,
+    (analytics->>'tick_rank')::INTEGER              AS tick_rank,
+    (analytics->>'price_rank')::INTEGER             AS price_rank,
+    (analytics->>'range_rank')::INTEGER             AS range_rank,
+    (analytics->>'direction')                       AS direction,
 
-    -- --- Lower Extreme Percentiles (Flipped to negative at the end) ---
-    -- Now P95 represents the biggest downward spikes (-0.50) instead of the smallest ones
-    -percentile_cont(0.05) WITHIN GROUP (ORDER BY daily_max_negative_abs) AS lower_p05,
-    -percentile_cont(0.10) WITHIN GROUP (ORDER BY daily_max_negative_abs) AS lower_p10,
-    -percentile_cont(0.25) WITHIN GROUP (ORDER BY daily_max_negative_abs) AS lower_p25,
-    -percentile_cont(0.50) WITHIN GROUP (ORDER BY daily_max_negative_abs) AS lower_p50_median,
-    -percentile_cont(0.75) WITHIN GROUP (ORDER BY daily_max_negative_abs) AS lower_p75,
-    -percentile_cont(0.90) WITHIN GROUP (ORDER BY daily_max_negative_abs) AS lower_p90,
-    -percentile_cont(0.95) WITHIN GROUP (ORDER BY daily_max_negative_abs) AS lower_p95,
+    -- Running Continuous Accumulators
+    (analytics->>'continuous_volume_intensity')::NUMERIC AS continuous_volume_intensity,
+    (analytics->>'continuous_price_normalized')::NUMERIC AS continuous_price_normalized,
 
-    COUNT(trading_day) AS total_days_analyzed
-FROM daily_extremes
-where stock_name != 'NIFTY50'
-GROUP BY instrument_token, stock_name, timeframe;
+    -- Retained Helper Distances
+    (analytics->>'normalized_vwap_distance')::NUMERIC AS normalized_vwap_distance,
+    (analytics->>'vwap_close_pct')::NUMERIC         AS vwap_close_pct
+
+FROM gidh_bars
+WHERE timeframe = '1m' and stock_name != 'NIFTY50'
+  AND (timestamp AT TIME ZONE 'Asia/Kolkata')::time >= '09:15:00'
+  AND (timestamp AT TIME ZONE 'Asia/Kolkata')::time <= '15:00:00';
+
+DROP VIEW IF EXISTS v_gidh_bars_5m_analytics;
+CREATE OR REPLACE VIEW v_gidh_bars_5m_analytics AS
+SELECT
+    timestamp,
+    instrument_token,
+    stock_name,
+    timeframe,
+    open,
+    high,
+    low,
+    close,
+    volume,
+    tick_count,
+    vwap,
+    poc,
+    vah,
+    val,
+    total_buy_qty,
+    total_sell_qty,
+    change_pct,
+
+    -- Flattened Structural Rank Blends
+    (analytics->>'volume_rank')::INTEGER            AS volume_rank,
+    (analytics->>'tick_rank')::INTEGER              AS tick_rank,
+    (analytics->>'price_rank')::INTEGER             AS price_rank,
+    (analytics->>'range_rank')::INTEGER             AS range_rank,
+    (analytics->>'direction')                       AS direction,
+
+    -- Running Continuous Accumulators
+    (analytics->>'continuous_volume_intensity')::NUMERIC AS continuous_volume_intensity,
+    (analytics->>'continuous_price_normalized')::NUMERIC AS continuous_price_normalized,
+
+    -- Retained Helper Distances
+    (analytics->>'normalized_vwap_distance')::NUMERIC AS normalized_vwap_distance,
+    (analytics->>'vwap_close_pct')::NUMERIC         AS vwap_close_pct
+
+FROM gidh_bars
+WHERE timeframe = '5m' and stock_name != 'NIFTY50'
+  AND (timestamp AT TIME ZONE 'Asia/Kolkata')::time >= '09:15:00'
+  AND (timestamp AT TIME ZONE 'Asia/Kolkata')::time <= '15:00:00';

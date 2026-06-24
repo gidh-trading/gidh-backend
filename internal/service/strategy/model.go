@@ -28,6 +28,13 @@ type InstrumentState struct {
 	LastTickTime       time.Time
 	BarHistory         map[string][]*models.Bar
 
+	SessionOpen float64
+	SessionHigh float64
+	SessionLow  float64
+
+	ADRHigh float64
+	ADRLow  float64
+
 	ActiveStrategyName string          `json:"active_strategy_name"` // e.g., "Combined_Mood_Velocity_Direct"
 	StrategyHistory    map[string]bool `json:"strategy_history"`     // Tracks which strategies have already traded this stock today
 }
@@ -59,8 +66,8 @@ func (s *InstrumentState) Clone() *InstrumentState {
 	return &InstrumentState{
 		StockName:          s.StockName,
 		Profile:            s.Profile,
-		VwapPercentile:     s.VwapPercentile,      // 🌟 Fixed: Pass the baseline percentile parameters
-		StrategyHistory:    clonedStrategyHistory, // 🌟 Fixed: Pass the tracking history map safely
+		VwapPercentile:     s.VwapPercentile,
+		StrategyHistory:    clonedStrategyHistory,
 		LatestPrice:        s.LatestPrice,
 		LiveSessionVWAP:    s.LiveSessionVWAP,
 		CurrentSetupPhase:  s.CurrentSetupPhase,
@@ -74,5 +81,10 @@ func (s *InstrumentState) Clone() *InstrumentState {
 		LastExitSignalTime: s.LastExitSignalTime,
 		LastTickTime:       s.LastTickTime,
 		BarHistory:         clonedHistory,
+		SessionOpen:        s.SessionOpen,
+		SessionHigh:        s.SessionHigh,
+		SessionLow:         s.SessionLow,
+		ADRHigh:            s.ADRHigh,
+		ADRLow:             s.ADRLow,
 	}
 }

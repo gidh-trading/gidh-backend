@@ -33,12 +33,9 @@ func NewEngine(
 	stratConfigs map[string]*models.OptimizedStrategyConfig,
 	dbW *writer.DBWriter,
 ) *Engine {
-	// ⚡ Instantiate both strategies
-	momentumRunStrat := NewMomentumRunStrategy(stratConfigs)
-	vwapReversionStrat := NewVWAPPercentileReversionStrategy() // ⚡ Added
+	adrReversionStrat := NewADRPercentileReversionStrategy()
 
-	// ⚡ Pass both instances into your updated router wrapper
-	timeRouterWrapper := NewTimeBasedRouter(momentumRunStrat, vwapReversionStrat)
+	timeRouterWrapper := NewTimeBasedRouter(adrReversionStrat)
 
 	return &Engine{
 		Registry:        make(map[string]*InstrumentState),
@@ -84,6 +81,28 @@ func (e *Engine) IngestClosedBar(bar *models.Bar) {
 
 	state.LatestPrice = bar.Close
 	state.LiveSessionVWAP = bar.VWAP
+
+	if bar.Timeframe == "1m" {
+		if state.SessionOpen == 0 {
+			state.SessionOpen = bar.Open
+			state.SessionHigh = bar.High
+			state.SessionLow = bar.Low
+		} else {
+			if bar.High > state.SessionHigh {
+				state.SessionHigh = bar.High
+			}
+			if bar.Low < state.SessionLow {
+				state.SessionLow = bar.Low
+			}
+		}
+	}
+
+	ceilingPrice, floorPrice, ok := e.GetADRBounds(state)
+
+	if ok {
+		state.ADRHigh = ceilingPrice
+		state.ADRLow = floorPrice
+	}
 
 	e.calculateActivePnLState(state, bar)
 	e.appendAndPruneHistory(state, bar)

@@ -1,46 +1,20 @@
 package strategy
 
 type TimeBasedRouter struct {
-	momentumRunStrategy   Strategy
-	vwapReversionStrategy Strategy
+	adrReversionStrategy Strategy
 }
 
-func NewTimeBasedRouter(combinedMoodStrat Strategy, vwapReversionStrat Strategy) *TimeBasedRouter {
+func NewTimeBasedRouter(adrReversionStrat Strategy) *TimeBasedRouter {
 	return &TimeBasedRouter{
-		momentumRunStrategy:   combinedMoodStrat,
-		vwapReversionStrategy: vwapReversionStrat,
+		adrReversionStrategy: adrReversionStrat,
 	}
 }
 
 func (r *TimeBasedRouter) Name() string { return "Institutional_Ledger_PassThrough_Router" }
 
-// selectStrategy handles traffic routing cleanly based on active execution context ownership
+// selectStrategy simplifies to always returning your 1 primary execution strategy
 func (r *TimeBasedRouter) selectStrategy(state *InstrumentState) Strategy {
-	// 🛡️ CRITICAL FIX: If an asset is actively trading, route strictly to the strategy that opened it!
-	if state.CurrentSetupPhase == PhaseActiveTrade && state.ActiveStrategyName != "" {
-		if state.ActiveStrategyName == r.momentumRunStrategy.Name() {
-			return r.momentumRunStrategy
-		}
-		if state.ActiveStrategyName == r.vwapReversionStrategy.Name() {
-			return r.vwapReversionStrategy
-		}
-	}
-
-	// For entries and flat scripts, route dynamically based on the current timeframe window
-	tf := "1m"
-	history, ok := state.BarHistory[tf]
-	if !ok || len(history) < 1 {
-		return r.momentumRunStrategy
-	}
-
-	t := history[len(history)-1].Timestamp
-	currentTimeInt := t.Hour()*100 + t.Minute()
-
-	if currentTimeInt >= MomentumStartTradingTime && currentTimeInt < ReversionStartTradingTime {
-		return r.momentumRunStrategy
-	}
-
-	return r.vwapReversionStrategy
+	return r.adrReversionStrategy
 }
 
 func (r *TimeBasedRouter) CheckEntry(state *InstrumentState) string {
@@ -52,7 +26,6 @@ func (r *TimeBasedRouter) CheckEntry(state *InstrumentState) string {
 }
 
 func (r *TimeBasedRouter) CheckExit(state *InstrumentState, currentSide string) string {
-	// Evaluates exits using the strategy that owns the active trade
 	return r.selectStrategy(state).CheckExit(state, currentSide)
 }
 

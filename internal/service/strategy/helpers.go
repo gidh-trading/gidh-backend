@@ -188,3 +188,19 @@ func CheckTakeProfitWithIntervalDecay(
 
 	return state.CurrentPnL >= decayedTarget
 }
+
+// GetADRBounds fetches the dynamic ADR ceilings and floors directly out of the state registers.
+func (e *Engine) GetADRBounds(state *InstrumentState) (ceiling float64, floor float64, ok bool) {
+	if state == nil || state.Profile == nil || state.Profile.ADRPct <= 0 || state.SessionOpen <= 0 {
+		return 0, 0, false
+	}
+
+	// 1. Calculate points value based on the fixed open anchor
+	adrPoints := state.SessionOpen * (state.Profile.ADRPct / 100.0)
+
+	// 2. Map directly to state extremes (Ceiling matches daily low, Floor matches daily high)
+	ceilingPrice := state.SessionLow + adrPoints
+	floorPrice := state.SessionHigh - adrPoints
+
+	return ceilingPrice, floorPrice, true
+}
