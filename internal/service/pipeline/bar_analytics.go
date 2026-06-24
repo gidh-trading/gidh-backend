@@ -9,7 +9,7 @@ import (
 )
 
 const (
-	StandardDecayConstant = 0.80 // Baseline decay rate for trend bars
+	SmoothingAlpha = 0.6 // 4-bar rolling micro-window alpha boundary
 )
 
 // ContinuousLivingLedger tracks un-netted structural order flow states and compounding active heatmaps
@@ -21,10 +21,19 @@ type ContinuousLivingLedger struct {
 }
 
 type TimeframeAnalyticsHistory struct {
-	Ledger            ContinuousLivingLedger
 	BarsAboveVwap     int
 	TotalBars         int
 	RollingVolumeMean float64
+
+	// --- Alpha 0.4 Historical Running Metrics ---
+	RollingVolumeIntensity float64
+	RollingPriceNormalized float64
+	RollingTickRank        float64
+
+	// --- Prior Closed Benchmarks to Anchors Slopes ---
+	LastClosedVolumeIntensity float64
+	LastClosedPriceNormalized float64
+	LastClosedTickRank        float64
 }
 
 // BarAnalyticsEngine implements the stateless calculations layer across multi-thread pipelines.
@@ -55,59 +64,69 @@ func (bae *BarAnalyticsEngine) AnalyzeTick(bar *models.Bar, tick *models.Enriche
 	bae.CalculateContinuousAndStructuralMetrics(bar)
 }
 
-// AnalyzeClose processes the metrics at the close of the bar, advances the continuous ledger, and commits to DB
+// AnalyzeClose processes metrics at the close, advances isolated rolling vectors, and writes to database
 func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyticsHistory) {
-	// 1. Finalize current raw structural parameters
 	bae.CalculateContinuousAndStructuralMetrics(bar)
 
-	// 2. Increment historical закрытие session tracking states
 	h.TotalBars++
 	if bar.Close > bar.VWAP {
 		h.BarsAboveVwap++
 	}
-
-	// 3. Compute locked, stateful indicators strictly on historical close data
 	if h.TotalBars > 0 {
-		h.Ledger.VwapClosePct = (float64(h.BarsAboveVwap) / float64(h.TotalBars)) * 100
+		bar.Analytics.VwapClosePct = (float64(h.BarsAboveVwap) / float64(h.TotalBars)) * 100
 	}
 
-	// 4. Advance the compounding Continuous Living Ledger state
-	decay := StandardDecayConstant
-	h.Ledger.ContinuousVolumeIntensity = (h.Ledger.ContinuousVolumeIntensity * decay) + bar.Analytics.VolumeIntensity
-	h.Ledger.ContinuousPriceNormalized = (h.Ledger.ContinuousPriceNormalized * decay) + bar.Analytics.PriceNormalizedChange
-	h.Ledger.LastUpdated = bar.Timestamp
+	// 1. Advance independent rolling averages using 0.4 alpha
+	alpha := SmoothingAlpha
+	h.RollingVolumeIntensity = (alpha * bar.Analytics.VolumeIntensity) + ((1.0 - alpha) * h.RollingVolumeIntensity)
+	h.RollingPriceNormalized = (alpha * bar.Analytics.PriceNormalizedChange) + ((1.0 - alpha) * h.RollingPriceNormalized)
+	h.RollingTickRank = (alpha * float64(bar.Analytics.TickRank)) + ((1.0 - alpha) * h.RollingTickRank)
 
-	// 5. Ingest the permanent ledger states into the finalized bar mapping
-	bar.Analytics.ContinuousVolumeIntensity = h.Ledger.ContinuousVolumeIntensity
-	bar.Analytics.ContinuousPriceNormalized = h.Ledger.ContinuousPriceNormalized
-	bar.Analytics.VwapClosePct = h.Ledger.VwapClosePct
+	// 2. Map the permanent historical average parameters to the structural output
+	bar.Analytics.RollingVolumeIntensity = h.RollingVolumeIntensity
+	bar.Analytics.RollingPriceNormalized = h.RollingPriceNormalized
+	bar.Analytics.RollingTickRank = h.RollingTickRank
 
-	// 6. Commit out to persistent database pipeline
+	// 3. Compute 1-Bar Historical Close Slope (Current finalized average vs Prior finalized average)
+	bar.Analytics.VolumeSlope = h.RollingVolumeIntensity - h.LastClosedVolumeIntensity
+	bar.Analytics.PriceSlope = h.RollingPriceNormalized - h.LastClosedPriceNormalized
+	bar.Analytics.TickSlope = h.RollingTickRank - h.LastClosedTickRank
+
+	// 4. Update the tracking checkpoints for the next incoming live candle
+	h.LastClosedVolumeIntensity = h.RollingVolumeIntensity
+	h.LastClosedPriceNormalized = h.RollingPriceNormalized
+	h.LastClosedTickRank = h.RollingTickRank
+
+	// 5. Commit structured output to DB
 	if bae.dbWriter != nil {
 		bae.dbWriter.AddBar(*bar)
 	}
 }
 
-// PopulateLiveAnalytics provides real-time population of metrics for live UI streams without mutating history
+// PopulateLiveAnalytics populates live snapshots for visual WebSocket feeds without mutating master history
 func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *TimeframeAnalyticsHistory) {
-	// Process instant raw calculations on current forming tick states
 	bae.CalculateContinuousAndStructuralMetrics(bar)
 
-	// Projected look-ahead blend to feed the WebSocket without polluting the master history state
-	decay := StandardDecayConstant
-	bar.Analytics.ContinuousVolumeIntensity = (h.Ledger.ContinuousVolumeIntensity * decay) + bar.Analytics.VolumeIntensity
-	bar.Analytics.ContinuousPriceNormalized = (h.Ledger.ContinuousPriceNormalized * decay) + bar.Analytics.PriceNormalizedChange
+	// 1. Linearly project what the current forming bar's metrics look like inside the window
+	alpha := SmoothingAlpha
+	bar.Analytics.RollingVolumeIntensity = (alpha * bar.Analytics.VolumeIntensity) + ((1.0 - alpha) * h.RollingVolumeIntensity)
+	bar.Analytics.RollingPriceNormalized = (alpha * bar.Analytics.PriceNormalizedChange) + ((1.0 - alpha) * h.RollingPriceNormalized)
+	bar.Analytics.RollingTickRank = (alpha * float64(bar.Analytics.TickRank)) + ((1.0 - alpha) * h.RollingTickRank)
 
-	// Map the stable historical percentage to the active visual streaming asset
-	bar.Analytics.VwapClosePct = h.Ledger.VwapClosePct
+	// 2. Real-Time Slope: Evaluate current forming window trajectory vs last finalized block anchor
+	bar.Analytics.VolumeSlope = bar.Analytics.RollingVolumeIntensity - h.LastClosedVolumeIntensity
+	bar.Analytics.PriceSlope = bar.Analytics.RollingPriceNormalized - h.LastClosedPriceNormalized
+	bar.Analytics.TickSlope = bar.Analytics.RollingTickRank - h.LastClosedTickRank
+
+	if h.TotalBars > 0 {
+		bar.Analytics.VwapClosePct = (float64(h.BarsAboveVwap) / float64(h.TotalBars)) * 100
+	}
 }
 
-// CalculateContinuousAndStructuralMetrics coordinates raw, isolated mathematical metrics for the asset bar
 func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *models.Bar) {
-	// Re-rank thresholds based on statistical distributions loaded in memory
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 
-	// 1. COMPUTE CONTINUOUS VOLUME INTENSITY
+	// 1. RAW VOLUME INTENSITY
 	var volumeIntensity float64 = 0.0
 	profile, exists := bae.profiles[uint32(bar.InstrumentToken)]
 	if exists && profile.ADV30d > 0 {
@@ -121,7 +140,7 @@ func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *mode
 	}
 	bar.Analytics.VolumeIntensity = volumeIntensity
 
-	// 2. COMPUTE PRICE NORMALIZED CHANGE (Using Existing DNA Interval Percentiles)
+	// 2. RAW PRICE NORMALIZED CHANGE
 	var priceIntensity float64 = 0.0
 	liveBodyMovement := math.Abs(bar.Close - bar.Open)
 
@@ -159,8 +178,4 @@ func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *mode
 		priceIntensity = float64(bar.Analytics.PriceRank) * bodySign
 	}
 	bar.Analytics.PriceNormalizedChange = priceIntensity
-
-	// 3. COMPUTE STRUCTURAL RANK BLENDS
-	bar.Analytics.Convergence = float64(bar.Analytics.VolumeRank+bar.Analytics.PriceRank) / 2.0
-	bar.Analytics.Divergence = float64(bar.Analytics.VolumeRank-bar.Analytics.PriceRank) / 2.0
 }

@@ -5,12 +5,12 @@ import (
 )
 
 const (
-	ADRRevStartTradingTime = 935  // 10:00 AM
-	ADRRevEndTradingTime   = 1445 // 2:45 PM
-	ADRRevForceExitTime    = 1455 // 2:55 PM (Right before 3:00 PM auto square-off)
+	ADRRevStartTradingTime = 920
+	ADRRevEndTradingTime   = 955
+	ADRRevForceExitTime    = 1015
 
-	ADRRevHardStopLossINR = -551.0
-	ADRRevTakeProfitINR   = 1000.0
+	ADRRevHardStopLossINR = -300.0
+	ADRRevTakeProfitINR   = 600.0
 )
 
 type ADRPercentileReversionStrategy struct {
@@ -59,23 +59,11 @@ func (s *ADRPercentileReversionStrategy) CheckEntry(state *InstrumentState) stri
 	// Extract pre-calculated pipeline properties
 	vwapDistancePct := latestBar.Analytics.NormalizedVwapDistance
 
-	// 🌟 Extract raw compounding directional momentum explicitly
-	directionalMomentum := latestBar.Analytics.ContinuousPriceNormalized
-	tickRank := latestBar.Analytics.TickRank
-
-	// 4. Short Condition:
-	// - Price overextended above VWAP and ADR High
-	// - AND upside trend momentum is under control (e.g., below a threshold like 4.0)
-	//   This blocks shorting directly into a vertical runaway short-squeeze.
-	if vwapDistancePct > 0.5 && state.LatestPrice > state.ADRHigh && directionalMomentum < 15.0 && tickRank < 4 {
+	if vwapDistancePct > 0.5 {
 		return "GO_SHORT"
 	}
 
-	// 5. Long Condition:
-	// - Price overextended below VWAP and ADR Low
-	// - AND absolute downside momentum is under control (e.g., selling pressure isn't worse than -4.0)
-	//   This blocks buying directly into a capitulation waterfall / falling knife.
-	if vwapDistancePct < -0.5 && state.LatestPrice < state.ADRLow && directionalMomentum > -15.0 && tickRank < 4 {
+	if vwapDistancePct < -0.5 {
 		return "GO_LONG"
 	}
 

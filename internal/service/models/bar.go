@@ -2,6 +2,8 @@ package models
 
 import "time"
 
+// internal/service/models/bar.go
+
 type BarAnalytics struct {
 	VolumeRank    int            `json:"volume_rank"`
 	TickRank      int            `json:"tick_rank"`
@@ -11,19 +13,20 @@ type BarAnalytics struct {
 	UpperWickRank int            `json:"upper_wick_rank"`
 	LowerWickRank int            `json:"lower_wick_rank"`
 
-	// --- Continuous Heatmap Visualizers ---
-	VolumeIntensity       float64 `json:"volume_intensity"`        // Multiplier of ADV30D (e.g., 0.5 to 10.0+)
-	PriceNormalizedChange float64 `json:"price_normalized_change"` // Interval-bounded progress (-1.0 to +1.0)
+	// --- Intermediate Metrics ---
+	VolumeIntensity       float64 `json:"-"`
+	PriceNormalizedChange float64 `json:"-"`
 
-	// --- Running Continuous Accumulators ---
-	ContinuousVolumeIntensity float64 `json:"continuous_volume_intensity"` // Compounding volume pressure (0.0 to +Inf)
-	ContinuousPriceNormalized float64 `json:"continuous_price_normalized"` // Compounding price momentum (-5.0 to +5.0)
+	// --- Independent Rolling Window Baselines ---
+	RollingVolumeIntensity float64 `json:"rolling_volume_intensity"`
+	RollingPriceNormalized float64 `json:"rolling_price_normalized"`
+	RollingTickRank        float64 `json:"rolling_tick_rank"`
 
-	// --- Structural Rank Blends ---
-	Convergence float64 `json:"convergence"` // (VolumeRank + PriceRank) / 2
-	Divergence  float64 `json:"divergence"`  // (VolumeRank - PriceRank) / 2
+	// --- Independent 1-Minute Directional Slopes ---
+	VolumeSlope float64 `json:"volume_slope"` // Live Volume vs Rolling baseline
+	PriceSlope  float64 `json:"price_slope"`  // Live Price vs Rolling baseline
+	TickSlope   float64 `json:"tick_slope"`   // Live Ticks vs Rolling baseline
 
-	// Retained helper distances if needed by structural components
 	NormalizedVwapDistance float64 `json:"normalized_vwap_distance"`
 	VwapClosePct           float64 `json:"vwap_close_pct"`
 }
