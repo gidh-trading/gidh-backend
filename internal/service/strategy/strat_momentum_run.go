@@ -6,7 +6,7 @@ import (
 )
 
 const (
-	MomentumStartTradingTime = 920
+	MomentumStartTradingTime = 917
 	MomentumEndTradingTime   = 955  // Expanded window to catch mid-day momentum breakouts
 	MomentumExitTime         = 1015 // Final intraday square-off time
 
@@ -58,21 +58,19 @@ func (s *MomentumRunStrategy) CheckEntry(state *InstrumentState) string {
 		return "HOLD"
 	}
 
-	volIntensity := latestBar.Analytics.ContinuousVolumeIntensity
-	priceNorm := latestBar.Analytics.ContinuousPriceNormalized
-
-	// 🎯 Volume energy sweet-spot
-	if volIntensity > 3.0 && volIntensity < 5.0 {
-
-		// 🎯 Corrected: Return GO_LONG / GO_SHORT to match the Engine expectations
-		if priceNorm > 1.5 {
-			return "GO_LONG"
-		}
-
-		if priceNorm < -1.5 {
-			return "GO_SHORT"
-		}
-	}
+	//volIntensity := latestBar.Analytics.ContinuousVolumeIntensity
+	//priceNorm := latestBar.Analytics.ContinuousPriceNormalized
+	//
+	//if volIntensity > 10.0 && volIntensity < 20.0 {
+	//
+	//	if priceNorm > 10 {
+	//		return "GO_LONG"
+	//	}
+	//
+	//	if priceNorm < -10 {
+	//		return "GO_SHORT"
+	//	}
+	//}
 
 	return "HOLD"
 }
@@ -97,16 +95,6 @@ func (s *MomentumRunStrategy) CheckExit(state *InstrumentState, currentSide stri
 	t := latestBar.Timestamp
 	currentTimeInt := t.Hour()*100 + t.Minute()
 	if currentTimeInt > MomentumExitTime {
-		return engineExitSignal
-	}
-
-	priceNorm := latestBar.Analytics.ContinuousPriceNormalized
-
-	// 🎯 Corrected: Match against "LONG" and "SHORT" as defined by the RiskManager
-	if currentSide == "LONG" && priceNorm < 0.0 {
-		return engineExitSignal
-	}
-	if currentSide == "SHORT" && priceNorm > 0.0 {
 		return engineExitSignal
 	}
 

@@ -174,22 +174,20 @@ func (bae *BarAnalyticsEngine) getRankWeight(rank int) float64 {
 	}
 }
 
-// getExpectedBarsForTimeframe calculates expected session bars based on a 250-minute session (09:15 - 15:25)
 func (bae *BarAnalyticsEngine) getExpectedBarsForTimeframe(timeframe string) float64 {
 	const TotalSessionMinutes = 250.0
-
 	switch timeframe {
 	case "1m":
-		return TotalSessionMinutes / 1.0 // 250 bars
+		return TotalSessionMinutes / 1.0
 	case "3m":
-		return TotalSessionMinutes / 3.0 // 83.33 bars
+		return TotalSessionMinutes / 3.0
 	case "5m":
-		return TotalSessionMinutes / 5.0 // 50 bars
+		return TotalSessionMinutes / 5.0
 	case "10m":
-		return TotalSessionMinutes / 10.0 // 25 bars
+		return TotalSessionMinutes / 10.0
 	case "15m":
-		return TotalSessionMinutes / 15.0 // 16.67 bars
+		return TotalSessionMinutes / 15.0
 	default:
-		return TotalSessionMinutes / 1.0 // Fallback to 1m baseline
+		return TotalSessionMinutes / 1.0
 	}
 }

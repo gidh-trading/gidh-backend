@@ -21,7 +21,7 @@ type InstrumentBarState struct {
 
 type candleState struct {
 	bar     *models.Bar
-	history *TimeframeAnalyticsHistory // 🟢 History now lives completely isolated inside the token container!
+	history *TimeframeAnalyticsHistory // Isolated stateful engine container tracking safely per asset token frame
 }
 
 type BarManager struct {
@@ -94,7 +94,6 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 		states := []*candleState{ibs.state1m, ibs.state3m, ibs.state5m, ibs.state10m, ibs.state15m}
 		for _, cs := range states {
 			if cs != nil && cs.bar != nil {
-				// 🟢 Pass the isolated history down to keep execution stateless
 				bm.analyticsEngine.PopulateLiveAnalytics(cs.bar, cs.history)
 				bm.wsHub.BroadcastJSON(cs.bar.StockName+":"+cs.bar.Timeframe, map[string]any{
 					"type": "bar",
@@ -150,7 +149,7 @@ func (bm *BarManager) ClearState() {
 func newCandleState(ts time.Time, price float64, token uint32, name, timeframe string) *candleState {
 	return &candleState{
 		bar: newBar(ts, price, token, name, timeframe),
-		history: &TimeframeAnalyticsHistory{ // 🟢 Instantiated directly inside context tracking frame
+		history: &TimeframeAnalyticsHistory{
 			TotalBars: 0,
 		},
 	}
@@ -176,12 +175,7 @@ func newBar(ts time.Time, price float64, token uint32, name, timeframe string) *
 	}
 }
 
-func (bm *BarManager) processTickForCandle(
-	cs *candleState,
-	tick *models.EnrichedTick,
-	vol float64,
-	timeframe string,
-) {
+func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.EnrichedTick, vol float64, timeframe string) {
 	price := tick.Raw.LastPrice
 
 	if price > cs.bar.High {
@@ -244,7 +238,6 @@ func (bm *BarManager) updateTimeframe(
 	if cs.bar.Timestamp.Before(candleStart) {
 		closedBar := cs.bar
 
-		// 🟢 Pass the completely isolated nested history pointer to keep pipeline safe
 		if bm.analyticsEngine != nil {
 			bm.analyticsEngine.AnalyzeClose(closedBar, cs.history)
 		}
@@ -254,7 +247,6 @@ func (bm *BarManager) updateTimeframe(
 		}
 
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
-
 	}
 
 	bm.processTickForCandle(cs, tick, vol, timeframe)
