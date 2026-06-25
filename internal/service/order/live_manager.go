@@ -597,7 +597,6 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		return fmt.Errorf("failed to recover position frames from exchange: %w", err)
 	}
 
-	// 🔌 Local tracking structure to capture snapshots inside the lock
 	type posChangeEvent struct {
 		symbol      string
 		netQty      int
@@ -608,11 +607,8 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 	var eventsToDispatch []posChangeEvent
 
 	lm.mu.Lock()
-	// Defer block ensures that callbacks execute ONLY after the mutex is completely freed
 	defer func() {
 		lm.mu.Unlock()
-
-		// 🔥 DISPATCH CAPTURED EVENTS SAFELY OUTSIDE LOCK FRAME
 		if lm.positionChangeCallback != nil && len(eventsToDispatch) > 0 {
 			for _, ev := range eventsToDispatch {
 				go lm.positionChangeCallback(ev.symbol, ev.netQty, ev.side, ev.avgPrice, ev.realizedPnL)
@@ -628,6 +624,12 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		key := fmt.Sprintf("%s:%s", symbolKey, productKey)
 		exchangeKeys[key] = true
 
+		// ⚡ FIX: Seed the price map with the broker's snapshot LTP immediately.
+		// This guarantees that the very first REST API invocation has a valid price vector!
+		if pos.LastPrice > 0 {
+			lm.lastPrices[symbolKey] = pos.LastPrice
+		}
+
 		// 1. Position is Flat
 		if pos.Quantity == 0 {
 			localPos, exists := lm.activePositions[key]
@@ -637,7 +639,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			}
 
 			localPos.NetQuantity = 0
-			localPos.Side = "FLAT" // ✅ Unified alignment with Risk Manager string requirements
+			localPos.Side = "FLAT"
 			localPos.AveragePrice = 0
 			localPos.UnrealizedPnL = 0
 			localPos.TargetPrice = 0
@@ -650,7 +652,6 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			}
 			lm.broadcastPositionUpdate(localPos)
 
-			// Safely queue event snapshot for post-lock execution
 			eventsToDispatch = append(eventsToDispatch, posChangeEvent{
 				symbol:      symbolKey,
 				netQty:      0,
@@ -678,12 +679,17 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		localPos.AveragePrice = lm.calculateTrueAveragePrice(symbolKey, pos.Quantity)
 		localPos.RealizedPnL = pos.Realised
 
+		// ⚡ FIX: Calculate contemporary Unrealized PnL during baseline sync
+		if pos.LastPrice > 0 {
+			localPos.UnrealizedPnL = (pos.LastPrice - localPos.AveragePrice) * float64(localPos.NetQuantity)
+			localPos.UnrealizedPnL = math.Round(localPos.UnrealizedPnL*100) / 100
+		}
+
 		if lm.dbWriter != nil {
 			lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
 		}
 		lm.broadcastPositionUpdate(localPos)
 
-		// Safely queue event snapshot for post-lock execution
 		eventsToDispatch = append(eventsToDispatch, posChangeEvent{
 			symbol:      symbolKey,
 			netQty:      localPos.NetQuantity,
@@ -699,7 +705,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 	for key, localPos := range lm.activePositions {
 		if !exchangeKeys[key] && localPos.NetQuantity != 0 {
 			localPos.NetQuantity = 0
-			localPos.Side = "FLAT" // ✅ Unified string alignment
+			localPos.Side = "FLAT"
 			localPos.AveragePrice = 0
 			localPos.TargetPrice = 0
 			localPos.StopLossPrice = 0
@@ -765,8 +771,9 @@ func (lm *LiveOrderManager) GetAllPositions() []models.Position {
 		posCopy := *pos
 
 		if ltp, exists := lm.lastPrices[posCopy.Symbol]; exists && posCopy.NetQuantity != 0 {
-			// ⚡ FIX: Unified simple calculation using the correctly signed negative/positive quantity
+			// ⚡ FIX: Added standard 2-decimal precision rounding to prevent float display noise in the UI
 			posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
+			posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100
 		}
 
 		positions = append(positions, posCopy)

@@ -462,9 +462,18 @@ func (pm *PaperPositionManager) GetOrders(symbol string) []models.OrderBookEntry
 func (pm *PaperPositionManager) GetAllPositions() []models.Position {
 	pm.mu.RLock()
 	defer pm.mu.RUnlock()
+
 	positions := make([]models.Position, 0, len(pm.activePositions))
 	for _, pos := range pm.activePositions {
-		positions = append(positions, *pos)
+		posCopy := *pos
+
+		// ⚡ FIX: Calculate dynamic Unrealized PnL immediately during REST API payload generation
+		if ltp, exists := pm.lastPrices[posCopy.Symbol]; exists && posCopy.NetQuantity != 0 {
+			posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
+			posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100
+		}
+
+		positions = append(positions, posCopy)
 	}
 	return positions
 }
