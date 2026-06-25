@@ -467,7 +467,7 @@ func (pm *PaperPositionManager) GetAllPositions() []models.Position {
 	for _, pos := range pm.activePositions {
 		posCopy := *pos
 
-		// ⚡ FIX: Calculate dynamic Unrealized PnL immediately during REST API payload generation
+		// ⚡ FIX: Calculate contemporary dynamic Unrealized PnL immediately upon REST fetch!
 		if ltp, exists := pm.lastPrices[posCopy.Symbol]; exists && posCopy.NetQuantity != 0 {
 			posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
 			posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100

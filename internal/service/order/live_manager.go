@@ -624,8 +624,8 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		key := fmt.Sprintf("%s:%s", symbolKey, productKey)
 		exchangeKeys[key] = true
 
-		// ⚡ FIX: Seed the price map with the broker's snapshot LTP immediately.
-		// This guarantees that the very first REST API invocation has a valid price vector!
+		// ⚡ FIX: Seed the local price map with the broker's snapshot LastPrice!
+		// This ensures that the very first REST API invocation on page load works right away.
 		if pos.LastPrice > 0 {
 			lm.lastPrices[symbolKey] = pos.LastPrice
 		}
@@ -679,7 +679,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 		localPos.AveragePrice = lm.calculateTrueAveragePrice(symbolKey, pos.Quantity)
 		localPos.RealizedPnL = pos.Realised
 
-		// ⚡ FIX: Calculate contemporary Unrealized PnL during baseline sync
+		// ⚡ FIX: Explicitly compute Unrealized PnL during baseline initialization state sync
 		if pos.LastPrice > 0 {
 			localPos.UnrealizedPnL = (pos.LastPrice - localPos.AveragePrice) * float64(localPos.NetQuantity)
 			localPos.UnrealizedPnL = math.Round(localPos.UnrealizedPnL*100) / 100
@@ -771,8 +771,8 @@ func (lm *LiveOrderManager) GetAllPositions() []models.Position {
 		posCopy := *pos
 
 		if ltp, exists := lm.lastPrices[posCopy.Symbol]; exists && posCopy.NetQuantity != 0 {
-			// ⚡ FIX: Added standard 2-decimal precision rounding to prevent float display noise in the UI
 			posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
+			// ⚡ FIX: Round down long float chains to clean up precision data before sending to REST API
 			posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100
 		}
 
