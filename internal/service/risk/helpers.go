@@ -11,7 +11,6 @@ func (rm *RiskManager) GetUIContractNote() UIContractNotePayload {
 	rm.mu.RLock()
 	defer rm.mu.RUnlock()
 
-	// Defend against read/write thread races by cloning slice variables inside a Read-Lock
 	tradesCopy := make([]models.BacktestExecutedTrade, len(rm.executedTrades))
 	copy(tradesCopy, rm.executedTrades)
 
@@ -25,9 +24,8 @@ func (rm *RiskManager) GetUIContractNote() UIContractNotePayload {
 	}
 }
 
-// CalculatePositionSizeAndFees calculates permitted order sizes based on leverage and margin.
+// CalculatePositionSizeAndFees calculates permitted order sizes based on leverage and margin without mutating records.
 func (rm *RiskManager) CalculatePositionSizeAndFees(symbol string, price float64) (int, float64) {
-	// Allocate 25% of total account capital per asset allocation configuration
 	allowedCapitalAllocation := InitialCapital * MaxCapitalPerStockPct
 	leveragedBuyingPower := allowedCapitalAllocation * MaxLeverage
 
@@ -36,16 +34,25 @@ func (rm *RiskManager) CalculatePositionSizeAndFees(symbol string, price float64
 		return 0, 0.0
 	}
 
-	// Rough forecasted fee calculation to audit account viability
-	totalCharges := rm.CalculateItemizedCharges(qty, price)
-	return qty, totalCharges
+	// Calculate standard NSE charges without saving costs to global daily session counters
+	turnover := float64(qty) * price
+	brokerage := turnover * 0.0003
+	if brokerage > 20.0 {
+		brokerage = 20.0
+	}
+	stt := turnover * 0.00025
+	exchangeFees := turnover * 0.0000345
+	sebiOverhead := turnover * 0.000001
+	gst := (brokerage + exchangeFees + sebiOverhead) * 0.18
+	total := brokerage + stt + exchangeFees + sebiOverhead + gst
+
+	return qty, total
 }
 
-// CalculateItemizedCharges tracks standard NSE contract transaction costs.
+// CalculateItemizedCharges tracks standard NSE contract transaction costs and logs them for executed trades.
 func (rm *RiskManager) CalculateItemizedCharges(qty int, price float64) float64 {
 	turnover := float64(qty) * price
 
-	// Cap intraday brokerage at standard limits
 	brokerage := turnover * 0.0003
 	if brokerage > 20.0 {
 		brokerage = 20.0
@@ -71,8 +78,7 @@ func (rm *RiskManager) CalculateItemizedCharges(qty int, price float64) float64 
 	return total
 }
 
-// HandleManualAndBrokerStateSync updates internal state if a user manually modifies
-// a position via the broker's native interface.
+// HandleManualAndBrokerStateSync updates internal state if a user manually modifies a position via the broker's native interface.
 func (rm *RiskManager) HandleManualAndBrokerStateSync(symbol string, netQty int, side string, avgPrice float64, realizedPnL float64) {
 	key := fmt.Sprintf("%s:MIS", symbol)
 
@@ -94,7 +100,6 @@ func (rm *RiskManager) HandleManualAndBrokerStateSync(symbol string, netQty int,
 
 	oldSide := pos.Side
 
-	// Overwrite Risk Manager's internal state with verified execution absolute truth
 	pos.NetQuantity = netQty
 	pos.Side = side
 	pos.AveragePrice = avgPrice

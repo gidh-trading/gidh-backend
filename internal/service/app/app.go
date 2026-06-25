@@ -171,7 +171,7 @@ func (a *App) initPipeline(
 	ctx context.Context,
 	dnaMap map[uint32]*models.MarketDNA,
 	profilesMap map[uint32]*models.InstrumentProfile,
-	vwapPercentilesMap map[uint32]*models.VWAPDistancePercentile, // ⚡ Added parameter
+	vwapPercentilesMap map[uint32]*models.VWAPDistancePercentile,
 ) error {
 	// 1. Build the fast structural maps for historical parameters
 	advMap := make(map[uint32]float64)
@@ -223,38 +223,26 @@ func (a *App) initPipeline(
 		}
 	}
 
-	// 📊 NEW: Instantiate Strategy Config Reader and load optimized strategy matrix rows
-	// Using '1m' entry timeframe as baseline matching our momentum strategy parameters
-	configReader := reader.NewStrategyConfigReader(a.pool)
-	stratConfigs, err := configReader.FetchLatestConfigs(ctx)
-	if err != nil {
-		logger.Errorf("Failed to fetch latest optimized strategy configurations: %v", err)
-		// Optionally fallback to an empty map instead of failing initialization completely
-		stratConfigs = make(map[string]*models.OptimizedStrategyConfig)
-	} else {
-		logger.Infof("Successfully loaded %d dynamic optimized strategy parameters from database.", len(stratConfigs))
-	}
+	// Step A: Initialize the dynamic Strategy Engine universally across ALL runtime modes
+	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, symbolVwapPercentiles, a.DBWriter)
 
-	// Step A: Initialize the Strategy Engine universally across ALL runtime modes
-	a.StrategyEngine = strategy.NewEngine(1*time.Hour, symbolProfiles, symbolVwapPercentiles, stratConfigs, a.DBWriter)
+	// 🔥 Step B: Dynamic Strategy Registry Plug-and-Play Initialization Hook!
+	logger.Infof("[System Initialization] Registering multi-strategy algorithms into execution engine matrix...")
+	a.StrategyEngine.ActiveRouter.RegisterStrategy(strategy.NewMomentumRunStrategy())
 
 	// Connect macro streaming listeners
 	barManager.MacroListener = a.StrategyEngine
 
-	// Step B: Initialize standalone Risk, Capital and Broker Order Controllers
+	// Step C: Initialize standalone Risk, Capital and Broker Order Controllers
 	a.RiskManager = risk.NewRiskManager(a.OrderManager, a.StrategyEngine)
 
-	// 🔥 Step C: REGISTER STATE SYNCHRONIZATION EVENT-DRIVEN CALLBACK HERE!
 	// Connects decoupled order execution updates straight to the risk management layer.
 	if a.OrderManager != nil && a.RiskManager != nil {
 		a.OrderManager.RegisterPositionChangeCallback(a.RiskManager.HandleManualAndBrokerStateSync)
 		logger.Info("[Startup] Event-Driven Position State Sync Callback registered between Order and Risk layers.")
 	}
 
-	// Step D: Only run the agent live or in simulation mode based on flag (if you want toggleable live execution)
-	// Note: If you want to disable automatic live market orders but keep risk calculations, do it inside risk manager.
 	a.Pipeline.AlgoAgent = a.RiskManager
-
 	a.activePipe = a.Pipeline
 
 	return nil

@@ -8,18 +8,12 @@ import (
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/writer"
-	"gidh-backend/pkg/logger"
-)
-
-const (
-	AutoSquareOffHour   = 15 // 3 PM
-	AutoSquareOffMinute = 0  // 00 minutes
 )
 
 type Engine struct {
 	mu              sync.RWMutex
-	Registry        map[string]*InstrumentState
-	ActiveStrategy  Strategy
+	Registry        map[string]*InstrumentState // Key: symbol_strategyName
+	ActiveRouter    *TimeBasedRouter
 	MaxBarLookback  time.Duration
 	profiles        map[string]*models.InstrumentProfile
 	vwapPercentiles map[string]*models.VWAPDistancePercentile
@@ -30,16 +24,11 @@ func NewEngine(
 	barLookback time.Duration,
 	profiles map[string]*models.InstrumentProfile,
 	vwapPercentiles map[string]*models.VWAPDistancePercentile,
-	stratConfigs map[string]*models.OptimizedStrategyConfig,
 	dbW *writer.DBWriter,
 ) *Engine {
-	adrReversionStrat := NewADRPercentileReversionStrategy()
-
-	timeRouterWrapper := NewTimeBasedRouter(adrReversionStrat)
-
 	return &Engine{
 		Registry:        make(map[string]*InstrumentState),
-		ActiveStrategy:  timeRouterWrapper,
+		ActiveRouter:    NewTimeBasedRouter(),
 		MaxBarLookback:  barLookback,
 		profiles:        profiles,
 		vwapPercentiles: vwapPercentiles,
@@ -47,225 +36,139 @@ func NewEngine(
 	}
 }
 
-func (e *Engine) validateTimeAndCooldowns(state *InstrumentState, marketTime time.Time, isFlat bool) (bool, bool, int) {
-	loc, err := time.LoadLocation("Asia/Kolkata")
-	if err != nil {
-		logger.Warnf("cannot load time location: %v", err)
-		loc = time.UTC
-	}
-
-	istTime := marketTime.In(loc)
-	currentHM := (istTime.Hour() * 100) + istTime.Minute()
-
-	cutoffHM := (AutoSquareOffHour * 100) + AutoSquareOffMinute
-
-	// 2. 🛡️ HANDLE TIME CUTOFF AT OR AFTER 3:00 PM
-	if currentHM >= cutoffHM {
-		if !isFlat {
-			return false, true, currentHM // Signals shouldSquareOff = true to trigger panic exits
-		}
-		return false, false, currentHM
-	}
-
-	// 3. 🛡️ ENFORCE COOLDOWN BREAK AFTER EXIT (3 Minutes / 3 Candles breathing room)
-	if isFlat && !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 3*time.Minute {
-		return false, false, currentHM
-	}
-
-	return true, false, currentHM
-}
-
+// IngestClosedBar broadcasts incoming OHLC history blocks across all matching strategies
 func (e *Engine) IngestClosedBar(bar *models.Bar) {
 	e.mu.Lock()
-	state := e.getOrInitializeState(bar.StockName)
+	defer e.mu.Unlock()
 
-	state.LatestPrice = bar.Close
-	state.LiveSessionVWAP = bar.VWAP
+	symbol := bar.StockName
 
-	if bar.Timeframe == "1m" {
-		if state.SessionOpen == 0 {
-			state.SessionOpen = bar.Open
-			state.SessionHigh = bar.High
-			state.SessionLow = bar.Low
-		} else {
-			if bar.High > state.SessionHigh {
+	// Update records for all strategies tracking this particular symbol
+	for name := range e.ActiveRouter.GetStrategies() {
+		state := e.getOrInitializeState(symbol, name)
+
+		state.LatestPrice = bar.Close
+		state.LiveSessionVWAP = bar.VWAP
+
+		if bar.Timeframe == "1m" {
+			if state.SessionOpen == 0 {
+				state.SessionOpen = bar.Open
 				state.SessionHigh = bar.High
-			}
-			if bar.Low < state.SessionLow {
 				state.SessionLow = bar.Low
+			} else {
+				if bar.High > state.SessionHigh {
+					state.SessionHigh = bar.High
+				}
+				if bar.Low < state.SessionLow {
+					state.SessionLow = bar.Low
+				}
 			}
 		}
+
+		ceilingPrice, floorPrice, ok := e.GetADRBounds(state)
+		if ok {
+			state.ADRHigh = ceilingPrice
+			state.ADRLow = floorPrice
+		}
+
+		e.calculateActivePnLState(state, bar)
+		e.appendAndPruneHistory(state, bar)
 	}
-
-	ceilingPrice, floorPrice, ok := e.GetADRBounds(state)
-
-	if ok {
-		state.ADRHigh = ceilingPrice
-		state.ADRLow = floorPrice
-	}
-
-	e.calculateActivePnLState(state, bar)
-	e.appendAndPruneHistory(state, bar)
-	e.mu.Unlock()
 }
 
-// UpdateContext evaluates streaming tick context on an isolated copy. NO SIDE EFFECTS.
-func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) (string, *InstrumentState) {
+// UpdateContext evaluates live streaming ticks concurrently over all isolated strategy sandboxes
+func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide string, averagePrice float64, netQty int) map[string]TickResult {
 	e.mu.Lock()
-	realState := e.getOrInitializeState(enrichedTick.Raw.StockName)
-	state := realState.Clone()
-	e.mu.Unlock()
+	defer e.mu.Unlock()
 
+	symbol := enrichedTick.Raw.StockName
 	marketTime := enrichedTick.Raw.Timestamp
-	state.LatestPrice = enrichedTick.Raw.LastPrice
-	state.ActiveSide = currentSide
-	state.ActiveAvgPrice = averagePrice
-	state.LastTickTime = marketTime
+	results := make(map[string]TickResult)
 
-	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
+	for name, strat := range e.ActiveRouter.GetStrategies() {
+		realState := e.getOrInitializeState(symbol, name)
+		state := realState.Clone()
 
-	isAllowed, shouldSquareOff, _ := e.validateTimeAndCooldowns(state, marketTime, isFlatNow)
-	if shouldSquareOff {
-		state.CurrentSetupPhase = PhaseNeutral
-		state.CurrentPnL = 0.0
-		state.PeakPnL = 0.0
-		state.LastExitSignalTime = marketTime
-		return "EXIT_" + currentSide, state
-	}
-	if !isAllowed {
-		return "HOLD", state
-	}
+		state.LatestPrice = enrichedTick.Raw.LastPrice
+		state.ActiveSide = currentSide
+		state.ActiveAvgPrice = averagePrice
+		state.LastTickTime = marketTime
 
-	// Handle continuous asynchronous external closure updates on the workspace snapshot
-	if state.CurrentSetupPhase == PhaseActiveTrade && isFlatNow {
-		state.CurrentSetupPhase = PhaseNeutral
-		state.CurrentPnL = 0.0
-		state.PeakPnL = 0.0
-		state.EntryTimestamp = time.Time{}
-		state.LastExitSignalTime = marketTime
-	}
+		isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
 
-	if !isFlatNow {
-		state.CurrentSetupPhase = PhaseActiveTrade
-		qtyPos := float64(netQty)
-		if qtyPos < 0 {
-			qtyPos = -qtyPos
+		isAllowed, shouldSquareOff := e.ActiveRouter.ValidateTimeAndCooldowns(strat, state, marketTime, isFlatNow)
+		if shouldSquareOff {
+			state.CurrentSetupPhase = PhaseNeutral
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
+			state.LastExitSignalTime = marketTime
+			results[name] = TickResult{Signal: "EXIT_" + currentSide, State: state}
+			continue
 		}
 
-		if currentSide == "LONG" {
-			state.CurrentPnL = (state.LatestPrice - averagePrice) * qtyPos
-		} else if currentSide == "SHORT" {
-			state.CurrentPnL = (averagePrice - state.LatestPrice) * qtyPos
+		if !isAllowed {
+			results[name] = TickResult{Signal: "HOLD", State: state}
+			continue
 		}
-		if state.CurrentPnL > state.PeakPnL {
-			state.PeakPnL = state.CurrentPnL
-		}
-	} else {
-		state.CurrentSetupPhase = PhaseNeutral
-		state.CurrentPnL = 0.0
-		state.PeakPnL = 0.0
-	}
 
-	if isFlatNow && e.ActiveStrategy != nil {
+		// Sync asynchronous platform execution events
+		if state.CurrentSetupPhase == PhaseActiveTrade && isFlatNow {
+			state.CurrentSetupPhase = PhaseNeutral
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
+			state.EntryTimestamp = time.Time{}
+			state.LastExitSignalTime = marketTime
+		}
 
-		signal := e.ActiveStrategy.CheckEntry(state)
-		if signal == "GO_LONG" || signal == "GO_SHORT" {
-			return signal, state
-		}
-	} else if !isFlatNow && e.ActiveStrategy != nil {
-		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
-			return "EXIT_" + currentSide, state
-		}
-		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
-			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
-				return "EXIT_" + currentSide, state
+		if !isFlatNow {
+			state.CurrentSetupPhase = PhaseActiveTrade
+			qtyPos := mathAbs(float64(netQty))
+
+			if currentSide == "LONG" {
+				state.CurrentPnL = (state.LatestPrice - averagePrice) * qtyPos
+			} else if currentSide == "SHORT" {
+				state.CurrentPnL = (averagePrice - state.LatestPrice) * qtyPos
 			}
-		}
-		exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
-		if exitSignal == "EXIT_LONG" || exitSignal == "EXIT_SHORT" {
-			return exitSignal, state
-		}
-	}
-
-	return "HOLD", state
-}
-
-// GenerateSignal calculates technical indications on top of an existing state context reference. NO SIDE EFFECTS.
-func (e *Engine) GenerateSignal(symbol string, workingState *InstrumentState, currentSide string, averagePrice float64, netQty int) (string, *InstrumentState) {
-	state := workingState.Clone()
-
-	marketTime := state.LastTickTime
-	isFlatNow := currentSide == "FLAT" || currentSide == "" || netQty == 0
-
-	isAllowed, shouldSquareOff, _ := e.validateTimeAndCooldowns(state, marketTime, isFlatNow)
-	if shouldSquareOff {
-		state.CurrentSetupPhase = PhaseNeutral
-		state.CurrentPnL = 0.0
-		state.PeakPnL = 0.0
-		state.LastExitSignalTime = marketTime
-		return "EXIT_" + currentSide, state
-	}
-	if !isAllowed {
-		return "HOLD", state
-	}
-
-	// Update internal metadata structures matching target inputs
-	if isFlatNow {
-		state.CurrentSetupPhase = PhaseNeutral
-		state.EntryVwapAnchor = 0.0
-	} else {
-		state.CurrentSetupPhase = PhaseActiveTrade
-		if state.EntryVwapAnchor == 0 {
-			state.EntryVwapAnchor = state.LiveSessionVWAP
-		}
-	}
-
-	if currentSide != "FLAT" && currentSide != "" && netQty > 0 {
-		qtyPos := float64(netQty)
-		if qtyPos < 0 {
-			qtyPos = -qtyPos
-		}
-
-		if currentSide == "LONG" {
-			state.CurrentPnL = (state.LatestPrice - averagePrice) * qtyPos
+			if state.CurrentPnL > state.PeakPnL {
+				state.PeakPnL = state.CurrentPnL
+			}
 		} else {
-			state.CurrentPnL = (averagePrice - state.LatestPrice) * qtyPos
+			state.CurrentSetupPhase = PhaseNeutral
+			state.CurrentPnL = 0.0
+			state.PeakPnL = 0.0
 		}
-		if state.CurrentPnL > state.PeakPnL {
-			state.PeakPnL = state.CurrentPnL
-		}
-	}
 
-	if isFlatNow && e.ActiveStrategy != nil {
-
-		signal := e.ActiveStrategy.CheckEntry(state)
-		if signal == "GO_LONG" || signal == "GO_SHORT" {
-			return signal, state
-		}
-		return "HOLD", state
-	}
-
-	if e.ActiveStrategy != nil {
-		if e.ActiveStrategy.CheckStopLoss(state, currentSide, averagePrice, netQty) {
-			return "EXIT_" + currentSide, state
-		}
-		if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
-			if e.ActiveStrategy.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
-				return "EXIT_" + currentSide, state
+		// Dynamic Signal Evaluation
+		if isFlatNow {
+			signal := strat.CheckEntry(state)
+			results[name] = TickResult{Signal: signal, State: state}
+		} else {
+			if strat.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+				results[name] = TickResult{Signal: "EXIT_" + currentSide, State: state}
+				continue
+			}
+			if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
+				if strat.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+					results[name] = TickResult{Signal: "EXIT_" + currentSide, State: state}
+					continue
+				}
+			}
+			exitSignal := strat.CheckExit(state, currentSide)
+			if exitSignal == "EXIT_LONG" || exitSignal == "EXIT_SHORT" {
+				results[name] = TickResult{Signal: exitSignal, State: state}
+			} else {
+				results[name] = TickResult{Signal: "HOLD", State: state}
 			}
 		}
-		exitSignal := e.ActiveStrategy.CheckExit(state, currentSide)
-		if exitSignal != "HOLD" && exitSignal != "" {
-			return exitSignal, state
-		}
 	}
 
-	return "HOLD", state
+	return results
 }
 
-// CommitTransaction safely pushes the fully derived final proposed state to global active memory.
-func (e *Engine) CommitTransaction(symbol string, proposedState *InstrumentState, signal string, reason string, qty int) {
+// CommitTransaction safely pushes a proposed state modification to active tracking memory
+func (e *Engine) CommitTransaction(symbol string, strategyName string, proposedState *InstrumentState, signal string, reason string, qty int) {
 	e.mu.Lock()
+	compositeKey := fmt.Sprintf("%s_%s", symbol, strategyName)
 
 	isEntry := signal == "GO_LONG" || signal == "GO_SHORT"
 	isExit := strings.HasPrefix(signal, "EXIT_")
@@ -277,20 +180,32 @@ func (e *Engine) CommitTransaction(symbol string, proposedState *InstrumentState
 		proposedState.CurrentTradeID = fmt.Sprintf("TRD_%s_%d", symbol, proposedState.LastTickTime.UnixNano())
 		proposedState.PeakPnL = 0.0
 		proposedState.CurrentPnL = 0.0
-		if e.ActiveStrategy != nil {
-			e.ActiveStrategy.OnEntryCommit(proposedState, symbol)
+
+		// Extract current strategy metric block
+		stats := proposedState.StrategyHistory[strategyName]
+		stats.TradeCount++
+		stats.LastTradeTime = proposedState.LastTickTime
+		stats.IsCurrentlyActive = true
+		proposedState.StrategyHistory[strategyName] = stats
+
+		if strat, ok := e.ActiveRouter.GetStrategies()[strategyName]; ok {
+			strat.OnEntryCommit(proposedState, symbol)
 		}
 
 	} else if isExit {
 		proposedState.CurrentSetupPhase = PhaseNeutral
 		proposedState.LastExitSignalTime = proposedState.LastTickTime
+
+		stats := proposedState.StrategyHistory[strategyName]
+		stats.IsCurrentlyActive = false
+		proposedState.StrategyHistory[strategyName] = stats
 	}
 
-	e.Registry[symbol] = proposedState
+	e.Registry[compositeKey] = proposedState
 	e.mu.Unlock()
 
-	// 📊 Persist transaction histories explicitly on definitive Entry/Exit executions
-	if isEntry || isExit {
+	// 📊 Persist execution records asynchronously
+	if (isEntry || isExit) && e.dbWriter != nil {
 		marketSnapshot := map[string]interface{}{
 			"session_vwap":      proposedState.LiveSessionVWAP,
 			"vwap_deviation":    proposedState.LatestPrice - proposedState.LiveSessionVWAP,
@@ -316,7 +231,7 @@ func (e *Engine) CommitTransaction(symbol string, proposedState *InstrumentState
 
 		txRecord := models.StrategyTransaction{
 			TradeID:        proposedState.CurrentTradeID,
-			StrategyName:   e.ActiveStrategy.Name(),
+			StrategyName:   strategyName,
 			Instrument:     strings.ToUpper(symbol),
 			ActionType:     strings.ToUpper(signal),
 			Price:          proposedState.LatestPrice,
@@ -328,8 +243,6 @@ func (e *Engine) CommitTransaction(symbol string, proposedState *InstrumentState
 			MarketSnapshot: marketSnapshot,
 		}
 
-		if e.dbWriter != nil {
-			go e.dbWriter.PersistStrategyTransaction(txRecord)
-		}
+		go e.dbWriter.PersistStrategyTransaction(txRecord)
 	}
 }

@@ -10,6 +10,19 @@ const (
 	PhaseActiveTrade = "ACTIVE_TRADE"
 )
 
+// StrategyStats tracks localized metrics for a specific strategy on a stock instrument
+type StrategyStats struct {
+	TradeCount        int       `json:"trade_count"`         // Total trades taken by this strategy for this stock today
+	LastTradeTime     time.Time `json:"last_trade_time"`     // Timestamp of the last executed signal
+	IsCurrentlyActive bool      `json:"is_currently_active"` // Whether this strategy has an open position context here
+}
+
+// TickResult packages the generated execution signal alongside its calculated state snapshot.
+type TickResult struct {
+	Signal string
+	State  *InstrumentState
+}
+
 type InstrumentState struct {
 	StockName          string
 	Profile            *models.InstrumentProfile
@@ -35,8 +48,9 @@ type InstrumentState struct {
 	ADRHigh float64
 	ADRLow  float64
 
-	ActiveStrategyName string          `json:"active_strategy_name"` // e.g., "Combined_Mood_Velocity_Direct"
-	StrategyHistory    map[string]bool `json:"strategy_history"`     // Tracks which strategies have already traded this stock today
+	ActiveStrategyName string                   `json:"active_strategy_name"` // e.g., "Combined_Mood_Velocity_Direct"
+	StrategyHistory    map[string]StrategyStats `json:"strategy_history"`     // Tracks detailed historical metrics per strategy for this stock today
+	StrategyTradeCount int                      `json:"strategy_trade_count"` // Global fallback counter or active tracking metric
 }
 
 // Clone constructs an isolated memory footprint copy to prevent side-effect leaks
@@ -55,11 +69,11 @@ func (s *InstrumentState) Clone() *InstrumentState {
 		}
 	}
 
-	// 2. 🌟 Create a deep copy of the StrategyHistory map to prevent map race conditions
-	clonedStrategyHistory := make(map[string]bool)
+	// 2. 🌟 Create a deep copy of the StrategyHistory map with our new value type struct to prevent map race conditions
+	clonedStrategyHistory := make(map[string]StrategyStats)
 	if s.StrategyHistory != nil {
 		for k, v := range s.StrategyHistory {
-			clonedStrategyHistory[k] = v
+			clonedStrategyHistory[k] = v // Struct fields copy value-wise natively in Go assignment
 		}
 	}
 
@@ -86,5 +100,7 @@ func (s *InstrumentState) Clone() *InstrumentState {
 		SessionLow:         s.SessionLow,
 		ADRHigh:            s.ADRHigh,
 		ADRLow:             s.ADRLow,
+		ActiveStrategyName: s.ActiveStrategyName,
+		StrategyTradeCount: s.StrategyTradeCount,
 	}
 }

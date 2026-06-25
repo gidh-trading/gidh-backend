@@ -1,49 +1,65 @@
 package strategy
 
+import (
+	"time"
+)
+
 type TimeBasedRouter struct {
-	adrReversionStrategy Strategy
+	strategies map[string]Strategy
 }
 
-func NewTimeBasedRouter(adrReversionStrat Strategy) *TimeBasedRouter {
+func NewTimeBasedRouter() *TimeBasedRouter {
 	return &TimeBasedRouter{
-		adrReversionStrategy: adrReversionStrat,
+		strategies: make(map[string]Strategy),
 	}
 }
 
-func (r *TimeBasedRouter) Name() string { return "Institutional_Ledger_PassThrough_Router" }
+func (r *TimeBasedRouter) Name() string { return "Dynamic_Multi_Strategy_Registry_Router" }
 
-// selectStrategy simplifies to always returning your 1 primary execution strategy
-func (r *TimeBasedRouter) selectStrategy(state *InstrumentState) Strategy {
-	return r.adrReversionStrategy
+// RegisterStrategy permits registration of distinct strategies at boot-time with zero code modifications
+func (r *TimeBasedRouter) RegisterStrategy(strat Strategy) {
+	r.strategies[strat.Name()] = strat
 }
 
-func (r *TimeBasedRouter) CheckEntry(state *InstrumentState) string {
-	// Only allow evaluation if the stock is currently completely flat
-	if state.CurrentSetupPhase == PhaseActiveTrade {
-		return "HOLD"
+// GetStrategies exposes all active running strategy configurations
+func (r *TimeBasedRouter) GetStrategies() map[string]Strategy {
+	return r.strategies
+}
+
+// ValidateTimeAndCooldowns audits trading eligibility using isolated strategy parameter rules
+func (r *TimeBasedRouter) ValidateTimeAndCooldowns(strat Strategy, state *InstrumentState, marketTime time.Time, isFlat bool) (bool, bool) {
+	loc, err := time.LoadLocation("Asia/Kolkata")
+	if err != nil {
+		loc = time.UTC
 	}
-	return r.selectStrategy(state).CheckEntry(state)
-}
 
-func (r *TimeBasedRouter) CheckExit(state *InstrumentState, currentSide string) string {
-	return r.selectStrategy(state).CheckExit(state, currentSide)
-}
+	istTime := marketTime.In(loc)
+	currentHM := (istTime.Hour() * 100) + istTime.Minute()
+	cfg := strat.Config()
 
-func (r *TimeBasedRouter) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	return r.selectStrategy(state).CheckTakeProfit(state, currentSide, averagePrice, netQty)
-}
-
-func (r *TimeBasedRouter) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	return r.selectStrategy(state).CheckStopLoss(state, currentSide, averagePrice, netQty)
-}
-
-func (r *TimeBasedRouter) OnEntryCommit(state *InstrumentState, symbol string) {
-	activeStrat := r.selectStrategy(state)
-
-	// Bind strategy identity directly onto the shared instrument state block
-	state.ActiveStrategyName = activeStrat.Name()
-	if state.StrategyHistory == nil {
-		state.StrategyHistory = make(map[string]bool)
+	// 1. Enforce Strategy-Level Maximum Trades Limit for this specific stock
+	stats, exists := state.StrategyHistory[strat.Name()]
+	if isFlat && exists && stats.TradeCount >= cfg.MaximumTradesCount {
+		return false, false
 	}
-	state.StrategyHistory[activeStrat.Name()] = true
+
+	// 2. Handle Strategy-Specific Forced Square-Off Boundaries
+	if currentHM >= cfg.ForceExitTime {
+		if !isFlat {
+			return false, true // Signals shouldSquareOff = true to execute liquidation commands
+		}
+		return false, false
+	}
+
+	// 3. Enforce Strategy Active Trading Window
+	if currentHM < cfg.StartTradingTime || currentHM > cfg.EndTradingTime {
+		return false, false
+	}
+
+	// 4. Enforce Cooldown Breathing Space After Exit
+	if isFlat && !state.LastExitSignalTime.IsZero() && marketTime.Sub(state.LastExitSignalTime) < 3*time.Minute {
+		return false, false
+	}
+
+	return true, false
 }
