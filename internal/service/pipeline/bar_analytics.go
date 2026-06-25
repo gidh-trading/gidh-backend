@@ -1,7 +1,6 @@
 package pipeline
 
 import (
-	"math"
 	"time"
 
 	"gidh-backend/internal/service/models"
@@ -9,15 +8,13 @@ import (
 )
 
 const (
-	SmoothingAlpha = 0.6 // 4-bar rolling micro-window alpha boundary
+	SmoothingAlpha = 0.4
 )
 
 // ContinuousLivingLedger tracks un-netted structural order flow states and compounding active heatmaps
 type ContinuousLivingLedger struct {
-	LastUpdated               time.Time
-	ContinuousVolumeIntensity float64 // Smooth, compounding accumulation of market volume pressure
-	ContinuousPriceNormalized float64 // Smooth, compounding accumulation of directional momentum
-	VwapClosePct              float64 // Locked historical percentage of bars closing above VWAP
+	LastUpdated  time.Time
+	VwapClosePct float64 // Locked historical percentage of bars closing above VWAP
 }
 
 type TimeframeAnalyticsHistory struct {
@@ -25,7 +22,7 @@ type TimeframeAnalyticsHistory struct {
 	TotalBars         int
 	RollingVolumeMean float64
 
-	// --- Alpha 0.4 Historical Running Metrics ---
+	// --- Alpha 0.6 Historical Running Metrics ---
 	RollingVolumeIntensity float64
 	RollingPriceNormalized float64
 	RollingTickRank        float64
@@ -76,10 +73,10 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 		bar.Analytics.VwapClosePct = (float64(h.BarsAboveVwap) / float64(h.TotalBars)) * 100
 	}
 
-	// 1. Advance independent rolling averages using 0.4 alpha
+	// 1. Advance independent rolling averages using the clean 1-7 (and signed -7 to 7) integer ranks directly
 	alpha := SmoothingAlpha
-	h.RollingVolumeIntensity = (alpha * bar.Analytics.VolumeIntensity) + ((1.0 - alpha) * h.RollingVolumeIntensity)
-	h.RollingPriceNormalized = (alpha * bar.Analytics.PriceNormalizedChange) + ((1.0 - alpha) * h.RollingPriceNormalized)
+	h.RollingVolumeIntensity = (alpha * float64(bar.Analytics.VolumeRank)) + ((1.0 - alpha) * h.RollingVolumeIntensity)
+	h.RollingPriceNormalized = (alpha * float64(bar.Analytics.PriceRank)) + ((1.0 - alpha) * h.RollingPriceNormalized)
 	h.RollingTickRank = (alpha * float64(bar.Analytics.TickRank)) + ((1.0 - alpha) * h.RollingTickRank)
 
 	// 2. Map the permanent historical average parameters to the structural output
@@ -107,10 +104,10 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *TimeframeAnalyticsHistory) {
 	bae.CalculateContinuousAndStructuralMetrics(bar)
 
-	// 1. Linearly project what the current forming bar's metrics look like inside the window
+	// 1. Linearly project what the current forming bar's metrics look like inside the window using integer ranks
 	alpha := SmoothingAlpha
-	bar.Analytics.RollingVolumeIntensity = (alpha * bar.Analytics.VolumeIntensity) + ((1.0 - alpha) * h.RollingVolumeIntensity)
-	bar.Analytics.RollingPriceNormalized = (alpha * bar.Analytics.PriceNormalizedChange) + ((1.0 - alpha) * h.RollingPriceNormalized)
+	bar.Analytics.RollingVolumeIntensity = (alpha * float64(bar.Analytics.VolumeRank)) + ((1.0 - alpha) * h.RollingVolumeIntensity)
+	bar.Analytics.RollingPriceNormalized = (alpha * float64(bar.Analytics.PriceRank)) + ((1.0 - alpha) * h.RollingPriceNormalized)
 	bar.Analytics.RollingTickRank = (alpha * float64(bar.Analytics.TickRank)) + ((1.0 - alpha) * h.RollingTickRank)
 
 	// 2. Real-Time Slope: Evaluate current forming window trajectory vs last finalized block anchor
@@ -124,58 +121,12 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *Timefra
 }
 
 func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *models.Bar) {
+	// 1. Evaluates structural parameters and updates bar.Analytics.PriceRank, RangeRank, etc. (from 1 to 7)
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 
-	// 1. RAW VOLUME INTENSITY
-	var volumeIntensity float64 = 0.0
-	profile, exists := bae.profiles[uint32(bar.InstrumentToken)]
-	if exists && profile.ADV30d > 0 {
-		expectedBars := bae.getExpectedBarsForTimeframe(bar.Timeframe)
-		expectedBarVolumeBaseline := float64(profile.ADV30d) / expectedBars
-
-		rawVolImpact := float64(bar.Volume) / expectedBarVolumeBaseline
-		abnormalityVolMultiplier := float64(bar.Analytics.VolumeRank) / 4.0
-
-		volumeIntensity = rawVolImpact * abnormalityVolMultiplier
+	// 2. Apply Directional Polarized Sign to PriceRank (-7 to +7 Spectrum)
+	// If the bar closed below its opening price, flip the rank negative to track bearish momentum.
+	if bar.Close < bar.Open && bar.Analytics.PriceRank > 0 {
+		bar.Analytics.PriceRank = -bar.Analytics.PriceRank
 	}
-	bar.Analytics.VolumeIntensity = volumeIntensity
-
-	// 2. RAW PRICE NORMALIZED CHANGE
-	var priceIntensity float64 = 0.0
-	liveBodyMovement := math.Abs(bar.Close - bar.Open)
-
-	var bodySign float64 = 0.0
-	if bar.Close > bar.Open {
-		bodySign = 1.0
-	} else if bar.Close < bar.Open {
-		bodySign = -1.0
-	}
-
-	dna, dnaExists := bae.dnaMap[uint32(bar.InstrumentToken)]
-	var tierBaseline float64 = 0.0
-
-	if dnaExists && dna.IntervalPercentiles != nil {
-		if tfMetrics, tfExists := dna.IntervalPercentiles[bar.Timeframe]; tfExists {
-			switch bar.Analytics.PriceRank {
-			case 7:
-				tierBaseline = tfMetrics.PriceP97
-			case 6:
-				tierBaseline = tfMetrics.PriceP90
-			case 5:
-				tierBaseline = tfMetrics.PriceP75
-			case 4:
-				tierBaseline = tfMetrics.PriceP50
-			default:
-				tierBaseline = tfMetrics.PriceP25
-			}
-		}
-	}
-
-	if tierBaseline > 0 {
-		rawPriceImpact := liveBodyMovement / tierBaseline
-		priceIntensity = rawPriceImpact * float64(bar.Analytics.PriceRank) * bodySign
-	} else {
-		priceIntensity = float64(bar.Analytics.PriceRank) * bodySign
-	}
-	bar.Analytics.PriceNormalizedChange = priceIntensity
 }

@@ -13,10 +13,6 @@ type BarAnalytics struct {
 	UpperWickRank int            `json:"upper_wick_rank"`
 	LowerWickRank int            `json:"lower_wick_rank"`
 
-	// --- Intermediate Metrics ---
-	VolumeIntensity       float64 `json:"-"`
-	PriceNormalizedChange float64 `json:"-"`
-
 	// --- Independent Rolling Window Baselines ---
 	RollingVolumeIntensity float64 `json:"rolling_volume_intensity"`
 	RollingPriceNormalized float64 `json:"rolling_price_normalized"`

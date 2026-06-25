@@ -26,94 +26,100 @@ func (s *MomentumRunStrategy) Config() *Config {
 }
 
 func (s *MomentumRunStrategy) CheckEntry(state *InstrumentState) string {
-	history, ok := state.BarHistory["1m"]
-	if !ok || len(history) == 0 {
-		return "HOLD"
-	}
+	return "HOLD"
+}
 
-	latestBar := history[len(history)-1]
-	if latestBar == nil {
-		return "HOLD"
-	}
-
-	analytics := latestBar.Analytics
-	const MinRankThreshold = 5
-
-	// 1. Core Momentum Fuel Filters (Volume & Velocity)
-	hasVolumeEffort := analytics.VolumeRank >= MinRankThreshold && analytics.RollingVolumeIntensity > 3
-	hasTransactionVelocity := analytics.TickRank >= MinRankThreshold && analytics.RollingTickRank > 4.0
-
-	// 2. Derive Current Raw & ADR-Normalized Distance from VWAP
-	// (Using state profile metadata and the shared analytical helper formula)
-
-	normalizedVwapDist := latestBar.Analytics.NormalizedVwapDistance
-	vwapClosePct := latestBar.Analytics.VwapClosePct
-
-	// 3. Determine Vector Directionality based on Price Expansion & Safety Bounds
-
-	// BULL RUN CONDITIONS (Long Entry)
-	isBullExpansion := analytics.PriceRank >= MinRankThreshold && analytics.RollingPriceNormalized > 3
-	isAboveValue := latestBar.Close > latestBar.VWAP
-
-	// New requested filters for high-momentum distribution extension:
-	passesLongVwapPct := vwapClosePct > 80.0
-	passesLongVwapDist := normalizedVwapDist > 0.1 && normalizedVwapDist < 0.2
-
-	if hasVolumeEffort && hasTransactionVelocity && isBullExpansion && isAboveValue && passesLongVwapPct && passesLongVwapDist {
-		return "GO_LONG"
-	}
-
-	// BEAR RUN CONDITIONS (Short Entry)
-	isBearExpansion := analytics.PriceRank >= MinRankThreshold && analytics.RollingPriceNormalized < -4
-	isBelowValue := latestBar.Close < latestBar.VWAP
-
-	// New requested filters for downward momentum distribution breakdown:
-	passesShortVwapPct := vwapClosePct < 20.0
-	passesShortVwapDist := normalizedVwapDist < -0.1
-
-	if hasVolumeEffort && hasTransactionVelocity && isBearExpansion && isBelowValue && passesShortVwapPct && passesShortVwapDist {
-		return "GO_SHORT"
-	}
+func (s *MomentumRunStrategy) CheckExit(state *InstrumentState, currentSide string) string {
 
 	return "HOLD"
 }
+
+//func (s *MomentumRunStrategy) CheckEntry(state *InstrumentState) string {
+//	history, ok := state.BarHistory["1m"]
+//	if !ok || len(history) == 0 {
+//		return "HOLD"
+//	}
+//
+//	latestBar := history[len(history)-1]
+//	if latestBar == nil {
+//		return "HOLD"
+//	}
+//
+//	analytics := latestBar.Analytics
+//
+//	// 1. Core Structural Momentum Baseline Filters
+//	// Volume effort and transaction velocity must represent clear active participation.
+//	hasVolumeEffort := analytics.RollingVolumeIntensity > 5.0
+//	hasTransactionVelocity := analytics.RollingTickRank > 2.5
+//
+//	isBullish := latestBar.Analytics.Direction == models.DirBullish || latestBar.Analytics.Direction == models.DirStrongBullish
+//	isBearish := latestBar.Analytics.Direction == models.DirBearish || latestBar.Analytics.Direction == models.DirStrongBearish
+//
+//	vwapDistance := latestBar.Analytics.NormalizedVwapDistance
+//	vwapClosePct := latestBar.Analytics.VwapClosePct
+//
+//	// Proceed only if high execution pace and volume confirmation are met
+//	if !hasVolumeEffort || !hasTransactionVelocity {
+//		return "HOLD"
+//	}
+//
+//	// 2. BULL RUN CONDITIONS (Go Long)
+//	// Price expansion is trending upwards and value sits safely above the anchor.
+//	isBullExpansion := analytics.RollingPriceNormalized > 3.0
+//	isAboveValue := latestBar.Close > latestBar.VWAP
+//
+//	if isBullish && isBullExpansion && isAboveValue && vwapDistance < 0.25 && vwapClosePct > 85 {
+//		return "GO_LONG"
+//	}
+//
+//	// 3. BEAR RUN CONDITIONS (Go Short)
+//	// Mirror of the bull loop: Price momentum drops below -3.0 due to signed direction.
+//	isBearExpansion := analytics.RollingPriceNormalized < -3.0
+//	isBelowValue := latestBar.Close < latestBar.VWAP
+//
+//	if isBearish && isBearExpansion && isBelowValue && vwapDistance > -0.25 && vwapClosePct < 15 {
+//		return "GO_SHORT"
+//	}
+//
+//	return "HOLD"
+//}
 
 // CheckExit tracks structural momentum trend-breaks and distribution extensions
-func (s *MomentumRunStrategy) CheckExit(state *InstrumentState, currentSide string) string {
-	history, ok := state.BarHistory["1m"]
-	if !ok || len(history) == 0 {
-		return "HOLD"
-	}
-
-	latestBar := history[len(history)-1]
-	if latestBar == nil {
-		return "HOLD"
-	}
-
-	// 1. Extract the current normalized VWAP distance from bar analytics
-	normalizedVwapDist := latestBar.Analytics.NormalizedVwapDistance
-
-	// 2. Evaluate exit conditions using your momentum distance boundary filter (0.1 / -0.1)
-	if currentSide == "LONG" {
-		// Exit Long if it drops back below VWAP OR stretches excessively past the positive momentum band (> 0.1)
-		if normalizedVwapDist < -0.08 {
-			return "EXIT_LONG"
-		}
-	}
-
-	if currentSide == "SHORT" {
-		// Exit Short if it bounces back above VWAP OR stretches excessively past the negative momentum band (< -0.1)
-		if normalizedVwapDist > 0.08 {
-			return "EXIT_SHORT"
-		}
-	}
-
-	return "HOLD"
-}
+//func (s *MomentumRunStrategy) CheckExit(state *InstrumentState, currentSide string) string {
+//	history, ok := state.BarHistory["1m"]
+//	if !ok || len(history) == 0 {
+//		return "HOLD"
+//	}
+//
+//	latestBar := history[len(history)-1]
+//	if latestBar == nil {
+//		return "HOLD"
+//	}
+//
+//	// 1. Extract the current normalized VWAP distance from bar analytics
+//	normalizedVwapDist := latestBar.Analytics.NormalizedVwapDistance
+//
+//	// 2. Evaluate exit conditions using your momentum distance boundary filter (0.1 / -0.1)
+//	if currentSide == "LONG" {
+//		// Exit Long if it drops back below VWAP OR stretches excessively past the positive momentum band (> 0.1)
+//		if normalizedVwapDist < -0.1 {
+//			return "EXIT_LONG"
+//		}
+//	}
+//
+//	if currentSide == "SHORT" {
+//		// Exit Short if it bounces back above VWAP OR stretches excessively past the negative momentum band (< -0.1)
+//		if normalizedVwapDist > 0.1 {
+//			return "EXIT_SHORT"
+//		}
+//	}
+//
+//	return "HOLD"
+//}
 
 // CheckTakeProfit hooks up our automated configuration targets
 func (s *MomentumRunStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
-	return state.CurrentPnL >= s.cfg.TakeProfitINR
+	return CheckTakeProfitWithDecay(state, s.cfg.TakeProfitINR, 10, 300)
 }
 
 // CheckStopLoss hooks up our automated safety risk floor limits
