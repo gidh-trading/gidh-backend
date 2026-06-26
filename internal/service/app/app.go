@@ -24,24 +24,27 @@ import (
 )
 
 type App struct {
-	Config         *config.Config
-	StreamManager  *stream.Manager
-	Pipeline       *Pipeline
-	DBWriter       *writer.DBWriter
-	OrderManager   order.PositionManager
-	RiskManager    *risk.RiskManager
-	StrategyEngine *strategy.Engine
-	kiteClient     *kiteconnect.Client
-	server         *http.Server
-	wsHub          *ws.Hub
-	pool           *pgxpool.Pool
-	instrumentList []models.InstrumentConfig
-	tokenToName    map[uint32]string
-	nameToToken    map[string]uint32
-	alertMu        sync.RWMutex
-	managerMu      sync.RWMutex
-	activePipe     *Pipeline
-	activeManager  *stream.Manager
+	Config            *config.Config
+	StreamManager     *stream.Manager
+	Pipeline          *Pipeline
+	DBWriter          *writer.DBWriter
+	OrderManager      order.PositionManager
+	RiskManager       *risk.RiskManager
+	StrategyEngine    *strategy.Engine
+	BacktestQueue     []string
+	CurrentQueueIndex int
+	IsMultiDay        bool
+	kiteClient        *kiteconnect.Client
+	server            *http.Server
+	wsHub             *ws.Hub
+	pool              *pgxpool.Pool
+	instrumentList    []models.InstrumentConfig
+	tokenToName       map[uint32]string
+	nameToToken       map[string]uint32
+	alertMu           sync.RWMutex
+	managerMu         sync.RWMutex
+	activePipe        *Pipeline
+	activeManager     *stream.Manager
 }
 
 // NewApp orchestrates the application setup.
@@ -351,4 +354,122 @@ func (a *App) initLiveState(ctx context.Context) {
 			logger.Info("[Paper Startup] Engine state fully rehydrated from database storage.")
 		}
 	}
+}
+
+func (a *App) runMultiDayBacktestProcessor(req StartMultiDayBacktestRequest) {
+	ctx := context.Background()
+	logger.Infof("Initializing multi-day backtest execution loop for %d days", len(req.Dates))
+
+	// 1. Initialize global batch state metrics for tracking via /api/backtest/status
+	a.managerMu.Lock()
+	a.BacktestQueue = req.Dates
+	a.IsMultiDay = true
+	a.CurrentQueueIndex = 0
+	a.managerMu.Unlock()
+
+	// Ensure structural variables are cleaned up when the background processor goroutine exits
+	defer func() {
+		a.managerMu.Lock()
+		a.IsMultiDay = false
+		a.BacktestQueue = nil
+		a.CurrentQueueIndex = 0
+		a.managerMu.Unlock()
+		logger.Info("🎉 [Multi-Day] Multi-day background processor goroutine exited safely")
+	}()
+
+	for idx, dateStr := range req.Dates {
+		logger.Infof("[Multi-Day] Starting Phase %d/%d for Date: %s", idx+1, len(req.Dates), dateStr)
+
+		// 2. Lock mutex to configure application engine dependencies safely
+		a.managerMu.Lock()
+		a.CurrentQueueIndex = idx // update active status indicator index mid-run
+
+		// Teardown any lingering execution stream frame
+		if a.StreamManager != nil {
+			logger.Infof("[Multi-Day] Cleaning active stream manager reference before processing date: %s", dateStr)
+			a.StreamManager.Stop()
+		}
+
+		// 3. Update DB target selection for stocks
+		instReader := reader.NewInstrumentReader(a.pool)
+		if err := instReader.UpdateBacktestSelection(ctx, req.Stocks); err != nil {
+			a.managerMu.Unlock()
+			logger.Errorf("[Multi-Day] Failed to update stock selection for %s: %v", dateStr, err)
+			return
+		}
+
+		// 4. Prepare/Extract File Data (.tar.xz)
+		if err := stream.PrepareBacktestData(a.Config.BacktestBackupDir, a.Config.BacktestDataDir, dateStr); err != nil {
+			a.managerMu.Unlock()
+			logger.Errorf("[Multi-Day] Data preparation missing or extraction failed for %s: %v", dateStr, err)
+			return
+		}
+
+		// 5. Cleanup DB tables for this specific day to guarantee a fresh slate
+		if err := db.CleanupBacktestData(ctx, dateStr); err != nil {
+			a.managerMu.Unlock()
+			logger.Errorf("[Multi-Day] CRITICAL: DB cleanup failed for %s: %v", dateStr, err)
+			return
+		}
+
+		// 6. Update internal configurations for this tracking frame
+		a.Config.BacktestDate = dateStr
+		a.Config.BacktestSpeedFactor = req.SpeedFactor
+
+		// 7. Reload Market Data & DNA structures for the specific date
+		parsedDate, _ := time.Parse("2006-01-02", dateStr)
+		dnaMap, profilesMap, vwapPercentilesMap := a.loadMarketData(ctx, parsedDate)
+
+		// 8. Reset & Re-initialize Pipeline architecture (wipes localized indicators/RAM maps)
+		if err := a.initPipeline(ctx, dnaMap, profilesMap, vwapPercentilesMap); err != nil {
+			a.managerMu.Unlock()
+			logger.Errorf("[Multi-Day] Pipeline re-init failed for %s: %v", dateStr, err)
+			return
+		}
+
+		// 9. Re-init Stream Manager with the new DBBacktestSource instance
+		if err := a.initStreamManager(); err != nil {
+			a.managerMu.Unlock()
+			logger.Errorf("[Multi-Day] Stream Manager init failed for %s: %v", dateStr, err)
+			return
+		}
+
+		// Capture stream manager reference safely inside the locked critical region
+		mgr := a.StreamManager
+		a.managerMu.Unlock()
+
+		// 10. Execute Stream and explicitly BLOCK until all ticks are fully processed
+		logger.Infof("[Multi-Day] Processing stream data loop for date %s...", dateStr)
+		if err := mgr.Start(); err != nil {
+			logger.Errorf("[Multi-Day] Stream failed to initialize on date %s: %v", dateStr, err)
+			return
+		}
+
+		// ⚡ FIX: Wait for all background workers (processors + dispatchers) to complete the day's processing
+		logger.Infof("[Multi-Day] Waiting for data ingestion to finish for date %s...", dateStr)
+		mgr.Wait()
+		logger.Infof("[Multi-Day] Day completed successfully for date: %s", dateStr)
+
+		// 11. Post-Day Cleanup & State Resetting before next loop iteration advances
+		a.managerMu.Lock()
+		logger.Infof("[Multi-Day] Performing end-of-day memory resets for %s", dateStr)
+
+		if a.OrderManager != nil {
+			logger.Debug("[Multi-Day] Flushing volatile active position matrices from RAM...")
+			a.OrderManager.ClearPositions() // Clear open live position frames from cache
+		}
+		if a.Pipeline != nil {
+			logger.Debug("[Multi-Day] Resetting indicators and rolling pipeline analytics state blocks...")
+			a.Pipeline.Reset() // Clear indicators, technical metrics, and state mappings
+		}
+
+		a.StreamManager = nil
+		a.activeManager = nil
+		a.managerMu.Unlock()
+
+		// Small cooldown buffer between days to allow the system connection resources to settle
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	logger.Info("🎉 [Multi-Day] All specified backtest dates completed successfully!")
 }

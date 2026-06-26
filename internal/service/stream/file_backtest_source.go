@@ -12,7 +12,7 @@ import (
 	"gidh-backend/internal/service/models"
 )
 
-type BacktestSource struct {
+type FileBacktestSource struct {
 	dataDir     string
 	date        time.Time
 	speedFactor float64
@@ -27,7 +27,7 @@ type BacktestSource struct {
 	speedUpdateChan chan struct{} // 🟢 Wakes up the sleeping loop immediately on changes
 }
 
-type BacktestSourceConfig struct {
+type FileBacktestSourceConfig struct {
 	DataDir     string
 	Date        time.Time
 	SpeedFactor float64
@@ -38,9 +38,9 @@ type BacktestSourceConfig struct {
 	NameToToken map[string]uint32
 }
 
-// NewBacktestSource is the exported constructor for the backtest engine
-func NewBacktestSource(cfg *BacktestSourceConfig) *BacktestSource {
-	return &BacktestSource{
+// NewFileBacktestSource is the exported constructor for the backtest engine
+func NewFileBacktestSource(cfg *FileBacktestSourceConfig) *FileBacktestSource {
+	return &FileBacktestSource{
 		dataDir:         cfg.DataDir,
 		date:            cfg.Date,
 		speedFactor:     cfg.SpeedFactor,
@@ -50,7 +50,7 @@ func NewBacktestSource(cfg *BacktestSourceConfig) *BacktestSource {
 	}
 }
 
-func (b *BacktestSource) SetSpeedFactor(factor float64) {
+func (b *FileBacktestSource) SetSpeedFactor(factor float64) {
 	b.mu.Lock()
 	b.speedFactor = factor
 	b.mu.Unlock()
@@ -62,13 +62,13 @@ func (b *BacktestSource) SetSpeedFactor(factor float64) {
 	}
 }
 
-func (b *BacktestSource) GetSpeedFactor() float64 {
+func (b *FileBacktestSource) GetSpeedFactor() float64 {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 	return b.speedFactor
 }
 
-func (b *BacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models.TickData) error {
+func (b *FileBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models.TickData) error {
 	h := &tickHeap{}
 	heap.Init(h)
 
@@ -181,7 +181,7 @@ func (b *BacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models.T
 	return ErrBacktestFinished
 }
 
-func (b *BacktestSource) initStreamingIterator(stockName string) (*tickIterator, error) {
+func (b *FileBacktestSource) initStreamingIterator(stockName string) (*tickIterator, error) {
 	dateFolder := b.date.Format("2006-01-02")
 	base := filepath.Join(b.dataDir, dateFolder)
 
@@ -215,15 +215,15 @@ func (b *BacktestSource) initStreamingIterator(stockName string) (*tickIterator,
 	}, nil
 }
 
-func (b *BacktestSource) Connect(ctx context.Context) error {
+func (b *FileBacktestSource) Connect(ctx context.Context) error {
 	b.ctx, b.cancel = context.WithCancel(ctx)
 	return nil
 }
-func (b *BacktestSource) Close() error {
+func (b *FileBacktestSource) Close() error {
 	if b.cancel != nil {
 		b.cancel()
 	}
 	return nil
 }
-func (b *BacktestSource) Type() SourceType           { return SourceBacktest }
-func (b *BacktestSource) Subscribe(t []uint32) error { return nil }
+func (b *FileBacktestSource) Type() SourceType           { return SourceBacktest }
+func (b *FileBacktestSource) Subscribe(t []uint32) error { return nil }

@@ -2,22 +2,23 @@ package stream
 
 import (
 	"context"
-	"database/sql"
 	"fmt"
 	"sync"
 	"time"
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/pkg/logger"
+
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type DBBacktestSource struct {
-	db               *sql.DB
+	db               *pgxpool.Pool
 	dbConnString     string
 	date             time.Time
 	speedFactor      float64
 	instrumentTokens []uint32
-	instrumentMap    map[uint32]string // mapping token -> stock_name
+	instrumentMap    map[uint32]string
 
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -47,23 +48,27 @@ func NewDBBacktestSource(cfg *DBBacktestSourceConfig) *DBBacktestSource {
 func (d *DBBacktestSource) Connect(ctx context.Context) error {
 	d.ctx, d.cancel = context.WithCancel(ctx)
 
-	db, err := sql.Open("postgres", d.dbConnString)
+	config, err := pgxpool.ParseConfig(d.dbConnString)
 	if err != nil {
-		return fmt.Errorf("failed to open database: %w", err)
+		return fmt.Errorf("failed to parse connection string: %w", err)
 	}
 
-	// Optimize connection pool settings for large sequential reads
-	db.SetMaxOpenConns(2)
-	db.SetMaxIdleConns(2)
-	db.SetConnMaxLifetime(1 * time.Hour)
+	config.MaxConns = 2
+	config.MinConns = 2
+	config.MaxConnLifetime = 1 * time.Hour
 
-	if err := db.PingContext(ctx); err != nil {
-		db.Close()
+	pool, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		return fmt.Errorf("failed to open database pool: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
 		return fmt.Errorf("failed to ping production database: %w", err)
 	}
 
-	d.db = db
-	logger.Infof("Successfully connected to TimescaleDB source for date: %s", d.date.Format("2006-01-02"))
+	d.db = pool
+	logger.Infof("Successfully connected to TimescaleDB source via pgxpool for date: %s", d.date.Format("2006-01-02"))
 	return nil
 }
 
@@ -84,39 +89,84 @@ func (d *DBBacktestSource) GetSpeedFactor() float64 {
 	return d.speedFactor
 }
 
+// Internal helper struct to hold loaded depth snapshots in RAM
+type cachedDepth struct {
+	Timestamp       time.Time
+	InstrumentToken uint32
+	Side            string
+	Level           models.DepthLevel
+}
+
 func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models.TickData) error {
 	startTime := d.date.UTC()
 	endTime := startTime.Add(24 * time.Hour)
 
-	// 1. Fetch Ticks ordered by timestamp across all subscribed tokens
-	tickQuery := `
-		SELECT timestamp, instrument_token, stock_name, last_price, last_traded_quantity, 
-		       average_traded_price, volume_traded, total_buy_quantity, total_sell_quantity, 
-		       open, high, low, close, change
-		FROM live_ticks
-		WHERE timestamp >= $1 AND timestamp < $2 AND instrument_token = ANY($3)
-		ORDER BY timestamp ASC;`
+	// ============================================================================
+	// PHASE 1: PRE-WARM RAM CACHE (Eager fetch all records into local slices)
+	// ============================================================================
+	logger.Infof("[RAM Warmup] Fetching ticks and depth items from TimescaleDB into local RAM cache...")
 
-	tickRows, err := d.db.QueryContext(ctx, tickQuery, startTime, endTime, d.instrumentTokens)
+	// 1. Fetch and load all Ticks into RAM
+	tickQuery := `
+       SELECT timestamp, instrument_token, stock_name, last_price, last_traded_quantity, 
+              average_traded_price, volume_traded, total_buy_quantity, total_sell_quantity, 
+              open, high, low, close, change
+       FROM live_ticks
+       WHERE timestamp >= $1 AND timestamp < $2 AND instrument_token = ANY($3)
+       ORDER BY timestamp ASC;`
+
+	tickRows, err := d.db.Query(ctx, tickQuery, startTime, endTime, d.instrumentTokens)
 	if err != nil {
 		return fmt.Errorf("error querying live_ticks: %w", err)
 	}
-	defer tickRows.Close()
 
-	// 2. Fetch Order Book Depth snapshots ordered by timestamp across all subscribed tokens
+	var tickCache []models.TickData
+	for tickRows.Next() {
+		var t models.TickData
+		if err := tickRows.Scan(
+			&t.Timestamp, &t.InstrumentToken, &t.StockName, &t.LastPrice,
+			&t.LastTradedQuantity, &t.AverageTradedPrice, &t.CumulativeVolume,
+			&t.TotalBuyQuantity, &t.TotalSellQuantity, &t.Open, &t.High,
+			&t.Low, &t.Close, &t.Change,
+		); err != nil {
+			tickRows.Close()
+			return err
+		}
+		if t.StockName == "" {
+			t.StockName = d.instrumentMap[t.InstrumentToken]
+		}
+		tickCache = append(tickCache, t)
+	}
+	tickRows.Close()
+
+	// 2. Fetch and load all Order Book Depth items into RAM
 	depthQuery := `
-		SELECT timestamp, instrument_token, side, price, quantity, orders
-		FROM live_order_depth
-		WHERE timestamp >= $1 AND timestamp < $2 AND instrument_token = ANY($3)
-		ORDER BY timestamp ASC;`
+       SELECT timestamp, instrument_token, side, price, quantity, orders
+       FROM live_order_depth
+       WHERE timestamp >= $1 AND timestamp < $2 AND instrument_token = ANY($3)
+       ORDER BY timestamp ASC;`
 
-	depthRows, err := d.db.QueryContext(ctx, depthQuery, startTime, endTime, d.instrumentTokens)
+	depthRows, err := d.db.Query(ctx, depthQuery, startTime, endTime, d.instrumentTokens)
 	if err != nil {
 		return fmt.Errorf("error querying live_order_depth: %w", err)
 	}
-	defer depthRows.Close()
 
-	// Maintain a real-time tracking map for market depths across instruments
+	var depthCache []cachedDepth
+	for depthRows.Next() {
+		var cd cachedDepth
+		if err := depthRows.Scan(&cd.Timestamp, &cd.InstrumentToken, &cd.Side, &cd.Level.Price, &cd.Level.Quantity, &cd.Level.Orders); err != nil {
+			depthRows.Close()
+			return err
+		}
+		depthCache = append(depthCache, cd)
+	}
+	depthRows.Close()
+
+	logger.Infof("[RAM Warmup] Completed! Loaded %d ticks and %d depths into volatile structures.", len(tickCache), len(depthCache))
+
+	// ============================================================================
+	// PHASE 2: ULTRA-SPEED IN-MEMORY REPLAY LOOP
+	// ============================================================================
 	currentDepths := make(map[uint32]*models.OrderDepth)
 	for _, token := range d.instrumentTokens {
 		currentDepths[token] = &models.OrderDepth{
@@ -125,42 +175,7 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 		}
 	}
 
-	// Helper to load the next depth record from our database cursor stream
-	var nextDepthTS time.Time
-	var nextDepthToken uint32
-	var pendingDepthItem *struct {
-		Side  string
-		Level models.DepthLevel
-	}
-
-	advanceDepthStream := func() bool {
-		if pendingDepthItem != nil {
-			return true
-		}
-
-		var side string
-		var price float64
-		var qty int64
-		var orders int
-
-		if depthRows.Next() {
-			err := depthRows.Scan(&nextDepthTS, &nextDepthToken, &side, &price, &qty, &orders)
-			if err != nil {
-				return false
-			}
-			pendingDepthItem = &struct {
-				Side  string
-				Level models.DepthLevel
-			}{
-				Side:  side,
-				Level: models.DepthLevel{Price: price, Quantity: qty, Orders: orders},
-			}
-			return true
-		}
-		return false
-	}
-
-	// Track baseline timeframes for simulation pacing
+	depthIdx := 0
 	var anchorMarketTime time.Time
 	var anchorRealTime time.Time
 	var activeSpeedFactor float64
@@ -171,55 +186,40 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 	}
 	defer timer.Stop()
 
-	// Main Tick Streaming Loop
-	for tickRows.Next() {
-		var tick models.TickData
-		err := tickRows.Scan(
-			&tick.Timestamp, &tick.InstrumentToken, &tick.StockName, &tick.LastPrice,
-			&tick.LastTradedQuantity, &tick.AverageTradedPrice, &tick.CumulativeVolume,
-			&tick.TotalBuyQuantity, &tick.TotalSellQuantity, &tick.Open, &tick.High,
-			&tick.Low, &tick.Close, &tick.Change,
-		)
-		if err != nil {
-			return err
-		}
+	// Replay loop streams entirely from the loaded RAM cache slices
+	for _, tick := range tickCache {
 
-		// Ensure the stock name map updates accurately if missing from production rows
-		if tick.StockName == "" {
-			tick.StockName = d.instrumentMap[tick.InstrumentToken]
-		}
+		// Synchronize depth updates up to the current tick's timestamp boundary out of RAM array
+		for depthIdx < len(depthCache) && !depthCache[depthIdx].Timestamp.After(tick.Timestamp) {
+			cd := depthCache[depthIdx]
+			targetBook := currentDepths[cd.InstrumentToken]
 
-		// Pull and update all historical order depths up to the current tick's timestamp boundary
-		for advanceDepthStream() && !nextDepthTS.After(tick.Timestamp) {
-			targetBook := currentDepths[nextDepthToken]
-			if targetBook == nil {
-				pendingDepthItem = nil
-				continue
+			if targetBook != nil {
+				if cd.Side == "buy" {
+					targetBook.Buy = append(targetBook.Buy, cd.Level)
+				} else {
+					targetBook.Sell = append(targetBook.Sell, cd.Level)
+				}
 			}
-
-			// Clean book up if it's a completely fresh snapshot sequence group
-			// Note: Adjust tracking logic if you emit updates instead of full frames
-			if pendingDepthItem.Side == "buy" {
-				targetBook.Buy = append(targetBook.Buy, pendingDepthItem.Level)
-			} else {
-				targetBook.Sell = append(targetBook.Sell, pendingDepthItem.Level)
-			}
-			pendingDepthItem = nil
+			depthIdx++
 		}
 
-		// Clone and assign synced book context state to the current tick object
 		if book, exists := currentDepths[tick.InstrumentToken]; exists {
 			tick.Depth = *book
 		}
 
-		// Deliver the complete tick object to pipeline processors
 		select {
 		case tickChan <- tick:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 
-		// Pacing and execution speed configuration block (reused from your original file logic)
+		// ⚡ MAXIMUM VELOCITY SHORT-CIRCUIT
+		if d.GetSpeedFactor() == -99 {
+			continue
+		}
+
+		// Pacing calculation block
 		for {
 			currentSpeed := d.GetSpeedFactor()
 			if currentSpeed == 0 {
@@ -236,9 +236,7 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 			marketDuration := tick.Timestamp.Sub(anchorMarketTime)
 			var simulatedDuration time.Duration
 
-			if currentSpeed == -99 {
-				simulatedDuration = marketDuration
-			} else if currentSpeed > 0 {
+			if currentSpeed > 0 {
 				simulatedDuration = time.Duration(float64(marketDuration) / currentSpeed)
 			} else {
 				break
@@ -279,7 +277,7 @@ func (d *DBBacktestSource) Close() error {
 		d.cancel()
 	}
 	if d.db != nil {
-		return d.db.Close()
+		d.db.Close()
 	}
 	return nil
 }

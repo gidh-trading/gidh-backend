@@ -34,19 +34,26 @@ func (a *App) initWebServer() {
 	mux.HandleFunc("/api/backtest/status", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 
-		// The StreamManager knows the current processing state
 		currentDate := ""
 		if a.StreamManager != nil {
 			currentDate = a.StreamManager.GetStatus()
 		}
 
+		a.managerMu.Lock()
 		json.NewEncoder(w).Encode(map[string]interface{}{
-			"mode":       a.Config.Mode,
-			"date":       currentDate,
-			"is_running": a.StreamManager != nil,
+			"mode":                a.Config.Mode,
+			"date":                currentDate,
+			"is_running":          a.StreamManager != nil,
+			"is_multi_day":        a.IsMultiDay,
+			"total_queue_days":    len(a.BacktestQueue),
+			"current_queue_index": a.CurrentQueueIndex,
+			"remaining_dates":     a.BacktestQueue[a.CurrentQueueIndex:],
 		})
+		a.managerMu.Unlock()
 	})
+	
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
+	mux.HandleFunc("/api/backtest/start/multi", a.handleMultiDayBacktestStart)
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
 	mux.HandleFunc("/api/backtest/speed", a.handleBacktestSpeedUpdate)
 	mux.HandleFunc("/api/alerts", a.handleGetAlerts)
@@ -175,6 +182,37 @@ func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "started", "date": req.Date})
 }
 
+func (a *App) handleMultiDayBacktestStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var req StartMultiDayBacktestRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	if len(req.Dates) == 0 {
+		http.Error(w, "Dates array cannot be empty", http.StatusBadRequest)
+		return
+	}
+
+	// Sort dates chronologically to ensure natural sequential simulation pacing
+	sort.Strings(req.Dates)
+
+	// Spawn the multi-day background worker
+	go a.runMultiDayBacktestProcessor(req)
+
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]any{
+		"status":        "started",
+		"total_days":    len(req.Dates),
+		"ordered_dates": req.Dates,
+	})
+}
+
 func (a *App) handleBacktestStop(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -240,9 +278,8 @@ func (a *App) handleBacktestSpeedUpdate(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	// Dynamic Type Assertion to find our BacktestSource implementation safely
-	// inside the active stream manager
-	if backtestSrc, ok := a.StreamManager.GetSource().(*stream.BacktestSource); ok {
+	// ⚡ FIXED: Adjusted the type assertion target from *stream.BacktestSource to *stream.DBBacktestSource
+	if backtestSrc, ok := a.StreamManager.GetSource().(*stream.DBBacktestSource); ok {
 		backtestSrc.SetSpeedFactor(req.SpeedFactor)
 		a.Config.BacktestSpeedFactor = req.SpeedFactor // keep global config state in sync
 
@@ -658,6 +695,12 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 
 type StartBacktestRequest struct {
 	Date        string   `json:"date"`
+	SpeedFactor float64  `json:"speed_factor"`
+	Stocks      []string `json:"stocks"`
+}
+
+type StartMultiDayBacktestRequest struct {
+	Dates       []string `json:"dates"`
 	SpeedFactor float64  `json:"speed_factor"`
 	Stocks      []string `json:"stocks"`
 }
