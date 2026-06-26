@@ -13,6 +13,7 @@ import (
 	"gidh-backend/internal/service/stream"
 	"gidh-backend/internal/service/ws"
 	"gidh-backend/pkg/logger"
+	"math"
 	"net"
 	"net/http"
 	"sort"
@@ -627,10 +628,6 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Determine if the client is asking for today's live session data
-	todayStr := time.Now().Format("2006-01-02")
-	isToday := (dateStr == todayStr) || (a.Config.BacktestDate != "" && dateStr == a.Config.BacktestDate)
-
 	// 1. Fetch completed/settled historical position frames from the database table
 	positionMap := make(map[string]models.Position)
 	rows, err := a.pool.Query(r.Context(), `
@@ -651,41 +648,58 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 			logger.Errorf("Failed to scan historical position entry: %v", err)
 			continue
 		}
-		p.Symbol = strings.ToUpper(p.Symbol)
-		p.Product = strings.ToUpper(p.Product)
+		p.Symbol = strings.ToUpper(strings.TrimSpace(p.Symbol))
+		p.Product = strings.ToUpper(strings.TrimSpace(p.Product))
 		p.Side = strings.ToUpper(p.Side)
 
 		key := fmt.Sprintf("%s:%s", p.Symbol, p.Product)
 		positionMap[key] = p
 	}
 
-	// 2. Ingest live exposure slots from RAM memory caches ONLY if querying today's date
-	if isToday && a.OrderManager != nil {
-		// GetAllPositions already computes live ticks per active symbol dynamically!
+	// 2. Unconditionally merge live positions from engine memory cache
+	if a.OrderManager != nil {
 		livePositions := a.OrderManager.GetAllPositions()
 
 		for _, lp := range livePositions {
-			lp.Symbol = strings.ToUpper(lp.Symbol)
-			lp.Product = strings.ToUpper(lp.Product)
-			key := fmt.Sprintf("%s:%s", lp.Symbol, lp.Product)
+			symUpper := strings.ToUpper(strings.TrimSpace(lp.Symbol))
+			prodUpper := strings.ToUpper(strings.TrimSpace(lp.Product))
 
-			// RAM state always dictates the true active net_quantity, current localized boundaries,
-			// AND the dynamic memory-bound UnrealizedPnL
-			positionMap[key] = lp
+			if prodUpper == "" {
+				prodUpper = "MIS"
+			}
+			key := fmt.Sprintf("%s:%s", symUpper, prodUpper)
+
+			lp.Symbol = symUpper
+			lp.Product = prodUpper
+			lp.Side = strings.ToUpper(lp.Side)
+
+			if lp.NetQuantity != 0 {
+				positionMap[key] = lp
+			}
 		}
 	}
 
-	// 3. Convert integrated state map back into a unified layout response slice
+	// 3. ⚡ BULLETPROOF FALLBACK: Calculate Unrealized PnL from the database if still 0
 	finalPositions := make([]models.Position, 0, len(positionMap))
 	for _, pos := range positionMap {
 		if pos.NetQuantity == 0 {
 			pos.Side = ""
 			pos.TargetPrice = 0
 			pos.StopLossPrice = 0
-			pos.UnrealizedPnL = 0 // Safe to zero out closed database rows
+			pos.UnrealizedPnL = 0
+		} else if pos.UnrealizedPnL == 0 && pos.AveragePrice > 0 {
+			// Find the last traded price using the closing price of the latest bar entry
+			var dbLtp float64
+			err := a.pool.QueryRow(r.Context(), `
+				SELECT close FROM gidh_bars 
+				WHERE UPPER(TRIM(stock_name)) = $1 
+				ORDER BY timestamp DESC LIMIT 1`, pos.Symbol).Scan(&dbLtp)
+
+			if err == nil && dbLtp > 0 {
+				pos.UnrealizedPnL = (dbLtp - pos.AveragePrice) * float64(pos.NetQuantity)
+				pos.UnrealizedPnL = math.Round(pos.UnrealizedPnL*100) / 100
+			}
 		}
-		// Note: Open positions for today have already had their UnrealizedPnL
-		// calculated automatically inside a.OrderManager.GetAllPositions()
 
 		finalPositions = append(finalPositions, pos)
 	}
