@@ -40,24 +40,17 @@ func (a *App) createBacktestSource() (stream.TickDataSource, error) {
 		return nil, errors.New("invalid BACKTEST_DATE format; use YYYY-MM-DD")
 	}
 
-	// Build the instrument list from the current app state
-	instruments := make([]struct {
-		Name  string
-		Token uint32
-	}, len(a.instrumentList))
+	// Extract the flat tokens and token-to-name mapping directly from app memory
+	tokens := a.extractTokens()
 
-	for i, inst := range a.instrumentList {
-		instruments[i].Name = inst.Name
-		instruments[i].Token = inst.Token
-	}
-
-	// Initialize the backtest source with settings from config.AppConfig
-	return stream.NewBacktestSource(&stream.BacktestSourceConfig{
-		DataDir:     config.AppConfig.BacktestDataDir,
-		Date:        d,
-		SpeedFactor: config.AppConfig.BacktestSpeedFactor,
-		Instruments: instruments,
-		NameToToken: a.nameToToken,
+	// Initialize the Database-backed backtest source instead of file-backed
+	// Note: Assumes config.AppConfig contains your production read-replica database URL/connection string
+	return stream.NewDBBacktestSource(&stream.DBBacktestSourceConfig{
+		DBConnString:     config.AppConfig.LiveDBURL,
+		Date:             d,
+		SpeedFactor:      config.AppConfig.BacktestSpeedFactor,
+		InstrumentTokens: tokens,
+		InstrumentMap:    a.tokenToName,
 	}), nil
 }
 
