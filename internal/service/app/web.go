@@ -130,15 +130,7 @@ func (a *App) handleBacktestStart(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 3. Prepare Data (Extract .tar.xz)
-	if err := stream.PrepareBacktestData(a.Config.BacktestBackupDir, a.Config.BacktestDataDir, req.Date); err != nil {
-		a.managerMu.Unlock()
-		logger.Errorf("Data preparation failed: %v", err)
-		http.Error(w, "Backtest data not found or extraction failed", http.StatusNotFound)
-		return
-	}
-
-	// 4. Cleanup DB for the new date
+	// 3. Cleanup DB for the new date
 	if err := db.CleanupBacktestData(ctx, req.Date); err != nil {
 		a.managerMu.Unlock()
 		logger.Errorf("CRITICAL: Backtest cleanup failed! Aborting run to protect data integrity: %v", err)

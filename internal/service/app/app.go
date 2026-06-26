@@ -424,36 +424,29 @@ func (a *App) runMultiDayBacktestProcessor(req StartMultiDayBacktestRequest) {
 			return
 		}
 
-		// 4. Prepare/Extract File Data (.tar.xz)
-		if err := stream.PrepareBacktestData(a.Config.BacktestBackupDir, a.Config.BacktestDataDir, dateStr); err != nil {
-			a.managerMu.Unlock()
-			logger.Errorf("[Multi-Day] Data preparation missing or extraction failed for %s: %v", dateStr, err)
-			return
-		}
-
-		// 5. Cleanup DB tables for this specific day to guarantee a fresh slate
+		// 4. Cleanup DB tables for this specific day to guarantee a fresh slate
 		if err := db.CleanupBacktestData(ctx, dateStr); err != nil {
 			a.managerMu.Unlock()
 			logger.Errorf("[Multi-Day] CRITICAL: DB cleanup failed for %s: %v", dateStr, err)
 			return
 		}
 
-		// 6. Update internal configurations for this tracking frame
+		// 5. Update internal configurations for this tracking frame
 		a.Config.BacktestDate = dateStr
 		a.Config.BacktestSpeedFactor = req.SpeedFactor
 
-		// 7. Reload Market Data & DNA structures for the specific date
+		// 6. Reload Market Data & DNA structures for the specific date
 		parsedDate, _ := time.Parse("2006-01-02", dateStr)
 		dnaMap, profilesMap, vwapPercentilesMap := a.loadMarketData(ctx, parsedDate)
 
-		// 8. Reset & Re-initialize Pipeline architecture (wipes localized indicators/RAM maps)
+		// 7. Reset & Re-initialize Pipeline architecture (wipes localized indicators/RAM maps)
 		if err := a.initPipeline(ctx, dnaMap, profilesMap, vwapPercentilesMap); err != nil {
 			a.managerMu.Unlock()
 			logger.Errorf("[Multi-Day] Pipeline re-init failed for %s: %v", dateStr, err)
 			return
 		}
 
-		// 9. Re-init Stream Manager with the new DBBacktestSource instance
+		// 8. Re-init Stream Manager with the new DBBacktestSource instance
 		if err := a.initStreamManager(); err != nil {
 			a.managerMu.Unlock()
 			logger.Errorf("[Multi-Day] Stream Manager init failed for %s: %v", dateStr, err)
@@ -464,7 +457,7 @@ func (a *App) runMultiDayBacktestProcessor(req StartMultiDayBacktestRequest) {
 		mgr := a.StreamManager
 		a.managerMu.Unlock()
 
-		// 10. Execute Stream and explicitly BLOCK until all ticks are fully processed
+		// 9. Execute Stream and explicitly BLOCK until all ticks are fully processed
 		logger.Infof("[Multi-Day] Processing stream data loop for date %s...", dateStr)
 		if err := mgr.Start(); err != nil {
 			logger.Errorf("[Multi-Day] Stream failed to initialize on date %s: %v", dateStr, err)
@@ -476,7 +469,7 @@ func (a *App) runMultiDayBacktestProcessor(req StartMultiDayBacktestRequest) {
 		mgr.Wait()
 		logger.Infof("[Multi-Day] Day completed successfully for date: %s", dateStr)
 
-		// 11. Post-Day Cleanup & State Resetting before next loop iteration advances
+		// 10. Post-Day Cleanup & State Resetting before next loop iteration advances
 		// ONLY reset memory if there is a subsequent day to process!
 		if idx < len(req.Dates)-1 {
 			a.managerMu.Lock()
