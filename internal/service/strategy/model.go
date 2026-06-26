@@ -51,6 +51,8 @@ type InstrumentState struct {
 	ActiveStrategyName string                   `json:"active_strategy_name"` // e.g., "Combined_Mood_Velocity_Direct"
 	StrategyHistory    map[string]StrategyStats `json:"strategy_history"`     // Tracks detailed historical metrics per strategy for this stock today
 	StrategyTradeCount int                      `json:"strategy_trade_count"` // Global fallback counter or active tracking metric
+
+	Metadata map[string]interface{} `json:"metadata,omitempty"`
 }
 
 // Clone constructs an isolated memory footprint copy to prevent side-effect leaks

@@ -99,7 +99,7 @@ func (a *App) initDatabase(ctx context.Context) error {
 		}
 	}
 
-	skipPersistence := a.Config.SkipDatabaseInsert
+	skipPersistence := true
 	if a.Config.Mode == "live" {
 		skipPersistence = false
 	}

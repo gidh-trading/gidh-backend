@@ -138,8 +138,6 @@ func CleanupBacktestData(ctx context.Context, dateStr string) error {
 		table string
 		col   string
 	}{
-		{"live_ticks", "timestamp"},
-		{"live_order_depth", "timestamp"},
 		{"gidh_bars", "timestamp"},
 		{"strategy_transactions", "execution_time"},
 		{"gidh_volume_profiles", "trading_date"},
@@ -163,70 +161,4 @@ func CleanupBacktestData(ctx context.Context, dateStr string) error {
 
 	logger.Infof("Successfully wiped all tables for backtest date: %s", dateStr)
 	return nil
-}
-
-// SaveStrategyOptimizationLog saves a trade log matching your exact struct parameters
-func SaveStrategyOptimizationLog(
-	ctx context.Context,
-	pool *pgxpool.Pool,
-	symbol string,
-	strategyName string,
-	tradeSide string,
-	minutesSinceOpen int,
-	entryTimestamp time.Time,
-	entryPrice float64,
-	entryVwap float64,
-	entryVolumeRank int,
-	entryPriceRank int,
-	entryEfficiency float64,
-	entryDelta float64,
-	entrySlope float64,
-	entryVwapDistance float64,
-	exitTimestamp time.Time,
-	exitPrice float64,
-	exitReason string,
-	finalPnL float64,
-	peakPnL float64,
-	captureRatio float64,
-) error {
-	if pool == nil {
-		return fmt.Errorf("database connection pool is uninitialized")
-	}
-
-	query := `
-       INSERT INTO strategy_optimization_logs (
-          symbol, strategy_name, trade_side, minutes_since_open,
-          entry_timestamp, entry_price, entry_vwap, entry_volume_rank, entry_price_rank,
-          entry_efficiency, entry_delta, entry_slope, entry_vwap_distance,
-          exit_timestamp, exit_price, exit_reason, final_pnl_inr, peak_pnl_inr,
-          efficiency_capture_ratio
-       ) VALUES (
-          $1, $2, $3, $4, 
-          $5, $6, $7, $8, $9,
-          $10, $11, $12, $13,
-          $14, $15, $16, $17, $18, $19
-       );`
-
-	_, err := pool.Exec(ctx, query,
-		symbol,            // $1
-		strategyName,      // $2
-		tradeSide,         // $3
-		minutesSinceOpen,  // $4
-		entryTimestamp,    // $5
-		entryPrice,        // $6
-		entryVwap,         // $7
-		entryVolumeRank,   // $8
-		entryPriceRank,    // $9
-		entryEfficiency,   // $10
-		entryDelta,        // $11
-		entrySlope,        // $12
-		entryVwapDistance, // $13
-		exitTimestamp,     // $14
-		exitPrice,         // $15
-		exitReason,        // $16
-		finalPnL,          // $17
-		peakPnL,           // $18
-		captureRatio,      // $19
-	)
-	return err
 }

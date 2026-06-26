@@ -31,7 +31,6 @@ type Config struct {
 	BacktestBackupDir    string
 	BacktestDate         string
 	BacktestSpeedFactor  float64
-	SkipDatabaseInsert   bool
 	TruncateBacktestData bool
 	SkipLiveExecution    bool
 }
@@ -61,7 +60,6 @@ func Load() {
 		BacktestBackupDir:    getEnv("BACKTEST_BACKUP_DIR", ""),
 		BacktestDate:         getEnv("BACKTEST_DATE", ""),
 		BacktestSpeedFactor:  getEnvFloat("BACKTEST_SPEED_FACTOR", 0),
-		SkipDatabaseInsert:   getEnvBool("SKIP_DATABASE_INSERT", false),
 		TruncateBacktestData: getEnvBool("TRUNCATE_BACKTEST_DATA", false),
 		SkipLiveExecution:    getEnvBool("SKIP_LIVE_EXEC", true),
 	}
