@@ -16,10 +16,11 @@ import (
 )
 
 type VolumeProfileStage struct {
-	profiles map[uint32]*models.VolumeProfile
-	mu       sync.RWMutex
-	pool     *pgxpool.Pool
-	wsHub    *ws.Hub
+	profiles   map[uint32]*models.VolumeProfile
+	mu         sync.RWMutex
+	pool       *pgxpool.Pool
+	wsHub      *ws.Hub
+	isBacktest bool
 }
 
 func NewVolumeProfileStage(configs []models.InstrumentConfig, bucketSizes map[uint32]float64, pool *pgxpool.Pool, hub *ws.Hub) *VolumeProfileStage {
@@ -128,7 +129,13 @@ func (h *VolumeProfileStage) Process(tick *models.EnrichedTick) error {
 	}
 
 	// 6. Persistence: Archive to DB strictly every 20 ticks
-	if p.TickCount%20 == 0 {
+
+	threshold := 20
+	if h.isBacktest {
+		threshold = 200
+	}
+
+	if p.TickCount%int64(threshold) == 0 {
 		h.syncAllBucketsToNodes(p)
 		snapshot := p.Copy()
 		go h.persistSingleProfileAsync(snapshot)
