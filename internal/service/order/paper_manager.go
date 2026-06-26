@@ -464,17 +464,26 @@ func (pm *PaperPositionManager) GetAllPositions() []models.Position {
 	defer pm.mu.RUnlock()
 
 	positions := make([]models.Position, 0, len(pm.activePositions))
+
 	for _, pos := range pm.activePositions {
 		posCopy := *pos
 
-		// ⚡ FIX: Calculate contemporary dynamic Unrealized PnL immediately upon REST fetch!
-		if ltp, exists := pm.lastPrices[posCopy.Symbol]; exists && posCopy.NetQuantity != 0 {
-			posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
-			posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100
+		// Only compute dynamic PnL if the position is open
+		if posCopy.NetQuantity != 0 {
+			// Check if we have received a simulated tick or live tick for this symbol
+			if ltp, exists := pm.lastPrices[posCopy.Symbol]; exists && ltp > 0 {
+				posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
+				// Clean up float precision
+				posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100
+			}
+			// ⚡ FIX: If no tick has arrived yet (exists == false), we do NOTHING.
+			// This allows posCopy.UnrealizedPnL to simply retain whatever value
+			// it was initialized with during ReconstituteState() from the database.
 		}
 
 		positions = append(positions, posCopy)
 	}
+
 	return positions
 }
 
@@ -504,6 +513,14 @@ func (pm *PaperPositionManager) ReconstituteState(orders []models.OrderBookEntry
 		if pos.NetQuantity != 0 {
 			key := fmt.Sprintf("%s:%s", strings.ToUpper(pos.Symbol), strings.ToUpper(pos.Product))
 			pm.activePositions[key] = &pos
+
+			// 🔥 FIX: Seed lastPrices so it isn't empty upon startup.
+			// By using AveragePrice as the baseline, we guarantee PnL logic and price getters
+			// don't fail or divide-by-zero before the first WebSocket tick arrives.
+			if _, exists := pm.lastPrices[pos.Symbol]; !exists {
+				pm.lastPrices[pos.Symbol] = pos.AveragePrice
+			}
+
 			logger.Infof("[Paper Startup] Reconstituted active memory slot for %s: NetQty=%d, SL=%.2f, TP=%.2f",
 				key, pos.NetQuantity, pos.StopLossPrice, pos.TargetPrice)
 		}
@@ -531,4 +548,15 @@ func (pm *PaperPositionManager) broadcastPositionChangeCallback(symbol string) {
 	if cb != nil {
 		go cb(symbol, netQty, side, avgPrice, realizedPnL)
 	}
+}
+
+// SeedLastPrices injects the last known market prices into the paper manager's memory.
+// This guarantees that open PnL can be calculated instantly on page load before the first WebSocket tick.
+func (pm *PaperPositionManager) SeedLastPrices(prices map[string]float64) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	for symbol, ltp := range prices {
+		pm.lastPrices[strings.ToUpper(symbol)] = ltp
+	}
+	logger.Infof("[Paper] Seeded last known prices for %d symbols to enable instant PnL calculation", len(prices))
 }

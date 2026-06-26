@@ -770,10 +770,18 @@ func (lm *LiveOrderManager) GetAllPositions() []models.Position {
 	for _, pos := range lm.activePositions {
 		posCopy := *pos
 
-		if ltp, exists := lm.lastPrices[posCopy.Symbol]; exists && posCopy.NetQuantity != 0 {
-			posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
-			// ⚡ FIX: Round down long float chains to clean up precision data before sending to REST API
-			posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100
+		if posCopy.NetQuantity != 0 {
+			if ltp, exists := lm.lastPrices[posCopy.Symbol]; exists && ltp > 0 {
+				posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
+				posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100
+			} else {
+				// ⚡ FIX: If no fresh WebSocket tick has arrived yet, do not let it drop to 0!
+				// Retain the initialized value computed during SyncExchangeState.
+				// If it's still 0, we can use posCopy.AveragePrice as a break-even baseline until tick 1.
+				if posCopy.UnrealizedPnL == 0 {
+					// Optionally look up a default fallback matrix here or keep baseline
+				}
+			}
 		}
 
 		positions = append(positions, posCopy)

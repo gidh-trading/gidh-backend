@@ -351,6 +351,32 @@ func (a *App) initLiveState(ctx context.Context) {
 		// Paper mode doesn't connect to an external broker, so it relies entirely on local storage rehydration
 		if err == nil {
 			paperMgr.ReconstituteState(dbOrders, dbPositions)
+
+			// 🔥 NEW: Fetch last known prices from DB to enable instant PnL math
+			lastKnownPrices := make(map[string]float64)
+			for _, pos := range dbPositions {
+				if pos.NetQuantity != 0 {
+					var lastPrice float64
+					// Query the most recent close price for this symbol before the server shut down
+					errQuery := a.pool.QueryRow(ctx, `
+						SELECT close 
+						FROM gidh_bars 
+						WHERE stock_name = $1 
+						ORDER BY timestamp DESC 
+						LIMIT 1`, pos.Symbol).Scan(&lastPrice)
+
+					if errQuery == nil && lastPrice > 0 {
+						lastKnownPrices[pos.Symbol] = lastPrice
+					} else {
+						// Fallback to AveragePrice so the math doesn't break if no historical bars exist yet
+						lastKnownPrices[pos.Symbol] = pos.AveragePrice
+					}
+				}
+			}
+
+			// Inject the prices into the Paper Manager's memory
+			paperMgr.SeedLastPrices(lastKnownPrices)
+
 			logger.Info("[Paper Startup] Engine state fully rehydrated from database storage.")
 		}
 	}
