@@ -51,7 +51,7 @@ func (a *App) initWebServer() {
 		})
 		a.managerMu.Unlock()
 	})
-	
+
 	mux.HandleFunc("/api/backtest/start", a.handleBacktestStart)
 	mux.HandleFunc("/api/backtest/start/multi", a.handleMultiDayBacktestStart)
 	mux.HandleFunc("/api/backtest/stop", a.handleBacktestStop)
@@ -627,12 +627,16 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Determine if the client is asking for today's live session data
+	todayStr := time.Now().Format("2006-01-02")
+	isToday := (dateStr == todayStr) || (a.Config.BacktestDate != "" && dateStr == a.Config.BacktestDate)
+
 	// 1. Fetch completed/settled historical position frames from the database table
 	positionMap := make(map[string]models.Position)
 	rows, err := a.pool.Query(r.Context(), `
-		SELECT symbol, product, side, net_quantity, avg_price, realized_pnl, target_price, stop_loss_price
-		FROM gidh_positions
-		WHERE trading_date = $1::date`, dateStr)
+       SELECT symbol, product, side, net_quantity, avg_price, realized_pnl, target_price, stop_loss_price
+       FROM gidh_positions
+       WHERE trading_date = $1::date`, dateStr)
 	if err != nil {
 		logger.Errorf("Failed to query historical positions ledger for date %s: %v", dateStr, err)
 		http.Error(w, "Database query execution failure", http.StatusInternalServerError)
@@ -655,8 +659,8 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 		positionMap[key] = p
 	}
 
-	// 2. Ingest live exposure slots from RAM memory caches to override active parameters
-	if a.OrderManager != nil {
+	// 2. Ingest live exposure slots from RAM memory caches ONLY if querying today's date
+	if isToday && a.OrderManager != nil {
 		// GetAllPositions already computes live ticks per active symbol dynamically!
 		livePositions := a.OrderManager.GetAllPositions()
 
@@ -674,14 +678,15 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 	// 3. Convert integrated state map back into a unified layout response slice
 	finalPositions := make([]models.Position, 0, len(positionMap))
 	for _, pos := range positionMap {
-		// ✅ FIX: Only reset parameters if it's a completely flat database record.
-		// If it has active NetQuantity or an active live memory footprint, preserve its fields!
 		if pos.NetQuantity == 0 {
 			pos.Side = ""
 			pos.TargetPrice = 0
 			pos.StopLossPrice = 0
 			pos.UnrealizedPnL = 0 // Safe to zero out closed database rows
 		}
+		// Note: Open positions for today have already had their UnrealizedPnL
+		// calculated automatically inside a.OrderManager.GetAllPositions()
+
 		finalPositions = append(finalPositions, pos)
 	}
 
