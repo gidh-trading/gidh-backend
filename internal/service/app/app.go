@@ -451,24 +451,30 @@ func (a *App) runMultiDayBacktestProcessor(req StartMultiDayBacktestRequest) {
 		logger.Infof("[Multi-Day] Day completed successfully for date: %s", dateStr)
 
 		// 11. Post-Day Cleanup & State Resetting before next loop iteration advances
-		a.managerMu.Lock()
-		logger.Infof("[Multi-Day] Performing end-of-day memory resets for %s", dateStr)
+		// ONLY reset memory if there is a subsequent day to process!
+		if idx < len(req.Dates)-1 {
+			a.managerMu.Lock()
+			logger.Infof("[Multi-Day] Performing end-of-day memory resets for %s", dateStr)
 
-		if a.OrderManager != nil {
-			logger.Debug("[Multi-Day] Flushing volatile active position matrices from RAM...")
-			a.OrderManager.ClearPositions() // Clear open live position frames from cache
+			if a.OrderManager != nil {
+				logger.Debug("[Multi-Day] Flushing volatile active position matrices from RAM...")
+				a.OrderManager.ClearPositions() // Clear open live position frames from cache
+			}
+			if a.Pipeline != nil {
+				logger.Debug("[Multi-Day] Resetting indicators and rolling pipeline analytics state blocks...")
+				a.Pipeline.Reset() // Clear indicators, technical metrics, and state mappings
+			}
+
+			a.StreamManager = nil
+			a.activeManager = nil
+			a.managerMu.Unlock()
+
+			// Small cooldown buffer between days to allow the system connection resources to settle
+			time.Sleep(200 * time.Millisecond)
+		} else {
+			// On the final day, preserve everything so the Web API can inspect or stop it manually
+			logger.Infof("[Multi-Day] Final date (%s) completed. Retaining RAM state for Web UI inspection.", dateStr)
 		}
-		if a.Pipeline != nil {
-			logger.Debug("[Multi-Day] Resetting indicators and rolling pipeline analytics state blocks...")
-			a.Pipeline.Reset() // Clear indicators, technical metrics, and state mappings
-		}
-
-		a.StreamManager = nil
-		a.activeManager = nil
-		a.managerMu.Unlock()
-
-		// Small cooldown buffer between days to allow the system connection resources to settle
-		time.Sleep(200 * time.Millisecond)
 	}
 
 	logger.Info("🎉 [Multi-Day] All specified backtest dates completed successfully!")
