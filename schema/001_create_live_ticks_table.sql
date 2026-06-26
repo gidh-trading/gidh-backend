@@ -41,3 +41,7 @@ SELECT add_retention_policy('live_ticks', INTERVAL '45 days', if_not_exists => T
 -- Indexes for active/recent row lookups
 CREATE INDEX IF NOT EXISTS idx_live_ticks_token ON live_ticks (instrument_token, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_live_ticks_stock ON live_ticks (stock_name, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_live_ticks_stream
+    ON live_ticks (timestamp ASC, instrument_token);
+

@@ -34,3 +34,6 @@ CREATE INDEX IF NOT EXISTS idx_order_depth_token ON live_order_depth (instrument
 CREATE INDEX IF NOT EXISTS idx_order_depth_stock ON live_order_depth (stock_name, timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_order_depth_side ON live_order_depth (side);
 CREATE INDEX IF NOT EXISTS idx_order_depth_token_side ON live_order_depth (instrument_token, side, timestamp DESC);
+
+CREATE INDEX IF NOT EXISTS idx_order_depth_stream
+    ON live_order_depth (timestamp ASC, instrument_token);
