@@ -103,7 +103,6 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 
 	logger.Infof("[High-Speed Engine] Launching prefetch pipelines for date: %s", d.date.Format("2006-01-02"))
 
-	// Large bounded buffers to hold rows fetched ahead of time
 	tickBuffer := make(chan models.TickData, 50000)
 	depthBuffer := make(chan cachedDepth, 500000)
 
@@ -112,9 +111,7 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 	var errOnce sync.Once
 
 	setErr := func(e error) {
-		errOnce.Do(func() {
-			errPrefetch = e
-		})
+		errOnce.Do(func() { errPrefetch = e })
 	}
 
 	// 1. Worker: Prefetch Ticks
@@ -195,12 +192,13 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 		}
 	}()
 
-	// Reset / initialize state fresh for this day
 	currentDepths := make(map[uint32]*models.OrderDepth)
+	lastDepthTime := make(map[uint32]time.Time) // Tracks the last snapshot time to clear the book
+
 	for _, token := range d.instrumentTokens {
 		currentDepths[token] = &models.OrderDepth{
-			Buy:  make([]models.DepthLevel, 0),
-			Sell: make([]models.DepthLevel, 0),
+			Buy:  make([]models.DepthLevel, 0, 5), // Pre-allocate small capacity
+			Sell: make([]models.DepthLevel, 0, 5),
 		}
 	}
 
@@ -224,10 +222,17 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 			return errPrefetch
 		}
 
-		// Reconstruct order depth timeline
+		// Reconstruct order depth timeline (FIXED: Clears old snapshots)
 		for depthOpen && !nextDepth.Timestamp.After(tick.Timestamp) {
 			targetBook := currentDepths[nextDepth.InstrumentToken]
 			if targetBook != nil {
+				// If we encounter a newer timestamp snapshot, clear out the old levels safely
+				if nextDepth.Timestamp.After(lastDepthTime[nextDepth.InstrumentToken]) {
+					targetBook.Buy = targetBook.Buy[:0]
+					targetBook.Sell = targetBook.Sell[:0]
+					lastDepthTime[nextDepth.InstrumentToken] = nextDepth.Timestamp
+				}
+
 				if nextDepth.Side == "buy" {
 					targetBook.Buy = append(targetBook.Buy, nextDepth.Level)
 				} else {
@@ -238,7 +243,6 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 		}
 
 		if book, exists := currentDepths[tick.InstrumentToken]; exists {
-			// Deep-copy the slice contents so subsequent mutations do not pollute historical ticks
 			tick.Depth.Buy = append([]models.DepthLevel(nil), book.Buy...)
 			tick.Depth.Sell = append([]models.DepthLevel(nil), book.Sell...)
 		}
@@ -254,48 +258,55 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 			continue
 		}
 
-		// PACING / REPLAY ENGINE BLOCK
+		// PACING / REPLAY ENGINE BLOCK (FIXED: Handles Pauses and recalculates waits)
+	paceloop:
 		for {
 			currentSpeed := d.GetSpeedFactor()
 
-			if currentSpeed <= 0 {
-				break
+			// Handle Paused State (0)
+			if currentSpeed == 0 {
+				select {
+				case <-d.speedUpdateChan:
+					continue paceloop // Wake up and re-evaluate speed
+				case <-ctx.Done():
+					return ctx.Err()
+				}
 			}
 
+			// Initialize or reset anchors when speed changes
 			if anchorMarketTime.IsZero() || currentSpeed != activeSpeedFactor {
 				anchorMarketTime = tick.Timestamp
 				anchorRealTime = time.Now()
 				activeSpeedFactor = currentSpeed
-				break
 			}
 
 			marketDuration := tick.Timestamp.Sub(anchorMarketTime)
 			simulatedDuration := time.Duration(float64(marketDuration) / currentSpeed)
-
 			targetRealTime := anchorRealTime.Add(simulatedDuration)
 			waitDuration := targetRealTime.Sub(time.Now())
 
+			// If we've passed the target real time, emit the tick
 			if waitDuration <= 0 {
-				break
+				break paceloop
 			}
 
 			timer.Reset(waitDuration)
 
 			select {
 			case <-timer.C:
-				break
+				break paceloop // Timer finished naturally
 			case <-d.speedUpdateChan:
+				// Stop timer cleanly if interrupted by speed change
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
 					default:
 					}
 				}
-				continue
+				continue paceloop // Re-run math with new speed factors
 			case <-ctx.Done():
 				return ctx.Err()
 			}
-			break
 		}
 	}
 
@@ -304,7 +315,7 @@ func (d *DBBacktestSource) ReadTicks(ctx context.Context, tickChan chan<- models
 		return errPrefetch
 	}
 
-	return ErrBacktestFinished
+	return nil
 }
 
 func (d *DBBacktestSource) Close() error {
