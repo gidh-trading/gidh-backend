@@ -620,6 +620,7 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 
 	// 2. Ingest live exposure slots from RAM memory caches to override active parameters
 	if a.OrderManager != nil {
+		// GetAllPositions already computes live ticks per active symbol dynamically!
 		livePositions := a.OrderManager.GetAllPositions()
 
 		for _, lp := range livePositions {
@@ -627,20 +628,22 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 			lp.Product = strings.ToUpper(lp.Product)
 			key := fmt.Sprintf("%s:%s", lp.Symbol, lp.Product)
 
-			// RAM state always dictates the true active net_quantity and current localized boundaries
+			// RAM state always dictates the true active net_quantity, current localized boundaries,
+			// AND the dynamic memory-bound UnrealizedPnL
 			positionMap[key] = lp
 		}
 	}
 
-	// 3. Convert integrated state map back into an unified layout response slice
+	// 3. Convert integrated state map back into a unified layout response slice
 	finalPositions := make([]models.Position, 0, len(positionMap))
 	for _, pos := range positionMap {
-		// Clean up fields if position is flat to satisfy squaring off canvas logic
+		// ✅ FIX: Only reset parameters if it's a completely flat database record.
+		// If it has active NetQuantity or an active live memory footprint, preserve its fields!
 		if pos.NetQuantity == 0 {
 			pos.Side = ""
 			pos.TargetPrice = 0
 			pos.StopLossPrice = 0
-			pos.UnrealizedPnL = 0
+			pos.UnrealizedPnL = 0 // Safe to zero out closed database rows
 		}
 		finalPositions = append(finalPositions, pos)
 	}
