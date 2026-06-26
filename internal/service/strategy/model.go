@@ -40,10 +40,10 @@ type InstrumentState struct {
 	LastExitSignalTime time.Time
 	LastTickTime       time.Time
 	BarHistory         map[string][]*models.Bar
-
-	SessionOpen float64
-	SessionHigh float64
-	SessionLow  float64
+	MaxPnL             float64
+	SessionOpen        float64
+	SessionHigh        float64
+	SessionLow         float64
 
 	ADRHigh float64
 	ADRLow  float64

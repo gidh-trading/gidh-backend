@@ -14,10 +14,10 @@ import (
 )
 
 const (
-	MaxDailyLossAllowed   = 30000.0
+	MaxDailyLossAllowed   = 3000.0
 	InitialCapital        = 60000.0
 	MaxLeverage           = 5.0
-	MaxCapitalPerStockPct = 0.4
+	MaxCapitalPerStockPct = 0.3
 	AgentEmail            = "algo.trader@gidh.tech"
 	MaxConcurrentTrades   = 10
 )

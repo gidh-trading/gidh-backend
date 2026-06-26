@@ -2,7 +2,6 @@ package strategy
 
 import (
 	"fmt"
-	"math"
 	"time"
 
 	"gidh-backend/internal/service/models"
@@ -16,6 +15,7 @@ func (e *Engine) getOrInitializeState(symbol, strategyName string) *InstrumentSt
 		state = &InstrumentState{
 			StockName:          symbol,
 			ActiveStrategyName: strategyName,
+			MaxPnL:             0.0,
 			Profile:            e.profiles[symbol],
 			VwapPercentile:     e.vwapPercentiles[symbol],
 			BarHistory:         make(map[string][]*models.Bar),
@@ -122,38 +122,6 @@ func (e *Engine) logStrategyDecision(state *InstrumentState, symbol string, acti
 	if action == "EXIT_LONG" || action == "EXIT_SHORT" {
 		state.CurrentTradeID = ""
 	}
-}
-
-func CheckTakeProfitWithDecay(state *InstrumentState, baseTakeProfit float64, decayPerMinute float64, minTakeProfit float64) bool {
-	if state.EntryTimestamp.IsZero() || state.LastTickTime.IsZero() {
-		return state.CurrentPnL >= baseTakeProfit
-	}
-
-	elapsedDuration := state.LastTickTime.Sub(state.EntryTimestamp)
-	minutesElapsed := elapsedDuration.Minutes()
-	decayedTarget := baseTakeProfit - (minutesElapsed * decayPerMinute)
-
-	if decayedTarget < minTakeProfit {
-		decayedTarget = minTakeProfit
-	}
-
-	return state.CurrentPnL >= decayedTarget
-}
-
-func CheckTakeProfitWithIntervalDecay(state *InstrumentState, baseTakeProfit float64, decayPerInterval float64, intervalDuration time.Duration, minTakeProfit float64) bool {
-	if state.EntryTimestamp.IsZero() || state.LastTickTime.IsZero() {
-		return state.CurrentPnL >= baseTakeProfit
-	}
-
-	elapsedDuration := state.LastTickTime.Sub(state.EntryTimestamp)
-	intervalsPassed := math.Floor(elapsedDuration.Seconds() / intervalDuration.Seconds())
-	decayedTarget := baseTakeProfit - (intervalsPassed * decayPerInterval)
-
-	if decayedTarget < minTakeProfit {
-		decayedTarget = minTakeProfit
-	}
-
-	return state.CurrentPnL >= decayedTarget
 }
 
 func (e *Engine) GetADRBounds(state *InstrumentState) (ceiling float64, floor float64, ok bool) {

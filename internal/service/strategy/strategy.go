@@ -143,12 +143,13 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 			signal := strat.CheckEntry(state)
 			results[name] = TickResult{Signal: signal, State: state}
 		} else {
-			if strat.CheckStopLoss(state, currentSide, averagePrice, netQty) {
+			if strat.CheckStopLoss(state, currentSide, averagePrice, netQty, e.profiles) {
 				results[name] = TickResult{Signal: "EXIT_" + currentSide, State: state}
 				continue
 			}
 			if !state.EntryTimestamp.IsZero() && marketTime.Sub(state.EntryTimestamp) > 1*time.Minute {
-				if strat.CheckTakeProfit(state, currentSide, averagePrice, netQty) {
+				// PASS e.vwapPercentiles HERE
+				if strat.CheckTakeProfit(state, currentSide, averagePrice, netQty, e.vwapPercentiles) {
 					results[name] = TickResult{Signal: "EXIT_" + currentSide, State: state}
 					continue
 				}
