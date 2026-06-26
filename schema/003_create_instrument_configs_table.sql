@@ -5,7 +5,7 @@ create table public.instrument_configs
     is_backtest      boolean default false not null
 );
 
-CREATE TABLE public.instrument_profile
+CREATE TABLE IF NOT EXISTS public.instrument_profile
 (
     instrument_token bigint NOT NULL,
     trading_date     DATE NOT NULL,
@@ -16,15 +16,21 @@ CREATE TABLE public.instrument_profile
     adv_val_30d      NUMERIC(15, 2),
     updated_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
 
-    -- Composite Primary Key allows one profile snapshot per instrument per day
     PRIMARY KEY (instrument_token, trading_date),
 
-    -- Foreign Key Relation to your configs table
     CONSTRAINT fk_token
         FOREIGN KEY (instrument_token)
             REFERENCES public.instrument_configs (instrument_token)
             ON DELETE CASCADE
 );
+
+-- Convert to Hypertable
+SELECT create_hypertable('public.instrument_profile', 'trading_date',
+                         if_not_exists => TRUE,
+                         migrate_data => TRUE);
+
+-- Automated 30-Day Cleanup
+SELECT add_retention_policy('public.instrument_profile', INTERVAL '45 days', if_not_exists => TRUE);
 
 
 insert into public.instrument_configs (instrument_token, stock_name, is_backtest)
