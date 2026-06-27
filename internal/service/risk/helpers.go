@@ -6,50 +6,7 @@ import (
 	"gidh-backend/pkg/logger"
 )
 
-// GetUIContractNote delivers a deep copy of performance archives to feed visualization dashboards.
-func (rm *RiskManager) GetUIContractNote() UIContractNotePayload {
-	rm.mu.RLock()
-	defer rm.mu.RUnlock()
-
-	tradesCopy := make([]models.BacktestExecutedTrade, len(rm.executedTrades))
-	copy(tradesCopy, rm.executedTrades)
-
-	if tradesCopy == nil {
-		tradesCopy = []models.BacktestExecutedTrade{}
-	}
-
-	return UIContractNotePayload{
-		Summary: rm.globalSummary,
-		Trades:  tradesCopy,
-	}
-}
-
-// CalculatePositionSizeAndFees calculates permitted order sizes based on leverage and margin without mutating records.
-func (rm *RiskManager) CalculatePositionSizeAndFees(symbol string, price float64) (int, float64) {
-	allowedCapitalAllocation := InitialCapital * MaxCapitalPerStockPct
-	leveragedBuyingPower := allowedCapitalAllocation * MaxLeverage
-
-	qty := int(leveragedBuyingPower / price)
-	if qty <= 0 {
-		return 0, 0.0
-	}
-
-	// Calculate standard NSE charges without saving costs to global daily session counters
-	turnover := float64(qty) * price
-	brokerage := turnover * 0.0003
-	if brokerage > 20.0 {
-		brokerage = 20.0
-	}
-	stt := turnover * 0.00025
-	exchangeFees := turnover * 0.0000345
-	sebiOverhead := turnover * 0.000001
-	gst := (brokerage + exchangeFees + sebiOverhead) * 0.18
-	total := brokerage + stt + exchangeFees + sebiOverhead + gst
-
-	return qty, total
-}
-
-// CalculateItemizedCharges tracks standard NSE contract transaction costs and logs them for executed trades.
+// CalculateItemizedCharges tracks standard NSE contract transaction costs for tracking total loss thresholds.
 func (rm *RiskManager) CalculateItemizedCharges(qty int, price float64) float64 {
 	turnover := float64(qty) * price
 
@@ -64,18 +21,21 @@ func (rm *RiskManager) CalculateItemizedCharges(qty int, price float64) float64 
 	gst := (brokerage + exchangeFees + sebiOverhead) * 0.18
 	total := brokerage + stt + exchangeFees + sebiOverhead + gst
 
-	charges := models.ItemizedCharges{
-		Brokerage:              brokerage,
-		STT:                    stt,
-		ExchangeTurnoverCharge: exchangeFees,
-		SebiTurnoverCharge:     sebiOverhead,
-		GST:                    gst,
-		TotalCharges:           total,
+	return total
+}
+
+// CalculatePositionSizeAndFees calculates permitted order sizes based on leverage and margin without mutating records.
+func (rm *RiskManager) CalculatePositionSizeAndFees(symbol string, price float64) (int, float64) {
+	allowedCapitalAllocation := InitialCapital * MaxCapitalPerStockPct
+	leveragedBuyingPower := allowedCapitalAllocation * MaxLeverage
+
+	qty := int(leveragedBuyingPower / price)
+	if qty <= 0 {
+		return 0, 0.0
 	}
 
-	rm.recordTransactionCosts(charges)
-
-	return total
+	total := rm.CalculateItemizedCharges(qty, price)
+	return qty, total
 }
 
 // HandleManualAndBrokerStateSync updates internal state if a user manually modifies a position via the broker's native interface.

@@ -22,34 +22,26 @@ const (
 	MaxConcurrentTrades   = 10
 )
 
-type UIContractNotePayload struct {
-	Summary models.ItemizedCharges         `json:"summary"`
-	Trades  []models.BacktestExecutedTrade `json:"trades"`
-}
-
 type RiskManager struct {
-	mu             sync.RWMutex
-	orderManager   order.PositionManager
-	strategyEngine *strategy.Engine
-	agentPositions map[string]*models.Position
-	dailyRealized  float64
-	circuitBroken  bool
-	lastExitTime   map[string]time.Time
-
-	dailyChargesPaid float64
-	globalSummary    models.ItemizedCharges
-	executedTrades   []models.BacktestExecutedTrade
+	mu               sync.RWMutex
+	orderManager     order.PositionManager
+	strategyEngine   *strategy.Engine
+	agentPositions   map[string]*models.Position
+	dailyRealized    float64
+	dailyChargesPaid float64 // Kept exclusively for local drawdown evaluation
+	circuitBroken    bool
+	lastExitTime     map[string]time.Time
 }
 
 func NewRiskManager(om order.PositionManager, se *strategy.Engine) *RiskManager {
 	return &RiskManager{
-		orderManager:   om,
-		strategyEngine: se,
-		agentPositions: make(map[string]*models.Position),
-		lastExitTime:   make(map[string]time.Time),
-		dailyRealized:  0.0,
-		circuitBroken:  false,
-		executedTrades: make([]models.BacktestExecutedTrade, 0),
+		orderManager:     om,
+		strategyEngine:   se,
+		agentPositions:   make(map[string]*models.Position),
+		lastExitTime:     make(map[string]time.Time),
+		dailyRealized:    0.0,
+		dailyChargesPaid: 0.0,
+		circuitBroken:    false,
 	}
 }
 
@@ -75,6 +67,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 		pos.AveragePrice = 0.0
 	}
 
+	// 🛑 Drawdown Check: Evaluates Net PnL (Realized PnL - Friction/Taxes)
 	totalNetSessionPnL := rm.dailyRealized - rm.dailyChargesPaid
 	if totalNetSessionPnL <= -MaxDailyLossAllowed {
 		rm.circuitBroken = true
@@ -89,10 +82,8 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 	rm.mu.Unlock()
 
 	// 🔍 MULTI-STRATEGY CONTEXT STREAM EVALUATION STEP
-	// Evaluates the tick across all strategy sandboxes and returns a mapping: strategyName -> TickResult
 	strategyResults := rm.strategyEngine.UpdateContext(enrichedTick, currentSide, avgPrice, netQty)
 
-	// Loop through each strategy's evaluation results sequentially
 	for strategyName, result := range strategyResults {
 		tickSignal := result.Signal
 		proposedState := result.State
@@ -105,14 +96,13 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 				rm.executeBrokerOrder(symbol, pos, "Intelligent Volatility Profit Lock Triggered by "+strategyName, rawTick.Timestamp)
 			}
 			rm.mu.Unlock()
-			return // First execution wins; halts iteration loop for this precise tick sequence
+			return
 		}
 
 		// 2. Evaluate Atomic Entry Signals
 		if (tickSignal == "GO_SHORT" || tickSignal == "GO_LONG") && netQty == 0 {
 			rm.mu.Lock()
 
-			// Recalculate position entry validation parameters
 			if pos.NetQuantity != 0 {
 				rm.mu.Unlock()
 				continue
@@ -165,7 +155,10 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			pos.Side = posSide
 			pos.AveragePrice = rawTick.LastPrice
 
-			// ✅ COMMIT STRATEGY-SPECIFIC TRANSACTION Lifecycle Update
+			// Track charges immediately upon execution commitment to stay tight with true PnL
+			tradeCharges := rm.CalculateItemizedCharges(calculatedQty, rawTick.LastPrice)
+			rm.dailyChargesPaid += tradeCharges
+
 			rm.strategyEngine.CommitTransaction(symbol, strategyName, proposedState, tickSignal, "Strategy_Entry_Condition_Met", calculatedQty)
 
 			logger.Infof("🚀 DYNAMIC RISK MANAGER DISPATCHING EXECUTION ORDER: [%s] %s %s Qty: %d (Leveraged Capital Invested: %.2f INR)",
@@ -181,7 +174,7 @@ func (rm *RiskManager) ProcessSequentialTick(enrichedTick *models.EnrichedTick) 
 			})
 
 			rm.mu.Unlock()
-			return // Order dispatched successfully, cease evaluating alternative tracks on this explicit tick
+			return
 		}
 	}
 }
@@ -207,19 +200,9 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 
 	logger.Warnf("[Execution Gate] Dispatching Liquidation Ticket: %s | Reason: %s", symbol, reason)
 
-	totalCharges := rm.CalculateItemizedCharges(pos.NetQuantity, pos.AveragePrice)
-	rm.globalSummary.TotalCharges += totalCharges
-	rm.dailyChargesPaid += totalCharges
-
-	rm.executedTrades = append(rm.executedTrades, models.BacktestExecutedTrade{
-		Timestamp:       timestamp,
-		Side:            exitSide,
-		Symbol:          symbol,
-		Exchange:        "NSE",
-		Quantity:        pos.NetQuantity,
-		AveragePrice:    pos.AveragePrice,
-		AllocatedCharge: totalCharges,
-	})
+	// Calculate and absorb charges for the exit leg as well
+	tradeCharges := rm.CalculateItemizedCharges(pos.NetQuantity, pos.AveragePrice)
+	rm.dailyChargesPaid += tradeCharges
 
 	rm.lastExitTime[symbol] = timestamp
 
@@ -228,26 +211,4 @@ func (rm *RiskManager) executeBrokerOrder(symbol string, pos *models.Position, r
 	pos.AveragePrice = 0.0
 
 	go rm.orderManager.PlaceOrder(context.Background(), exitReq)
-}
-
-func (rm *RiskManager) buildExitOrderRequest(pos *models.Position, exitSide string) models.OrderRequest {
-	return models.OrderRequest{
-		Symbol:          pos.Symbol,
-		Product:         "MIS",
-		TransactionType: exitSide,
-		OrderType:       "MARKET",
-		Quantity:        pos.NetQuantity,
-		UserEmail:       AgentEmail,
-	}
-}
-
-func (rm *RiskManager) recordTransactionCosts(charges models.ItemizedCharges) {
-	rm.globalSummary.Brokerage += charges.Brokerage
-	rm.globalSummary.STT += charges.STT
-	rm.globalSummary.ExchangeTurnoverCharge += charges.ExchangeTurnoverCharge
-	rm.globalSummary.SebiTurnoverCharge += charges.SebiTurnoverCharge
-	rm.globalSummary.GST += charges.GST
-	rm.globalSummary.StampDuty += charges.StampDuty
-	rm.globalSummary.TotalCharges += charges.TotalCharges
-	rm.dailyChargesPaid += charges.TotalCharges
 }
