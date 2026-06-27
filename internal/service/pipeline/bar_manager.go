@@ -150,7 +150,9 @@ func newCandleState(ts time.Time, price float64, token uint32, name, timeframe s
 	return &candleState{
 		bar: newBar(ts, price, token, name, timeframe),
 		history: &TimeframeAnalyticsHistory{
-			TotalBars: 0,
+			TotalBars:          0,
+			CurrentSessionHigh: price,
+			CurrentSessionLow:  price,
 		},
 	}
 }
@@ -252,6 +254,6 @@ func (bm *BarManager) updateTimeframe(
 	bm.processTickForCandle(cs, tick, vol, timeframe)
 
 	if bm.analyticsEngine != nil {
-		bm.analyticsEngine.AnalyzeTick(cs.bar, tick)
+		bm.analyticsEngine.AnalyzeTick(cs.bar, tick, cs.history)
 	}
 }
