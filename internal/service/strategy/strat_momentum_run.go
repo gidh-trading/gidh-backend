@@ -112,12 +112,12 @@ func (s *MomentumRunStrategy) CheckExit(state *InstrumentState, currentSide stri
 }
 
 // CheckTakeProfit hooks up our automated configuration targets
-func (s *MomentumRunStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
+func (s *MomentumRunStrategy) CheckTakeProfit(state *InstrumentState, currentSide string, averagePrice float64, netQty int, percentiles map[string]*models.VWAPDistancePercentile) bool {
 	return state.CurrentPnL >= s.cfg.TakeProfitINR
 }
 
 // CheckStopLoss hooks up our automated safety risk floor limits
-func (s *MomentumRunStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int) bool {
+func (s *MomentumRunStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int, profiles map[string]*models.InstrumentProfile) bool {
 	return state.CurrentPnL <= s.cfg.HardStopLossINR
 }
 

@@ -26,11 +26,15 @@ type TimeframeAnalyticsHistory struct {
 	RollingVolumeIntensity float64
 	RollingPriceNormalized float64
 	RollingTickRank        float64
+	RollingEfficiencyRank  float64 // Added
+	RollingMomentumScore   float64 // Added
 
 	// --- Prior Closed Benchmarks to Anchors Slopes ---
 	LastClosedVolumeIntensity float64
 	LastClosedPriceNormalized float64
 	LastClosedTickRank        float64
+	LastClosedEfficiencyRank  float64 // Added
+	LastClosedMomentumScore   float64 // Added
 }
 
 // BarAnalyticsEngine implements the stateless calculations layer across multi-thread pipelines.
@@ -73,28 +77,44 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 		bar.Analytics.VwapClosePct = (float64(h.BarsAboveVwap) / float64(h.TotalBars)) * 100
 	}
 
-	// 1. Advance independent rolling averages using the clean 1-7 (and signed -7 to 7) integer ranks directly
+	// --- 1. SMOOTH THE INDEPENDENT BASELINES AS USUAL ---
 	alpha := SmoothingAlpha
 	h.RollingVolumeIntensity = (alpha * float64(bar.Analytics.VolumeRank)) + ((1.0 - alpha) * h.RollingVolumeIntensity)
 	h.RollingPriceNormalized = (alpha * float64(bar.Analytics.PriceRank)) + ((1.0 - alpha) * h.RollingPriceNormalized)
 	h.RollingTickRank = (alpha * float64(bar.Analytics.TickRank)) + ((1.0 - alpha) * h.RollingTickRank)
+	h.RollingEfficiencyRank = (alpha * float64(bar.Analytics.EfficiencyRank)) + ((1.0 - alpha) * h.RollingEfficiencyRank)
 
-	// 2. Map the permanent historical average parameters to the structural output
+	// --- 2. COMPUTE RAW FLOW INTENSITY & SIGNED EXECUTION EDGE ---
+	rollingFlowIntensity := (0.55 * h.RollingVolumeIntensity) + (0.45 * h.RollingTickRank)
+	signedExecutionEdge := (0.60 * h.RollingPriceNormalized) + (0.40 * h.RollingEfficiencyRank)
+
+	// --- 3. COMPUTE FLICKER-PROOF MOMENTUM SCORE ---
+	flowMultiplier := rollingFlowIntensity / 4.0
+	h.RollingMomentumScore = signedExecutionEdge * flowMultiplier
+
+	// --- 4. MAP TO STRUCT OUTPUT LAYER (FIXED: Added Flow Intensity and Execution Edge fields) ---
 	bar.Analytics.RollingVolumeIntensity = h.RollingVolumeIntensity
 	bar.Analytics.RollingPriceNormalized = h.RollingPriceNormalized
 	bar.Analytics.RollingTickRank = h.RollingTickRank
+	bar.Analytics.RollingEfficiencyRank = h.RollingEfficiencyRank
+	bar.Analytics.RollingFlowIntensity = rollingFlowIntensity
+	bar.Analytics.RollingExecutionEdge = signedExecutionEdge
+	bar.Analytics.RollingMomentumScore = h.RollingMomentumScore
 
-	// 3. Compute 1-Bar Historical Close Slope (Current finalized average vs Prior finalized average)
+	// --- 5. COMPUTE 1-BAR DIRECTIONAL SLOPES ---
 	bar.Analytics.VolumeSlope = h.RollingVolumeIntensity - h.LastClosedVolumeIntensity
 	bar.Analytics.PriceSlope = h.RollingPriceNormalized - h.LastClosedPriceNormalized
 	bar.Analytics.TickSlope = h.RollingTickRank - h.LastClosedTickRank
+	bar.Analytics.EfficiencySlope = h.RollingEfficiencyRank - h.LastClosedEfficiencyRank
+	bar.Analytics.MomentumSlope = h.RollingMomentumScore - h.LastClosedMomentumScore
 
-	// 4. Update the tracking checkpoints for the next incoming live candle
+	// --- 6. UPDATE HISTORICAL CLOSED STRUCTURAL CHECKPOINTS ---
 	h.LastClosedVolumeIntensity = h.RollingVolumeIntensity
 	h.LastClosedPriceNormalized = h.RollingPriceNormalized
 	h.LastClosedTickRank = h.RollingTickRank
+	h.LastClosedEfficiencyRank = h.RollingEfficiencyRank
+	h.LastClosedMomentumScore = h.RollingMomentumScore
 
-	// 5. Commit structured output to DB
 	if bae.dbWriter != nil {
 		bae.dbWriter.AddBar(*bar)
 	}
@@ -109,11 +129,24 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *Timefra
 	bar.Analytics.RollingVolumeIntensity = (alpha * float64(bar.Analytics.VolumeRank)) + ((1.0 - alpha) * h.RollingVolumeIntensity)
 	bar.Analytics.RollingPriceNormalized = (alpha * float64(bar.Analytics.PriceRank)) + ((1.0 - alpha) * h.RollingPriceNormalized)
 	bar.Analytics.RollingTickRank = (alpha * float64(bar.Analytics.TickRank)) + ((1.0 - alpha) * h.RollingTickRank)
+	bar.Analytics.RollingEfficiencyRank = (alpha * float64(bar.Analytics.EfficiencyRank)) + ((1.0 - alpha) * h.RollingEfficiencyRank)
 
-	// 2. Real-Time Slope: Evaluate current forming window trajectory vs last finalized block anchor
+	// 2. Real-Time Composite A: Flow Intensity (FIXED: Uses projected bar metrics, not trailing h metrics)
+	bar.Analytics.RollingFlowIntensity = (0.55 * bar.Analytics.RollingVolumeIntensity) + (0.45 * bar.Analytics.RollingTickRank)
+
+	// 3. Real-Time Composite B: Execution Edge
+	bar.Analytics.RollingExecutionEdge = (0.60 * bar.Analytics.RollingPriceNormalized) + (0.40 * bar.Analytics.RollingEfficiencyRank)
+
+	// 4. Compute Projected Master Signed Momentum Score
+	flowMultiplier := bar.Analytics.RollingFlowIntensity / 4.0
+	bar.Analytics.RollingMomentumScore = bar.Analytics.RollingExecutionEdge * flowMultiplier
+
+	// 5. Real-Time Slopes
 	bar.Analytics.VolumeSlope = bar.Analytics.RollingVolumeIntensity - h.LastClosedVolumeIntensity
 	bar.Analytics.PriceSlope = bar.Analytics.RollingPriceNormalized - h.LastClosedPriceNormalized
 	bar.Analytics.TickSlope = bar.Analytics.RollingTickRank - h.LastClosedTickRank
+	bar.Analytics.EfficiencySlope = bar.Analytics.RollingEfficiencyRank - h.LastClosedEfficiencyRank
+	bar.Analytics.MomentumSlope = bar.Analytics.RollingMomentumScore - h.LastClosedMomentumScore
 
 	if h.TotalBars > 0 {
 		bar.Analytics.VwapClosePct = (float64(h.BarsAboveVwap) / float64(h.TotalBars)) * 100
@@ -121,12 +154,16 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *Timefra
 }
 
 func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *models.Bar) {
-	// 1. Evaluates structural parameters and updates bar.Analytics.PriceRank, RangeRank, etc. (from 1 to 7)
+	// 1. Evaluates all parameters and ranks
 	bae.computeMacroTimeframeRanksAndDirection(bar)
 
-	// 2. Apply Directional Polarized Sign to PriceRank (-7 to +7 Spectrum)
-	// If the bar closed below its opening price, flip the rank negative to track bearish momentum.
-	if bar.Close < bar.Open && bar.Analytics.PriceRank > 0 {
-		bar.Analytics.PriceRank = -bar.Analytics.PriceRank
+	// 2. Apply Directional Polarized Sign to Price and Efficiency Spectrum
+	if bar.Close < bar.Open {
+		if bar.Analytics.PriceRank > 0 {
+			bar.Analytics.PriceRank = -bar.Analytics.PriceRank
+		}
+		if bar.Analytics.EfficiencyRank > 0 {
+			bar.Analytics.EfficiencyRank = -bar.Analytics.EfficiencyRank
+		}
 	}
 }

@@ -43,6 +43,28 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 		bar.Analytics.PriceRank = 1
 	}
 
+	rawEfficiency := 0.0
+	if candleRange > 0 {
+		rawEfficiency = candleBody / candleRange
+	}
+
+	switch {
+	case rawEfficiency >= 0.95:
+		bar.Analytics.EfficiencyRank = 7
+	case rawEfficiency >= 0.80:
+		bar.Analytics.EfficiencyRank = 6
+	case rawEfficiency >= 0.65:
+		bar.Analytics.EfficiencyRank = 5
+	case rawEfficiency >= 0.45:
+		bar.Analytics.EfficiencyRank = 4
+	case rawEfficiency >= 0.30:
+		bar.Analytics.EfficiencyRank = 3
+	case rawEfficiency >= 0.15:
+		bar.Analytics.EfficiencyRank = 2
+	default:
+		bar.Analytics.EfficiencyRank = 1
+	}
+
 	switch {
 	case candleRange >= baseline.RangeP97:
 		bar.Analytics.RangeRank = 7
