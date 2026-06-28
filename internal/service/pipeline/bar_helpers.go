@@ -177,3 +177,47 @@ func (bae *BarAnalyticsEngine) getSignedHeatmapRank(divergence, benchmark float6
 	}
 	return magnitude
 }
+
+// EvaluateAndLockAnchors processes structural threshold conditions at bar completion boundaries to activate anchors
+func (bae *BarAnalyticsEngine) EvaluateAndLockAnchors(bar *models.Bar, h *TimeframeAnalyticsHistory) {
+	// 1. Structural Price Band Breaches
+	if bar.High >= bar.Analytics.ADRHigh && !h.AnchorADRHigh.IsActive {
+		h.AnchorADRHigh = TrackedAnchor{IsActive: true}
+	}
+	if bar.Low <= bar.Analytics.ADRLow && !h.AnchorADRLow.IsActive {
+		h.AnchorADRLow = TrackedAnchor{IsActive: true}
+	}
+
+	// 2. Pure Symmetrical Raw Percentage Deviations from VWAP (0.5% threshold)
+	var rawVwapDistPct float64 = 0.0
+	if bar.VWAP > 0 {
+		rawVwapDistPct = ((bar.Close - bar.VWAP) / bar.VWAP) * 100.0
+	}
+
+	if rawVwapDistPct >= 0.5 && !h.AnchorDistGt.IsActive {
+		h.AnchorDistGt = TrackedAnchor{IsActive: true}
+	}
+	if rawVwapDistPct <= -0.5 && !h.AnchorDistLt.IsActive {
+		h.AnchorDistLt = TrackedAnchor{IsActive: true}
+	}
+}
+
+// AccumulateAnchorContext appends historical volume weighted context variables safely upon bar confirmation
+func (bae *BarAnalyticsEngine) AccumulateAnchorContext(bar *models.Bar, h *TimeframeAnalyticsHistory) {
+	if h.AnchorADRHigh.IsActive {
+		h.AnchorADRHigh.CumPV += bar.Close * bar.Volume
+		h.AnchorADRHigh.CumVolume += bar.Volume
+	}
+	if h.AnchorADRLow.IsActive {
+		h.AnchorADRLow.CumPV += bar.Close * bar.Volume
+		h.AnchorADRLow.CumVolume += bar.Volume
+	}
+	if h.AnchorDistGt.IsActive {
+		h.AnchorDistGt.CumPV += bar.Close * bar.Volume
+		h.AnchorDistGt.CumVolume += bar.Volume
+	}
+	if h.AnchorDistLt.IsActive {
+		h.AnchorDistLt.CumPV += bar.Close * bar.Volume
+		h.AnchorDistLt.CumVolume += bar.Volume
+	}
+}
