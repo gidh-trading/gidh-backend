@@ -8,15 +8,17 @@ type BarAnalytics struct {
 	VolumeRank             int            `json:"volume_rank"`
 	TickRank               int            `json:"tick_rank"`
 	PriceRank              int            `json:"price_rank"`
-	EfficiencyRank         int            `json:"efficiency_rank"` // Added
 	RangeRank              int            `json:"range_rank"`
 	Direction              DirectionState `json:"direction"`
-	UpperWickRank          int            `json:"upper_wick_rank"`
-	LowerWickRank          int            `json:"lower_wick_rank"`
 	NormalizedVwapDistance float64        `json:"normalized_vwap_distance"`
 	VwapClosePct           float64        `json:"vwap_close_pct"`
 	ADRHigh                float64        `json:"adr_high"`
 	ADRLow                 float64        `json:"adr_low"`
+	VWAPSlope              float64        `json:"vwap_slope"`
+	AnchorADRHighRank      int            `json:"anchor_adr_high_rank"`
+	AnchorADRLowRank       int            `json:"anchor_adr_low_rank"`
+	AnchorDistHighRank     int            `json:"anchor_dist_high_rank"` // Triggered when Distance >= 0.5%
+	AnchorDistLowRank      int            `json:"anchor_dist_low_rank"`  // Triggered when Distance < 0.5%
 }
 
 type Bar struct {

@@ -43,28 +43,6 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 		bar.Analytics.PriceRank = 1
 	}
 
-	rawEfficiency := 0.0
-	if candleRange > 0 {
-		rawEfficiency = candleBody / candleRange
-	}
-
-	switch {
-	case rawEfficiency >= 0.95:
-		bar.Analytics.EfficiencyRank = 7
-	case rawEfficiency >= 0.80:
-		bar.Analytics.EfficiencyRank = 6
-	case rawEfficiency >= 0.65:
-		bar.Analytics.EfficiencyRank = 5
-	case rawEfficiency >= 0.45:
-		bar.Analytics.EfficiencyRank = 4
-	case rawEfficiency >= 0.30:
-		bar.Analytics.EfficiencyRank = 3
-	case rawEfficiency >= 0.15:
-		bar.Analytics.EfficiencyRank = 2
-	default:
-		bar.Analytics.EfficiencyRank = 1
-	}
-
 	switch {
 	case candleRange >= baseline.RangeP97:
 		bar.Analytics.RangeRank = 7
@@ -87,21 +65,9 @@ func (bae *BarAnalyticsEngine) computeMacroTimeframeRanksAndDirection(bar *model
 		return
 	}
 
-	candleBodyTop := math.Max(bar.Open, bar.Close)
-	candleBodyBottom := math.Min(bar.Open, bar.Close)
-
-	upperWick := bar.High - candleBodyTop
-	lowerWick := candleBodyBottom - bar.Low
-
-	upperWickRatio := upperWick / candleRange
-	lowerWickRatio := lowerWick / candleRange
-
 	positionRatio := (bar.Close - bar.Low) / candleRange
 	isHigherThanOpen := bar.Close > bar.Open
 	isLowerThanOpen := bar.Close < bar.Open
-
-	bar.Analytics.UpperWickRank = bae.getWickRank(upperWickRatio)
-	bar.Analytics.LowerWickRank = bae.getWickRank(lowerWickRatio)
 
 	if bar.Analytics.VolumeRank >= 6 && bar.Analytics.PriceRank <= 4 {
 		if positionRatio >= 0.50 {
@@ -155,4 +121,59 @@ func (bae *BarAnalyticsEngine) getWickRank(ratio float64) int {
 	default:
 		return 1
 	}
+}
+
+func (bae *BarAnalyticsEngine) computeAnchorRank(anchor *TrackedAnchor, currentPrice, currentVolume, normalizationFactor float64) int {
+	if !anchor.IsActive {
+		return 0 // Neutral / Not triggered yet
+	}
+
+	// Dynamic calculation containing temporary uncommitted intra-bar context
+	tempPV := anchor.CumPV + (currentPrice * currentVolume)
+	tempVol := anchor.CumVolume + currentVolume
+
+	if tempVol <= 0 {
+		return 0
+	}
+
+	avwap := tempPV / tempVol
+	rawDivergence := currentPrice - avwap
+
+	return bae.getSignedHeatmapRank(rawDivergence, normalizationFactor)
+}
+
+// getSignedHeatmapRank maps divergence against an expected benchmark value into a strict -7 to 7 score matrix
+func (bae *BarAnalyticsEngine) getSignedHeatmapRank(divergence, benchmark float64) int {
+	if benchmark <= 0 || math.Abs(divergence) < 0.00001 {
+		return 0 // Absolute Neutral
+	}
+
+	// Quantization boundaries as percentages of the benchmark target
+	// Sliced symmetrically to distribute steps evenly on your heatmap
+	thresholds := [6]float64{0.05, 0.15, 0.30, 0.50, 0.75, 1.10}
+	absDiv := math.Abs(divergence)
+
+	var magnitude int
+	switch {
+	case absDiv >= benchmark*thresholds[5]:
+		magnitude = 7
+	case absDiv >= benchmark*thresholds[4]:
+		magnitude = 6
+	case absDiv >= benchmark*thresholds[3]:
+		magnitude = 5
+	case absDiv >= benchmark*thresholds[2]:
+		magnitude = 4
+	case absDiv >= benchmark*thresholds[1]:
+		magnitude = 3
+	case absDiv >= benchmark*thresholds[0]:
+		magnitude = 2
+	default:
+		magnitude = 1
+	}
+
+	// Apply dynamic polarity alignment
+	if divergence < 0 {
+		return -magnitude
+	}
+	return magnitude
 }
