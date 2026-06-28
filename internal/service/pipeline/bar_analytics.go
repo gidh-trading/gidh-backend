@@ -110,9 +110,9 @@ func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *mode
 	}
 
 	// -------------------------------------------------------------
-	// 3. SIMPLIFIED NORMALIZED VWAP CHANGE (NO RANK)
+	// 3. NATURAL BOUNDED VWAP VELOCITY INDICATOR (-1 to 1)
 	// -------------------------------------------------------------
-	var normalizedVwapChange float64 = 0.0
+	var boundedVwapSlope float64 = 0.0
 
 	if len(h.VWAPHistory) > 0 && adrPoints > 0 {
 		prevVWAP := h.VWAPHistory[len(h.VWAPHistory)-1]
@@ -120,12 +120,15 @@ func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *mode
 		// 1. Calculate raw change relative to ADR
 		rawRatio := (bar.VWAP - prevVWAP) / adrPoints
 
-		// 2. Amplify by 10,000 to convert into clean Basis Points (bps) of ADR
-		normalizedVwapChange = rawRatio * 10000.0
+		// 2. Squash into a natural (-1, 1) range using hyperbolic tangent (tanh).
+		// A scaling factor of 20.0 means a VWAP shift equal to 5% of your ADR
+		// pushes the indicator to ~0.76, while a 10% ADR shift pushes it to ~0.96.
+		const scalingFactor = 20.0
+		boundedVwapSlope = math.Tanh(rawRatio * scalingFactor)
 	}
 
-	// Store the clean, scaled value directly (e.g., 21.90 instead of 0.00219)
-	bar.Analytics.VWAPSlope = normalizedVwapChange
+	// Overwrite the old unbounded slope field with the clean, squashed metric
+	bar.Analytics.VWAPSlope = boundedVwapSlope
 
 	// Append to history ONLY when the bar is fully closing
 	if isBarClose {
@@ -136,25 +139,21 @@ func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *mode
 	}
 
 	// -------------------------------------------------------------
-	// 4. ANCHORED VWAP STATE ENGINE (Keeps the -7 to 7 ranks for heatmap)
+	// 4. ANCHORED VWAP STATE ENGINE (Updated to Continuous Tanh)
 	// -------------------------------------------------------------
-	var currentVwapDistPct float64 = 0.0
-	if bar.VWAP > 0 {
-		currentVwapDistPct = (math.Abs(bar.Close-bar.VWAP) / bar.VWAP) * 100.0
-	}
 
-	// Check dynamic trigger thresholds
-	if bar.High >= bar.Analytics.ADRHigh {
+	// ✅ FIX: Only initialize if the anchor is NOT already active to prevent volume resetting
+	if bar.High >= bar.Analytics.ADRHigh && !h.AnchorADRHigh.IsActive {
 		h.AnchorADRHigh = TrackedAnchor{IsActive: true}
 	}
-	if bar.Low <= bar.Analytics.ADRLow {
+	if bar.Low <= bar.Analytics.ADRLow && !h.AnchorADRLow.IsActive {
 		h.AnchorADRLow = TrackedAnchor{IsActive: true}
 	}
-	if currentVwapDistPct >= 0.5 {
+	if bar.Analytics.NormalizedVwapDistance >= 0.5 && !h.AnchorDistGt.IsActive {
 		h.AnchorDistGt = TrackedAnchor{IsActive: true}
 	}
-	if currentVwapDistPct < 0.5 {
-		h.AnchorDistLt = TrackedAnchor{IsActive: true}
+	if bar.Analytics.NormalizedVwapDistance <= -0.5 && !h.AnchorDistLt.IsActive {
+		h.AnchorDistLt.IsActive = true // Directly flipping state flags to preserve continuity
 	}
 
 	// Accumulate context parameters securely on close
@@ -177,11 +176,12 @@ func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *mode
 		}
 	}
 
-	// Process dynamic snapshot targets for visual layers
-	bar.Analytics.AnchorADRHighRank = bae.computeAnchorRank(&h.AnchorADRHigh, bar.Close, bar.Volume, adrPoints)
-	bar.Analytics.AnchorADRLowRank = bae.computeAnchorRank(&h.AnchorADRLow, bar.Close, bar.Volume, adrPoints)
-	bar.Analytics.AnchorDistHighRank = bae.computeAnchorRank(&h.AnchorDistGt, bar.Close, bar.Volume, adrPoints)
-	bar.Analytics.AnchorDistLowRank = bae.computeAnchorRank(&h.AnchorDistLt, bar.Close, bar.Volume, adrPoints)
+	// 🚀 CALCULATE CONTINUOUS DISTANCES (-1.0 to 1.0) instead of integer ranks
+	// Note: If your models.Bar struct expects an int for these fields, update those fields to float64!
+	bar.Analytics.AnchorADRHigh = bae.computeAnchorContinuousDistance(&h.AnchorADRHigh, bar.Close, bar.Volume, adrPoints)
+	bar.Analytics.AnchorADRLow = bae.computeAnchorContinuousDistance(&h.AnchorADRLow, bar.Close, bar.Volume, adrPoints)
+	bar.Analytics.AnchorDistHigh = bae.computeAnchorContinuousDistance(&h.AnchorDistGt, bar.Close, bar.Volume, adrPoints)
+	bar.Analytics.AnchorDistLow = bae.computeAnchorContinuousDistance(&h.AnchorDistLt, bar.Close, bar.Volume, adrPoints)
 
 	// 5. Evaluate all macro metrics and ranks
 	bae.computeMacroTimeframeRanksAndDirection(bar)
@@ -193,4 +193,29 @@ func (bae *BarAnalyticsEngine) CalculateContinuousAndStructuralMetrics(bar *mode
 		}
 
 	}
+}
+
+func (bae *BarAnalyticsEngine) computeAnchorContinuousDistance(anchor *TrackedAnchor, currentPrice, currentVolume, adrPoints float64) float64 {
+	if !anchor.IsActive || adrPoints <= 0 {
+		return 0.0
+	}
+
+	// Dynamic temporary calculation incorporating current intra-bar tick metrics
+	tempPV := anchor.CumPV + (currentPrice * currentVolume)
+	tempVol := anchor.CumVolume + currentVolume
+
+	if tempVol <= 0 {
+		return 0.0
+	}
+
+	anchoredVwap := tempPV / tempVol
+	rawDivergence := currentPrice - anchoredVwap
+
+	// Normalize divergence against the asset's structural ADR points
+	standardizedDivergence := rawDivergence / adrPoints
+
+	// Squash into (-1, 1). A scaling factor of 10.0 means that if price runs away
+	// from the AVWAP by 20% of its total ADR, the indicator will read a stable ~0.76
+	const scalingFactor = 10.0
+	return math.Tanh(standardizedDivergence * scalingFactor)
 }

@@ -15,10 +15,10 @@ type BarAnalytics struct {
 	ADRHigh                float64        `json:"adr_high"`
 	ADRLow                 float64        `json:"adr_low"`
 	VWAPSlope              float64        `json:"vwap_slope"`
-	AnchorADRHighRank      int            `json:"anchor_adr_high_rank"`
-	AnchorADRLowRank       int            `json:"anchor_adr_low_rank"`
-	AnchorDistHighRank     int            `json:"anchor_dist_high_rank"` // Triggered when Distance >= 0.5%
-	AnchorDistLowRank      int            `json:"anchor_dist_low_rank"`  // Triggered when Distance < 0.5%
+	AnchorADRHigh          float64        `json:"anchor_adr_high"`
+	AnchorADRLow           float64        `json:"anchor_adr_low"`
+	AnchorDistHigh         float64        `json:"anchor_dist_high"` // Triggered when Distance >= 0.5%
+	AnchorDistLow          float64        `json:"anchor_dist_low"`  // Triggered when Distance < 0.5%
 }
 
 type Bar struct {
