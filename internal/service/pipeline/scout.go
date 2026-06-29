@@ -94,7 +94,7 @@ func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
 		if isTriggered {
 			// If it wasn't already active, fire a new alert
 			if !hasActiveAlert {
-				logger.Infof("🚨 [Scout ALERT TRIGGER] Stock: %s | Type: %s | Price: %.2f | Active: TRUE", bar.StockName, triggerType, bar.Close)
+				logger.Debugf("🚨 [Scout ALERT TRIGGER] Stock: %s | Type: %s | Price: %.2f | Active: TRUE", bar.StockName, triggerType, bar.Close)
 
 				s.activeAlerts[key] = alertState{
 					TriggerType:      triggerType,
@@ -112,7 +112,7 @@ func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
 		} else {
 			// If it was active but the condition is no longer met, turn it off
 			if hasActiveAlert {
-				logger.Infof("✅ [Scout ALERT CONCLUDED] Stock: %s | Type: %s | Price: %.2f | Active: FALSE", bar.StockName, state.TriggerType, bar.Close)
+				logger.Debugf("✅ [Scout ALERT CONCLUDED] Stock: %s | Type: %s | Price: %.2f | Active: FALSE", bar.StockName, state.TriggerType, bar.Close)
 
 				snapshot := s.compileSnapshot(bar, state.TriggerType, false)
 				s.alertHistory[key] = append(s.alertHistory[key], snapshot)

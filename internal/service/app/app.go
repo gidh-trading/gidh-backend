@@ -199,8 +199,9 @@ func (a *App) initPipeline(
 
 	// 4. Initialize the decoupled Bar Manager
 	barManager := pipeline.NewBarManager(a.wsHub, a.DBWriter, profilesMap, dnaMap)
-
 	scoutStage := pipeline.NewScoutStage(a.wsHub, profilesMap)
+
+	barManager.ScoutStage = scoutStage
 
 	// 5. Assemble the streamlined Execution Pipeline Stage
 	a.Pipeline = NewPipeline(vpStage, enrichmentStage, barManager, scoutStage, a.DBWriter)
