@@ -179,25 +179,27 @@ func (bae *BarAnalyticsEngine) getSignedHeatmapRank(divergence, benchmark float6
 }
 
 // EvaluateAndLockAnchors processes structural threshold conditions at bar completion boundaries to activate anchors
+// EvaluateAndLockAnchors processes structural threshold conditions at bar completion boundaries to activate anchors
 func (bae *BarAnalyticsEngine) EvaluateAndLockAnchors(bar *models.Bar, h *TimeframeAnalyticsHistory) {
 	// 1. Structural Price Band Breaches
-	if bar.High >= bar.Analytics.ADRHigh && !h.AnchorADRHigh.IsActive {
+	// Added > 0 checks to ensure we don't accidentally anchor on uninitialized zero values
+	if bar.High >= bar.Analytics.ADRHigh && bar.Analytics.ADRHigh > 0 && !h.AnchorADRHigh.IsActive {
 		h.AnchorADRHigh = TrackedAnchor{IsActive: true}
 	}
-	if bar.Low <= bar.Analytics.ADRLow && !h.AnchorADRLow.IsActive {
+	if bar.Low <= bar.Analytics.ADRLow && bar.Analytics.ADRLow > 0 && !h.AnchorADRLow.IsActive {
 		h.AnchorADRLow = TrackedAnchor{IsActive: true}
 	}
 
-	// 2. Pure Symmetrical Raw Percentage Deviations from VWAP (0.5% threshold)
-	var rawVwapDistPct float64 = 0.0
-	if bar.VWAP > 0 {
-		rawVwapDistPct = ((bar.Close - bar.VWAP) / bar.VWAP) * 100.0
-	}
+	// 2. Normalized Deviations from VWAP (0.5 / -0.5 threshold)
+	normDist := bae.calculateDistance(bar.Close, bar.VWAP, uint32(bar.InstrumentToken))
 
-	if rawVwapDistPct >= 0.5 && !h.AnchorDistGt.IsActive {
+	// Ensure the current bar's analytics are updated for the UI payload
+	bar.Analytics.NormalizedVwapDistance = normDist
+
+	if normDist >= 0.5 && !h.AnchorDistGt.IsActive {
 		h.AnchorDistGt = TrackedAnchor{IsActive: true}
 	}
-	if rawVwapDistPct <= -0.5 && !h.AnchorDistLt.IsActive {
+	if normDist <= -0.5 && !h.AnchorDistLt.IsActive {
 		h.AnchorDistLt = TrackedAnchor{IsActive: true}
 	}
 }
@@ -207,17 +209,21 @@ func (bae *BarAnalyticsEngine) AccumulateAnchorContext(bar *models.Bar, h *Timef
 	if h.AnchorADRHigh.IsActive {
 		h.AnchorADRHigh.CumPV += bar.Close * bar.Volume
 		h.AnchorADRHigh.CumVolume += bar.Volume
+		h.AnchorADRHigh.PrevAVWAP = h.AnchorADRHigh.CurrentBarAVWAP
 	}
 	if h.AnchorADRLow.IsActive {
 		h.AnchorADRLow.CumPV += bar.Close * bar.Volume
 		h.AnchorADRLow.CumVolume += bar.Volume
+		h.AnchorADRLow.PrevAVWAP = h.AnchorADRLow.CurrentBarAVWAP
 	}
 	if h.AnchorDistGt.IsActive {
 		h.AnchorDistGt.CumPV += bar.Close * bar.Volume
 		h.AnchorDistGt.CumVolume += bar.Volume
+		h.AnchorDistGt.PrevAVWAP = h.AnchorDistGt.CurrentBarAVWAP
 	}
 	if h.AnchorDistLt.IsActive {
 		h.AnchorDistLt.CumPV += bar.Close * bar.Volume
 		h.AnchorDistLt.CumVolume += bar.Volume
+		h.AnchorDistLt.PrevAVWAP = h.AnchorDistLt.CurrentBarAVWAP
 	}
 }
