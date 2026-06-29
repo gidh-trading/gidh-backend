@@ -17,12 +17,12 @@ type ScoutHistoricalSnapshot struct {
 	StockName       string    `json:"stock_name"`
 	TriggerType     string    `json:"trigger_type"`
 	Price           float64   `json:"price"`
+	ChangePct       float64   `json:"change_pct"`
+	ADRHigh         float64   `json:"adr_high"`
+	ADRLow          float64   `json:"adr_low"`
+	VwapDistance    float64   `json:"vwap_distance"`
 	VolumeRank      int32     `json:"volume_rank"`
-	TickRank        int32     `json:"tick_rank"`
 	PriceRank       int32     `json:"price_rank"`
-	POC             float64   `json:"poc"`
-	VAH             float64   `json:"vah"`
-	VAL             float64   `json:"val"`
 	Active          bool      `json:"active"`
 }
 
@@ -184,11 +184,11 @@ func (s *ScoutStage) compileSnapshot(bar *models.Bar, trigger string, isActive b
 		TriggerType:     trigger,
 		Price:           bar.Close,
 		VolumeRank:      int32(bar.Analytics.VolumeRank),
-		TickRank:        int32(bar.Analytics.TickRank),
 		PriceRank:       int32(bar.Analytics.PriceRank),
-		POC:             bar.POC,
-		VAH:             bar.VAH,
-		VAL:             bar.VAL,
+		ChangePct:       bar.ChangePct,
+		ADRHigh:         bar.Analytics.ADRHigh,
+		ADRLow:          bar.Analytics.ADRLow,
+		VwapDistance:    bar.Analytics.NormalizedVwapDistance,
 		Active:          isActive,
 	}
 }
