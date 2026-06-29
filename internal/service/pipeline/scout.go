@@ -8,6 +8,7 @@ import (
 
 	"gidh-backend/internal/service/models"
 	"gidh-backend/internal/service/ws"
+	"gidh-backend/pkg/logger" // Imported the backend logging library
 )
 
 type ScoutHistoricalSnapshot struct {
@@ -42,21 +43,26 @@ type ScoutStage struct {
 	profiles     map[uint32]*models.InstrumentProfile
 	mu           sync.Mutex
 	activeAlerts map[alertKey]alertState
-	alertHistory map[uint32][]ScoutHistoricalSnapshot
+	alertHistory map[alertKey][]ScoutHistoricalSnapshot
 }
 
 func NewScoutStage(hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile) *ScoutStage {
+	logger.Info("[Scout Stage] Initializing Scout Execution Stage Matrix...")
 	return &ScoutStage{
 		wsHub:        hub,
 		profiles:     profiles,
 		activeAlerts: make(map[alertKey]alertState),
-		alertHistory: make(map[uint32][]ScoutHistoricalSnapshot),
+		alertHistory: make(map[alertKey][]ScoutHistoricalSnapshot),
 	}
 }
 
 // ProcessClosedBar evaluates scout alerts at the close of a 1-minute bar
 func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
-	if s.wsHub == nil || bar.Timeframe != "1m" {
+	if s.wsHub == nil {
+		logger.Warn("[Scout Stage] Evaluation skipped: WebScoket Hub reference is nil.")
+		return nil
+	}
+	if bar.Timeframe != "1m" {
 		return nil
 	}
 
@@ -69,6 +75,10 @@ func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
 		"VWAP_ALERT_High": bar.Analytics.NormalizedVwapDistance > 0.5,
 		"VWAP_ALERT_Low":  bar.Analytics.NormalizedVwapDistance < -0.5,
 	}
+
+	// Trace print to log terminal metrics per evaluation cycle
+	logger.Debugf("[Scout Evaluate] Token: %d (%s) | High: %.2f | Low: %.2f | ADR_H: %.2f | ADR_L: %.2f | VWAP_Dist: %.4f",
+		token, bar.StockName, bar.High, bar.Low, bar.Analytics.ADRHigh, bar.Analytics.ADRLow, bar.Analytics.NormalizedVwapDistance)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -84,6 +94,8 @@ func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
 		if isTriggered {
 			// If it wasn't already active, fire a new alert
 			if !hasActiveAlert {
+				logger.Infof("🚨 [Scout ALERT TRIGGER] Stock: %s | Type: %s | Price: %.2f | Active: TRUE", bar.StockName, triggerType, bar.Close)
+
 				s.activeAlerts[key] = alertState{
 					TriggerType:      triggerType,
 					FirstTriggerTime: bar.Timestamp,
@@ -91,16 +103,23 @@ func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
 				}
 
 				snapshot := s.compileSnapshot(bar, triggerType, true)
-				s.alertHistory[token] = append(s.alertHistory[token], snapshot)
+				s.alertHistory[key] = append(s.alertHistory[key], snapshot)
+
+				// Broadcast tracking sequence
+				logger.Debugf("[Scout Broadcast] Dispatching to WebSockets payload type: scout_alert for %s", bar.StockName)
 				s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
 			}
-			// (If already active, we just hold the state and do nothing until it turns off)
 		} else {
 			// If it was active but the condition is no longer met, turn it off
 			if hasActiveAlert {
+				logger.Infof("✅ [Scout ALERT CONCLUDED] Stock: %s | Type: %s | Price: %.2f | Active: FALSE", bar.StockName, state.TriggerType, bar.Close)
+
 				snapshot := s.compileSnapshot(bar, state.TriggerType, false)
-				s.alertHistory[token] = append(s.alertHistory[token], snapshot)
+				s.alertHistory[key] = append(s.alertHistory[key], snapshot)
+
+				logger.Debugf("[Scout Broadcast] Dispatching conclusion to WebSockets payload type: scout_alert for %s", bar.StockName)
 				s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
+
 				delete(s.activeAlerts, key)
 			}
 		}
@@ -119,9 +138,10 @@ func (s *ScoutStage) GetAllAlertHistory() []ScoutHistoricalSnapshot {
 		if len(snapshots) == 0 {
 			continue
 		}
-		// Return the most recent state for the token
 		dynamicMatrix = append(dynamicMatrix, snapshots[len(snapshots)-1])
 	}
+
+	logger.Debugf("[Scout API] GetAllAlertHistory requested. Aggregated unique rows processed: %d", len(dynamicMatrix))
 
 	sort.Slice(dynamicMatrix, func(i, j int) bool {
 		if dynamicMatrix[i].Active && !dynamicMatrix[j].Active {
@@ -139,12 +159,19 @@ func (s *ScoutStage) GetAllAlertHistory() []ScoutHistoricalSnapshot {
 func (s *ScoutStage) GetAlertHistory(token uint32) []ScoutHistoricalSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	history, exists := s.alertHistory[token]
-	if !exists {
-		return []ScoutHistoricalSnapshot{}
+
+	var dst []ScoutHistoricalSnapshot
+
+	for key, snapshots := range s.alertHistory {
+		if key.Token == token {
+			dst = append(dst, snapshots...)
+		}
 	}
-	dst := make([]ScoutHistoricalSnapshot, len(history))
-	copy(dst, history)
+
+	sort.Slice(dst, func(i, j int) bool {
+		return dst[i].Timestamp.Before(dst[j].Timestamp)
+	})
+
 	return dst
 }
 
