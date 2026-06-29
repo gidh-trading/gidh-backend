@@ -81,14 +81,7 @@ func (p *Pipeline) Process(rawTick models.TickData) error {
 		}
 	}
 
-	// 5. Scout Alerts
-	if p.scoutStage != nil {
-		if err := p.scoutStage.Process(enrichedTick); err != nil {
-			logger.Errorf("Pipeline Error: Scout observer engine stage failure: %v", err)
-		}
-	}
-
-	// 6. Synchronous Agent Execution
+	// 5. Synchronous Agent Execution
 	if p.AlgoAgent != nil {
 		p.AlgoAgent.ProcessSequentialTick(enrichedTick)
 	}

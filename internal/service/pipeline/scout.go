@@ -25,143 +25,87 @@ type ScoutHistoricalSnapshot struct {
 	Active          bool      `json:"active"`
 }
 
-type cachedBoundaries struct {
-	POC float64
-	VAH float64
-	VAL float64
-}
-
 type alertState struct {
 	TriggerType      string
 	FirstTriggerTime time.Time
 	LastEvalTime     time.Time
 }
 
+// alertKey allows us to track multiple distinct alerts for the same token
+type alertKey struct {
+	Token       uint32
+	TriggerType string
+}
+
 type ScoutStage struct {
 	wsHub        *ws.Hub
 	profiles     map[uint32]*models.InstrumentProfile
 	mu           sync.Mutex
-	activeAlerts map[uint32]alertState
+	activeAlerts map[alertKey]alertState
 	alertHistory map[uint32][]ScoutHistoricalSnapshot
-	profileCache map[uint32]cachedBoundaries
 }
 
 func NewScoutStage(hub *ws.Hub, profiles map[uint32]*models.InstrumentProfile) *ScoutStage {
 	return &ScoutStage{
 		wsHub:        hub,
 		profiles:     profiles,
-		activeAlerts: make(map[uint32]alertState),
+		activeAlerts: make(map[alertKey]alertState),
 		alertHistory: make(map[uint32][]ScoutHistoricalSnapshot),
-		profileCache: make(map[uint32]cachedBoundaries),
 	}
 }
 
-func (s *ScoutStage) Process(tick *models.EnrichedTick) error {
-	if s.wsHub == nil {
+// ProcessClosedBar evaluates scout alerts at the close of a 1-minute bar
+func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
+	if s.wsHub == nil || bar.Timeframe != "1m" {
 		return nil
 	}
 
-	token := tick.Raw.InstrumentToken
-	volRank := tick.Enrichment.VolumeRank
-	priceRank := tick.Enrichment.PriceRank // Extraction of normalized price velocity
+	token := uint32(bar.InstrumentToken)
 
-	// 🟢 RULE 1: FILTER PACKET CHATTER NOISE
-	// Updated chatter rule to monitor volumeRank and priceRank
-	if volRank == 0 && priceRank == 0 {
-		return nil
+	// Map out the 4 independent trigger conditions
+	conditions := map[string]bool{
+		"ADR_HIGH_TOUCH":  bar.High >= bar.Analytics.ADRHigh && bar.Analytics.ADRHigh > 0,
+		"ADR_LOW_TOUCH":   bar.Low <= bar.Analytics.ADRLow && bar.Analytics.ADRLow > 0,
+		"VWAP_ALERT_High": bar.Analytics.NormalizedVwapDistance > 0.5,
+		"VWAP_ALERT_Low":  bar.Analytics.NormalizedVwapDistance < -0.5,
 	}
 
 	s.mu.Lock()
-	state, hasActiveAlert := s.activeAlerts[token]
+	defer s.mu.Unlock()
 
-	if tick.VolProfile != nil && tick.VolProfile.VAH > 0 && tick.VolProfile.VAL > 0 {
-		s.profileCache[token] = cachedBoundaries{
-			POC: tick.VolProfile.POC,
-			VAH: tick.VolProfile.VAH,
-			VAL: tick.VolProfile.VAL,
+	for triggerType, isTriggered := range conditions {
+		key := alertKey{
+			Token:       token,
+			TriggerType: triggerType,
 		}
-	}
-	cached, _ := s.profileCache[token]
-	s.mu.Unlock()
 
-	// ==========================================================
-	// ⚡ THE SPARK GATEKEEPER CONDITION
-	// ==========================================================
-	hasSubstantialPriceMove := priceRank >= 4
+		state, hasActiveAlert := s.activeAlerts[key]
 
-	now := time.Now()
-	var currentTrigger string
+		if isTriggered {
+			// If it wasn't already active, fire a new alert
+			if !hasActiveAlert {
+				s.activeAlerts[key] = alertState{
+					TriggerType:      triggerType,
+					FirstTriggerTime: bar.Timestamp,
+					LastEvalTime:     time.Now(),
+				}
 
-	// ==========================================================
-	// 1. STATE RE-EVALUATION LATCH
-	// ==========================================================
-	if hasActiveAlert {
-		// Only retain state tracking logic for VOLUME_SPIKE
-		if state.TriggerType == "VOLUME_SPIKE" {
-			// Alerts persist only if BOTH priceRank and volumeRank remain strictly above 6
-			if priceRank > 6 && volRank > 6 && hasSubstantialPriceMove {
-				currentTrigger = "VOLUME_SPIKE"
+				snapshot := s.compileSnapshot(bar, triggerType, true)
+				s.alertHistory[token] = append(s.alertHistory[token], snapshot)
+				s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
+			}
+			// (If already active, we just hold the state and do nothing until it turns off)
+		} else {
+			// If it was active but the condition is no longer met, turn it off
+			if hasActiveAlert {
+				snapshot := s.compileSnapshot(bar, state.TriggerType, false)
+				s.alertHistory[token] = append(s.alertHistory[token], snapshot)
+				s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
+				delete(s.activeAlerts, key)
 			}
 		}
 	}
 
-	// ==========================================================
-	// 2. FRESH ANOMALY SENSING (Only processed if currently idle)
-	// ==========================================================
-	if currentTrigger == "" && !hasActiveAlert && hasSubstantialPriceMove {
-		// Strict condition: Only trigger when BOTH priceRank and volumeRank are strictly greater than 6
-		if priceRank > 6 && volRank > 6 {
-			currentTrigger = "VOLUME_SPIKE"
-		}
-		// VAH_BREACH and VAL_BREACH conditional blocks completely bypassed here
-	}
-
-	// ==========================================================
-	// 3. BROADCAST LAYER & HANDSHAKE MANAGEMENT
-	// ==========================================================
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	// Leg A: Anomaly ended. Send single active: false payload to turn off UI highlight
-	if currentTrigger == "" && hasActiveAlert {
-		snapshot := s.compileSnapshot(tick, cached, state.FirstTriggerTime, state.TriggerType, false)
-		s.alertHistory[token] = append(s.alertHistory[token], snapshot)
-		s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
-
-		delete(s.activeAlerts, token)
-		return nil
-	}
-
-	// Leg B: Stable equilibrium. Exit quietly.
-	if currentTrigger == "" {
-		return nil
-	}
-
-	// Leg C: Ongoing sustained breakout session. Send updates every 1 minute.
-	if hasActiveAlert && state.TriggerType == currentTrigger {
-		if now.Sub(state.LastEvalTime) < 1*time.Minute {
-			return nil
-		}
-
-		state.LastEvalTime = now
-		s.activeAlerts[token] = state
-
-		snapshot := s.compileSnapshot(tick, cached, state.FirstTriggerTime, currentTrigger, true)
-		s.alertHistory[token] = append(s.alertHistory[token], snapshot)
-		s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
-		return nil
-	}
-
-	// Leg D: Fresh directional expansion crossover event initialized.
-	s.activeAlerts[token] = alertState{
-		TriggerType:      currentTrigger,
-		FirstTriggerTime: tick.Raw.Timestamp,
-		LastEvalTime:     now,
-	}
-
-	snapshot := s.compileSnapshot(tick, cached, tick.Raw.Timestamp, currentTrigger, true)
-	s.alertHistory[token] = append(s.alertHistory[token], snapshot)
-	s.wsHub.BroadcastJSON("global:trading", map[string]any{"type": "scout_alert", "data": snapshot})
 	return nil
 }
 
@@ -175,6 +119,7 @@ func (s *ScoutStage) GetAllAlertHistory() []ScoutHistoricalSnapshot {
 		if len(snapshots) == 0 {
 			continue
 		}
+		// Return the most recent state for the token
 		dynamicMatrix = append(dynamicMatrix, snapshots[len(snapshots)-1])
 	}
 
@@ -203,30 +148,20 @@ func (s *ScoutStage) GetAlertHistory(token uint32) []ScoutHistoricalSnapshot {
 	return dst
 }
 
-func (s *ScoutStage) compileSnapshot(tick *models.EnrichedTick, cached cachedBoundaries, triggerTime time.Time, trigger string, isActive bool) ScoutHistoricalSnapshot {
-	var outPoc, outVah, outVal float64
-	if tick.VolProfile != nil && tick.VolProfile.VAH > 0 {
-		outPoc = tick.VolProfile.POC
-		outVah = tick.VolProfile.VAH
-		outVal = tick.VolProfile.VAL
-	} else {
-		outPoc = cached.POC
-		outVah = cached.VAH
-		outVal = cached.VAL
-	}
-
+// compileSnapshot constructs the alert payload from a closed bar
+func (s *ScoutStage) compileSnapshot(bar *models.Bar, trigger string, isActive bool) ScoutHistoricalSnapshot {
 	return ScoutHistoricalSnapshot{
-		Timestamp:       triggerTime,
-		InstrumentToken: tick.Raw.InstrumentToken,
-		StockName:       tick.Raw.StockName,
+		Timestamp:       bar.Timestamp,
+		InstrumentToken: uint32(bar.InstrumentToken),
+		StockName:       bar.StockName,
 		TriggerType:     trigger,
-		Price:           tick.Raw.LastPrice,
-		VolumeRank:      int32(tick.Enrichment.VolumeRank),
-		TickRank:        int32(tick.Enrichment.TickRank),
-		PriceRank:       int32(tick.Enrichment.PriceRank),
-		POC:             outPoc,
-		VAH:             outVah,
-		VAL:             outVal,
+		Price:           bar.Close,
+		VolumeRank:      int32(bar.Analytics.VolumeRank),
+		TickRank:        int32(bar.Analytics.TickRank),
+		PriceRank:       int32(bar.Analytics.PriceRank),
+		POC:             bar.POC,
+		VAH:             bar.VAH,
+		VAL:             bar.VAL,
 		Active:          isActive,
 	}
 }

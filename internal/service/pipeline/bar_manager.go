@@ -34,6 +34,7 @@ type BarManager struct {
 	dbWriter        *writer.DBWriter
 	analyticsEngine *BarAnalyticsEngine
 	MacroListener   interface{ IngestClosedBar(bar *models.Bar) }
+	ScoutStage      *ScoutStage
 }
 
 func NewBarManager(
@@ -246,6 +247,10 @@ func (bm *BarManager) updateTimeframe(
 
 		if bm.MacroListener != nil {
 			bm.MacroListener.IngestClosedBar(closedBar)
+		}
+
+		if bm.ScoutStage != nil && timeframe == "1m" {
+			bm.ScoutStage.ProcessClosedBar(closedBar)
 		}
 
 		cs.bar = newBar(candleStart, price, token, tick.Raw.StockName, timeframe)
