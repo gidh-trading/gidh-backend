@@ -1,7 +1,9 @@
 package pipeline
 
 import (
+	"math"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"gidh-backend/internal/service/models"
@@ -35,6 +37,7 @@ type BarManager struct {
 	analyticsEngine *BarAnalyticsEngine
 	MacroListener   interface{ IngestClosedBar(bar *models.Bar) }
 	ScoutStage      *ScoutStage
+	niftyChangeBits uint64
 }
 
 func NewBarManager(
@@ -61,6 +64,14 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	vol := float64(tick.TickVolume)
 	ts := tick.Raw.Timestamp.In(bm.loc)
 	name := tick.Raw.StockName
+
+	if name == "NIFTY50" {
+		prevClose := tick.Raw.LastPrice - tick.Raw.Change
+		if prevClose > 0 {
+			niftyPct := (tick.Raw.Change / prevClose) * 100
+			atomic.StoreUint64(&bm.niftyChangeBits, math.Float64bits(niftyPct))
+		}
+	}
 
 	bm.mu.RLock()
 	ibs, exists := bm.instruments[token]
@@ -200,6 +211,9 @@ func (bm *BarManager) processTickForCandle(cs *candleState, tick *models.Enriche
 	if prevClose > 0 {
 		cs.bar.ChangePct = (tick.Raw.Change / prevClose) * 100
 	}
+
+	niftyBits := atomic.LoadUint64(&bm.niftyChangeBits)
+	cs.bar.Analytics.Nifty50ChangePct = math.Float64frombits(niftyBits)
 
 	if tick.VolProfile != nil {
 		cs.bar.POC = tick.VolProfile.POC

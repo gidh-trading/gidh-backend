@@ -5,6 +5,7 @@ import "time"
 // internal/service/models/bar.go
 
 type BarAnalytics struct {
+	Nifty50ChangePct       float64        `json:"nifty50_change_pct"`
 	VolumeRank             int            `json:"volume_rank"`
 	TickRank               int            `json:"tick_rank"`
 	PriceRank              int            `json:"price_rank"`

@@ -12,18 +12,19 @@ import (
 )
 
 type ScoutHistoricalSnapshot struct {
-	Timestamp       time.Time `json:"timestamp"`
-	InstrumentToken uint32    `json:"instrument_token"`
-	StockName       string    `json:"stock_name"`
-	TriggerType     string    `json:"trigger_type"`
-	Price           float64   `json:"price"`
-	ChangePct       float64   `json:"change_pct"`
-	ADRHigh         float64   `json:"adr_high"`
-	ADRLow          float64   `json:"adr_low"`
-	VwapDistance    float64   `json:"vwap_distance"`
-	VolumeRank      int32     `json:"volume_rank"`
-	PriceRank       int32     `json:"price_rank"`
-	Active          bool      `json:"active"`
+	Timestamp        time.Time `json:"timestamp"`
+	InstrumentToken  uint32    `json:"instrument_token"`
+	StockName        string    `json:"stock_name"`
+	TriggerType      string    `json:"trigger_type"`
+	Price            float64   `json:"price"`
+	ChangePct        float64   `json:"change_pct"`
+	ADRHigh          float64   `json:"adr_high"`
+	ADRLow           float64   `json:"adr_low"`
+	VwapDistance     float64   `json:"vwap_distance"`
+	VolumeRank       int32     `json:"volume_rank"`
+	PriceRank        int32     `json:"price_rank"`
+	Nifty50ChangePct float64   `json:"nifty50_change_pct"`
+	Active           bool      `json:"active"`
 }
 
 type alertState struct {
@@ -178,17 +179,18 @@ func (s *ScoutStage) GetAlertHistory(token uint32) []ScoutHistoricalSnapshot {
 // compileSnapshot constructs the alert payload from a closed bar
 func (s *ScoutStage) compileSnapshot(bar *models.Bar, trigger string, isActive bool) ScoutHistoricalSnapshot {
 	return ScoutHistoricalSnapshot{
-		Timestamp:       bar.Timestamp,
-		InstrumentToken: uint32(bar.InstrumentToken),
-		StockName:       bar.StockName,
-		TriggerType:     trigger,
-		Price:           bar.Close,
-		VolumeRank:      int32(bar.Analytics.VolumeRank),
-		PriceRank:       int32(bar.Analytics.PriceRank),
-		ChangePct:       bar.ChangePct,
-		ADRHigh:         bar.Analytics.ADRHigh,
-		ADRLow:          bar.Analytics.ADRLow,
-		VwapDistance:    bar.Analytics.NormalizedVwapDistance,
-		Active:          isActive,
+		Timestamp:        bar.Timestamp,
+		InstrumentToken:  uint32(bar.InstrumentToken),
+		StockName:        bar.StockName,
+		TriggerType:      trigger,
+		Price:            bar.Close,
+		VolumeRank:       int32(bar.Analytics.VolumeRank),
+		PriceRank:        int32(bar.Analytics.PriceRank),
+		ChangePct:        bar.ChangePct,
+		Nifty50ChangePct: bar.Analytics.Nifty50ChangePct,
+		ADRHigh:          bar.Analytics.ADRHigh,
+		ADRLow:           bar.Analytics.ADRLow,
+		VwapDistance:     bar.Analytics.NormalizedVwapDistance,
+		Active:           isActive,
 	}
 }
