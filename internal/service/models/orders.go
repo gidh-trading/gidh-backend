@@ -37,9 +37,7 @@ type OrderBookEntry struct {
 }
 
 // Position tracks localized RAM risk metrics and aggregate coordinates.
-//
-// This remains the sole source of truth for current local chart boundary
-// coordinates (target_price and stop_loss_price).
+
 type Position struct {
 	Symbol        string  `json:"symbol"`
 	Product       string  `json:"product"`
@@ -53,6 +51,7 @@ type Position struct {
 	StopLossPrice float64 `json:"stop_loss_price"` // Syncs visual chart floor boundaries
 
 	EntryTimestamp string `json:"entry_timestamp"`
+	TimeElapsed    string `json:"time_elapsed"` // ⚡ NEW: Tracking duration inside position
 
 	// Live Exchange IDs (Ignored by the decoupled front-end interface layout)
 	TargetOrderID   string `json:"-"`

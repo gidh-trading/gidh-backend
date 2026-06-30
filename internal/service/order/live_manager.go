@@ -108,7 +108,7 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 			}
 
 			if localPos.NetQuantity == 0 {
-				localPos.EntryTimestamp = time.Now().UTC().Format(time.RFC3339)
+				localPos.EntryTimestamp = dryEntry.Timestamp.UTC().Format(time.RFC3339)
 			}
 
 			// Simple signed adjustment calculation mapping
@@ -329,6 +329,13 @@ func (lm *LiveOrderManager) OnPriceUpdate(symbol string, ltp float64, ts time.Ti
 			pos.LTP = ltp
 			// ⚡ FIX: A signed NetQuantity makes PnL math universally simple for both sides!
 			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
+
+			if pos.EntryTimestamp != "" {
+				if entryTime, err := time.Parse(time.RFC3339, pos.EntryTimestamp); err == nil {
+					duration := time.Now().UTC().Sub(entryTime.UTC())
+					pos.TimeElapsed = duration.Round(time.Second).String()
+				}
+			}
 
 			isTargetHit := (pos.Side == "LONG" && pos.TargetPrice > 0 && ltp >= pos.TargetPrice) ||
 				(pos.Side == "SHORT" && pos.TargetPrice > 0 && ltp <= pos.TargetPrice)

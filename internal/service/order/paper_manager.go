@@ -135,6 +135,16 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 			pos.LTP = ltp
 			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 
+			if pos.EntryTimestamp != "" {
+				if entryTime, err := time.Parse(time.RFC3339, pos.EntryTimestamp); err == nil {
+					// Duration calculated purely out of simulation timeline
+					duration := ts.Sub(entryTime)
+
+					// Format as human-readable string (e.g., "1h25m10s" or "45s")
+					pos.TimeElapsed = duration.Round(time.Second).String()
+				}
+			}
+
 			isTargetHit := (pos.Side == "LONG" && pos.TargetPrice > 0 && ltp >= pos.TargetPrice) ||
 				(pos.Side == "SHORT" && pos.TargetPrice > 0 && ltp <= pos.TargetPrice)
 
@@ -362,7 +372,7 @@ func (pm *PaperPositionManager) updatePositionState(symbol, product, side string
 	}
 
 	if pos.NetQuantity == 0 {
-		pos.EntryTimestamp = time.Now().UTC().Format(time.RFC3339)
+		pos.EntryTimestamp = sessionTime.UTC().Format(time.RFC3339)
 	}
 
 	isBuy := side == "BUY"
@@ -409,6 +419,7 @@ func (pm *PaperPositionManager) updatePositionState(symbol, product, side string
 			pos.UnrealizedPnL = 0
 			pos.TargetPrice = 0
 			pos.StopLossPrice = 0
+			pos.TimeElapsed = ""
 		}
 	}
 

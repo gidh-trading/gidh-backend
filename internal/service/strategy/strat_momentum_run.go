@@ -45,45 +45,6 @@ func (s *MomentumRunStrategy) CheckEntry(state *InstrumentState) string {
 		return "HOLD"
 	}
 
-	analytics := latestBar.Analytics
-
-	// 1. Core Rule: Flow Intensity must show institutional thrust (>= 6.0)
-	if analytics.RollingFlowIntensity < 6.0 {
-		return "HOLD"
-	}
-
-	// 2. Extract context parameters
-	// 🟢 UPDATED: Swapped out raw single-bar VWAPSlope for our stable trend velocity accumulator
-	vwapVelocity := analytics.RollingVwapVelocity
-	normalizedVwapDist := analytics.NormalizedVwapDistance
-	direction := analytics.Direction
-
-	volume := analytics.RollingVolumeIntensity
-
-	if volume < 5.5 {
-		return "HOLD"
-	}
-
-	// 🟢 LONG SETUP CONDITIONS
-	// - Rolling VWAP Velocity strong upward (> +0.4)
-	// - Direction state must be BULLISH or STRONG_BULLISH
-	// - Normalized distance above VWAP must be at least 0.1
-	if vwapVelocity > 0.2 &&
-		(direction == models.DirBullish || direction == models.DirStrongBullish) &&
-		normalizedVwapDist >= 0.1 {
-		return "GO_LONG"
-	}
-
-	// 🔴 SHORT SETUP CONDITIONS
-	// - Rolling VWAP Velocity strong downward (< -0.4)
-	// - Direction state must be BEARISH or STRONG_BEARISH
-	// - Normalized distance below VWAP must be at least 0.1 (dist <= -0.1)
-	if vwapVelocity < -0.2 &&
-		(direction == models.DirBearish || direction == models.DirStrongBearish) &&
-		normalizedVwapDist <= -0.1 {
-		return "GO_SHORT"
-	}
-
 	return "HOLD"
 }
 
