@@ -53,6 +53,11 @@ func (a *App) WarmupEngineState(ctx context.Context) error {
 	barsIngested := 0
 	for _, bar := range bars {
 		a.StrategyEngine.IngestClosedBar(bar)
+
+		if a.Pipeline != nil {
+			a.Pipeline.RehydrateHistoricalBar(bar)
+		}
+
 		barsIngested++
 	}
 

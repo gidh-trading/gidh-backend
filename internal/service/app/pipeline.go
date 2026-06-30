@@ -99,3 +99,10 @@ func (p *Pipeline) Reset() {
 	p.lastTickRankMap = make(map[uint32]int)
 	p.indexMu.Unlock()
 }
+
+// RehydrateHistoricalBar forwards historical candles directly to the bar manager accumulation layer
+func (p *Pipeline) RehydrateHistoricalBar(bar *models.Bar) {
+	if p.barManager != nil {
+		p.barManager.RehydrateHistoricalBar(bar)
+	}
+}

@@ -276,3 +276,87 @@ func (bm *BarManager) updateTimeframe(
 		bm.analyticsEngine.AnalyzeTick(cs.bar, tick, cs.history)
 	}
 }
+
+// RehydrateHistoricalBar processes a closed historical candle to warm up the pipeline states
+func (bm *BarManager) RehydrateHistoricalBar(bar *models.Bar) {
+	token := uint32(bar.InstrumentToken)
+	tf := bar.Timeframe
+
+	bm.mu.Lock()
+	ibs, exists := bm.instruments[token]
+	if !exists {
+		ibs = &InstrumentBarState{}
+		bm.instruments[token] = ibs
+	}
+	bm.mu.Unlock()
+
+	ibs.mu.Lock()
+	defer ibs.mu.Unlock()
+
+	// 1. Resolve or allocate the target candleState for the specified timeframe
+	var cs *candleState
+	switch tf {
+	case "1m":
+		if ibs.state1m == nil {
+			ibs.state1m = newCandleState(bar.Timestamp, bar.Close, token, bar.StockName, tf)
+		}
+		cs = ibs.state1m
+	case "3m":
+		if ibs.state3m == nil {
+			ibs.state3m = newCandleState(bar.Timestamp, bar.Close, token, bar.StockName, tf)
+		}
+		cs = ibs.state3m
+	case "5m":
+		if ibs.state5m == nil {
+			ibs.state5m = newCandleState(bar.Timestamp, bar.Close, token, bar.StockName, tf)
+		}
+		cs = ibs.state5m
+	case "10m":
+		if ibs.state10m == nil {
+			ibs.state10m = newCandleState(bar.Timestamp, bar.Close, token, bar.StockName, tf)
+		}
+		cs = ibs.state10m
+	case "15m":
+		if ibs.state15m == nil {
+			ibs.state15m = newCandleState(bar.Timestamp, bar.Close, token, bar.StockName, tf)
+		}
+		cs = ibs.state15m
+	default:
+		return // Unsupported timeframe allocation
+	}
+
+	// 2. Pre-seed the analytics framework with historical base-layer ranks if present
+	cs.bar.Analytics.VolumeRank = bar.Analytics.VolumeRank
+	cs.bar.Analytics.TickRank = bar.Analytics.TickRank
+	cs.bar.Analytics.PriceRank = bar.Analytics.PriceRank
+	cs.bar.Analytics.EfficiencyRank = bar.Analytics.EfficiencyRank
+
+	// 3. Process the math updates to compound historical structures without db/ws side effects
+	if bm.analyticsEngine != nil {
+		// Run stateless mathematical calculations, anchor valuations, and lock historical arrays
+		bm.analyticsEngine.EvaluateAndLockAnchors(bar, cs.history)
+		bm.analyticsEngine.CalculateContinuousAndStructuralMetrics(bar, cs.history, true)
+		bm.analyticsEngine.AccumulateAnchorContext(bar, cs.history)
+
+		// Increment base counts
+		cs.history.TotalBars++
+		if bar.Close > bar.VWAP {
+			cs.history.BarsAboveVwap++
+		}
+
+		// 4. Mutate memory vectors using standard smoothing metrics
+		alpha := SmoothingAlpha
+		cs.history.RollingVolumeIntensity = (alpha * float64(bar.Analytics.VolumeRank)) + ((1.0 - alpha) * cs.history.RollingVolumeIntensity)
+		cs.history.RollingTickRank = (alpha * float64(bar.Analytics.TickRank)) + ((1.0 - alpha) * cs.history.RollingTickRank)
+		cs.history.RollingPriceNormalized = (alpha * float64(bar.Analytics.PriceRank)) + ((1.0 - alpha) * cs.history.RollingPriceNormalized)
+		cs.history.RollingEfficiencyRank = (alpha * float64(bar.Analytics.EfficiencyRank)) + ((1.0 - alpha) * cs.history.RollingEfficiencyRank)
+
+		// Recalculate working slopes
+		rollingFlowIntensity := (0.55 * cs.history.RollingVolumeIntensity) + (0.45 * cs.history.RollingTickRank)
+		signedExecutionEdge := (0.60 * cs.history.RollingPriceNormalized) + (0.40 * cs.history.RollingEfficiencyRank)
+		cs.history.RollingMomentumScore = signedExecutionEdge * (rollingFlowIntensity / 4.0)
+	}
+
+	// 5. Update active working tracking candle parameters
+	cs.bar = bar
+}
