@@ -129,13 +129,19 @@ func (e *Engine) UpdateContext(enrichedTick *models.EnrichedTick, currentSide st
 			} else if currentSide == "SHORT" {
 				state.CurrentPnL = (averagePrice - state.LatestPrice) * qtyPos
 			}
-			if state.CurrentPnL > state.PeakPnL {
-				state.PeakPnL = state.CurrentPnL
+
+			// 🟢 FIX: Update the master registry state, not just the temporary clone!
+			if state.CurrentPnL > realState.PeakPnL {
+				realState.PeakPnL = state.CurrentPnL
 			}
+			// Sync the clone back with the master high-water mark
+			state.PeakPnL = realState.PeakPnL
+
 		} else {
 			state.CurrentSetupPhase = PhaseNeutral
 			state.CurrentPnL = 0.0
 			state.PeakPnL = 0.0
+			realState.PeakPnL = 0.0 // Reset master on flat positions
 		}
 
 		// Dynamic Signal Evaluation

@@ -656,9 +656,11 @@ func (a *App) handleGetHistoricalPositions(w http.ResponseWriter, r *http.Reques
 			pos.TargetPrice = 0
 			pos.StopLossPrice = 0
 			pos.UnrealizedPnL = 0
+			pos.LTP = 0
 		} else if pos.UnrealizedPnL == 0 && pos.AveragePrice > 0 {
 			// Find the last traded price using the closing price of the latest bar entry
 			var dbLtp float64
+			pos.LTP = dbLtp
 			err := a.pool.QueryRow(r.Context(), `
 				SELECT close FROM gidh_bars 
 				WHERE UPPER(TRIM(stock_name)) = $1 

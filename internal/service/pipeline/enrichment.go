@@ -58,6 +58,11 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 	price := tick.Raw.LastPrice
 	ts := tick.Raw.Timestamp.In(es.loc)
 
+	currentHourMinute := (ts.Hour() * 100) + ts.Minute()
+	if currentHourMinute < 915 {
+		return nil // Discard and silently drop pre-market noise completely
+	}
+
 	// 1. Fast concurrent read-lock lookup
 	es.mu.RLock()
 	ctx, exists := es.instruments[token]

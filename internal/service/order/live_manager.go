@@ -107,6 +107,10 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 				lm.activePositions[key] = localPos
 			}
 
+			if localPos.NetQuantity == 0 {
+				localPos.EntryTimestamp = time.Now().UTC().Format(time.RFC3339)
+			}
+
 			// Simple signed adjustment calculation mapping
 			multiplier := 1
 			if dryEntry.Side == "SELL" {
@@ -322,7 +326,7 @@ func (lm *LiveOrderManager) OnPriceUpdate(symbol string, ltp float64, ts time.Ti
 		pos, exists := lm.activePositions[key]
 
 		if exists && pos.NetQuantity != 0 {
-
+			pos.LTP = ltp
 			// ⚡ FIX: A signed NetQuantity makes PnL math universally simple for both sides!
 			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 
@@ -769,6 +773,10 @@ func (lm *LiveOrderManager) GetAllPositions() []models.Position {
 
 	for _, pos := range lm.activePositions {
 		posCopy := *pos
+
+		if ltp, exists := lm.lastPrices[posCopy.Symbol]; exists && ltp > 0 {
+			posCopy.LTP = ltp
+		}
 
 		if posCopy.NetQuantity != 0 {
 			if ltp, exists := lm.lastPrices[posCopy.Symbol]; exists && ltp > 0 {

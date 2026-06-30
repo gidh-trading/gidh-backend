@@ -45,6 +45,7 @@ type TimeframeAnalyticsHistory struct {
 	RollingPriceNormalized float64
 	RollingEfficiencyRank  float64
 	RollingMomentumScore   float64
+	RollingVwapVelocity    float64
 }
 
 // BarAnalyticsEngine implements the stateless calculations layer across multi-thread pipelines.
@@ -101,6 +102,13 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 	h.RollingPriceNormalized = (alpha * float64(bar.Analytics.PriceRank)) + ((1.0 - alpha) * h.RollingPriceNormalized)
 	h.RollingEfficiencyRank = (alpha * float64(bar.Analytics.EfficiencyRank)) + ((1.0 - alpha) * h.RollingEfficiencyRank)
 
+	currentSlope := bar.Analytics.VWAPSlope
+	if math.Abs(currentSlope) > 0.05 {
+		h.RollingVwapVelocity = (alpha * currentSlope) + ((1.0 - alpha) * h.RollingVwapVelocity)
+	} else {
+		h.RollingVwapVelocity *= 0.98 // Decay gently only when flatlined
+	}
+
 	// --- 5. COMPUTE COMPOSITES ---
 	rollingFlowIntensity := (0.55 * h.RollingVolumeIntensity) + (0.45 * h.RollingTickRank)
 	signedExecutionEdge := (0.60 * h.RollingPriceNormalized) + (0.40 * h.RollingEfficiencyRank)
@@ -114,6 +122,7 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 	bar.Analytics.RollingTickRank = h.RollingTickRank
 	bar.Analytics.RollingFlowIntensity = rollingFlowIntensity
 	bar.Analytics.RollingMomentumScore = h.RollingMomentumScore
+	bar.Analytics.RollingVwapVelocity = h.RollingVwapVelocity
 
 	if bae.dbWriter != nil {
 		bae.dbWriter.AddBar(*bar)
@@ -132,10 +141,17 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *Timefra
 	projectedPriceNorm := (alpha * float64(bar.Analytics.PriceRank)) + ((1.0 - alpha) * h.RollingPriceNormalized)
 	projectedEffRank := (alpha * float64(bar.Analytics.EfficiencyRank)) + ((1.0 - alpha) * h.RollingEfficiencyRank)
 
+	var projectedVwapVelocity float64
+	if math.Abs(bar.Analytics.VWAPSlope) > 0.05 {
+		projectedVwapVelocity = (alpha * bar.Analytics.VWAPSlope) + ((1.0 - alpha) * h.RollingVwapVelocity)
+	} else {
+		projectedVwapVelocity = h.RollingVwapVelocity * 0.98
+	}
+
 	// 2. Real-Time Composite Compositions
 	projectedFlowIntensity := (0.55 * projectedVolIntensity) + (0.45 * projectedTickRank)
 	projectedExecutionEdge := (0.60 * projectedPriceNorm) + (0.40 * projectedEffRank)
-	
+
 	// 3. Dynamic Real-Time Momentum Score Projection
 	flowMultiplier := projectedFlowIntensity / 4.5
 
@@ -144,6 +160,7 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *Timefra
 	bar.Analytics.RollingTickRank = projectedTickRank
 	bar.Analytics.RollingFlowIntensity = projectedFlowIntensity
 	bar.Analytics.RollingMomentumScore = projectedExecutionEdge * flowMultiplier
+	bar.Analytics.RollingVwapVelocity = projectedVwapVelocity
 
 	if h.TotalBars > 0 {
 		bar.Analytics.VwapClosePct = (float64(h.BarsAboveVwap) / float64(h.TotalBars)) * 100

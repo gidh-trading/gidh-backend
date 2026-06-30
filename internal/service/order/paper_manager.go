@@ -132,6 +132,7 @@ func (pm *PaperPositionManager) OnPriceUpdate(symbol string, ltp float64, ts tim
 		pos, exists := pm.activePositions[key]
 
 		if exists && pos.NetQuantity != 0 {
+			pos.LTP = ltp
 			pos.UnrealizedPnL = (ltp - pos.AveragePrice) * float64(pos.NetQuantity)
 
 			isTargetHit := (pos.Side == "LONG" && pos.TargetPrice > 0 && ltp >= pos.TargetPrice) ||
@@ -360,6 +361,10 @@ func (pm *PaperPositionManager) updatePositionState(symbol, product, side string
 		pm.activePositions[key] = pos
 	}
 
+	if pos.NetQuantity == 0 {
+		pos.EntryTimestamp = time.Now().UTC().Format(time.RFC3339)
+	}
+
 	isBuy := side == "BUY"
 	isIncreasing := (isBuy && pos.NetQuantity >= 0) || (!isBuy && pos.NetQuantity <= 0)
 
@@ -472,6 +477,8 @@ func (pm *PaperPositionManager) GetAllPositions() []models.Position {
 		if posCopy.NetQuantity != 0 {
 			// Check if we have received a simulated tick or live tick for this symbol
 			if ltp, exists := pm.lastPrices[posCopy.Symbol]; exists && ltp > 0 {
+
+				posCopy.LTP = ltp
 				posCopy.UnrealizedPnL = (ltp - posCopy.AveragePrice) * float64(posCopy.NetQuantity)
 				// Clean up float precision
 				posCopy.UnrealizedPnL = math.Round(posCopy.UnrealizedPnL*100) / 100

@@ -279,6 +279,14 @@ func (bm *BarManager) updateTimeframe(
 
 // RehydrateHistoricalBar processes a closed historical candle to warm up the pipeline states
 func (bm *BarManager) RehydrateHistoricalBar(bar *models.Bar) {
+
+	loc, _ := time.LoadLocation("Asia/Kolkata")
+	istTime := bar.Timestamp.In(loc)
+	currentHM := (istTime.Hour() * 100) + istTime.Minute()
+	if currentHM < 915 {
+		return // Bypass memory mutations and calculations for pre-market bars[cite: 4]
+	}
+
 	token := uint32(bar.InstrumentToken)
 	tf := bar.Timeframe
 
@@ -351,10 +359,19 @@ func (bm *BarManager) RehydrateHistoricalBar(bar *models.Bar) {
 		cs.history.RollingPriceNormalized = (alpha * float64(bar.Analytics.PriceRank)) + ((1.0 - alpha) * cs.history.RollingPriceNormalized)
 		cs.history.RollingEfficiencyRank = (alpha * float64(bar.Analytics.EfficiencyRank)) + ((1.0 - alpha) * cs.history.RollingEfficiencyRank)
 
+		currentSlope := bar.Analytics.VWAPSlope
+		if math.Abs(currentSlope) > 0.05 {
+			cs.history.RollingVwapVelocity = (alpha * currentSlope) + ((1.0 - alpha) * cs.history.RollingVwapVelocity)
+		} else {
+			cs.history.RollingVwapVelocity *= 0.98
+		}
+
 		// Recalculate working slopes
 		rollingFlowIntensity := (0.55 * cs.history.RollingVolumeIntensity) + (0.45 * cs.history.RollingTickRank)
 		signedExecutionEdge := (0.60 * cs.history.RollingPriceNormalized) + (0.40 * cs.history.RollingEfficiencyRank)
+
 		cs.history.RollingMomentumScore = signedExecutionEdge * (rollingFlowIntensity / 4.0)
+		bar.Analytics.RollingVwapVelocity = cs.history.RollingVwapVelocity
 	}
 
 	// 5. Update active working tracking candle parameters

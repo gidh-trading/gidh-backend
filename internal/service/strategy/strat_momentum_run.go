@@ -14,13 +14,13 @@ func NewMomentumRunStrategy() *MomentumRunStrategy {
 			StartTradingTime:   915,  // 09:15 AM
 			EndTradingTime:     1500, // 03:00 PM
 			ForceExitTime:      1515, // 03:15 PM Auto Square-Off
-			HardStopLossINR:    -1500.0,
-			TakeProfitINR:      4000.0, // High ceiling since we use TSL to exit
-			MaximumTradesCount: 2,      // Max trades per stock today
+			HardStopLossINR:    -400.0,
+			TakeProfitINR:      2000.0, // High ceiling since we use TSL to exit
+			MaximumTradesCount: 1,      // Max trades per stock today
 
-			// 🟢 Dynamic Trailing Stop Loss Configuration (Adjust to your taste)
-			TrailActivationINR: 600.0, // TSL turns on once profit breaches +600 INR
-			TrailCallbackINR:   250.0, // Liquidate if position drops 250 INR from peak
+			// Dynamic Trailing Stop Loss Configuration
+			TrailActivationINR: 600.0,
+			TrailCallbackINR:   250.0,
 		},
 	}
 }
@@ -53,25 +53,32 @@ func (s *MomentumRunStrategy) CheckEntry(state *InstrumentState) string {
 	}
 
 	// 2. Extract context parameters
-	vwapVelocity := analytics.VWAPSlope
+	// 🟢 UPDATED: Swapped out raw single-bar VWAPSlope for our stable trend velocity accumulator
+	vwapVelocity := analytics.RollingVwapVelocity
 	normalizedVwapDist := analytics.NormalizedVwapDistance
 	direction := analytics.Direction
 
+	volume := analytics.RollingVolumeIntensity
+
+	if volume < 5.5 {
+		return "HOLD"
+	}
+
 	// 🟢 LONG SETUP CONDITIONS
-	// - VWAP Velocity strong upward (> +0.4)
+	// - Rolling VWAP Velocity strong upward (> +0.4)
 	// - Direction state must be BULLISH or STRONG_BULLISH
 	// - Normalized distance above VWAP must be at least 0.1
-	if vwapVelocity > 0.4 &&
+	if vwapVelocity > 0.2 &&
 		(direction == models.DirBullish || direction == models.DirStrongBullish) &&
 		normalizedVwapDist >= 0.1 {
 		return "GO_LONG"
 	}
 
 	// 🔴 SHORT SETUP CONDITIONS
-	// - VWAP Velocity strong downward (< -0.4)
+	// - Rolling VWAP Velocity strong downward (< -0.4)
 	// - Direction state must be BEARISH or STRONG_BEARISH
 	// - Normalized distance below VWAP must be at least 0.1 (dist <= -0.1)
-	if vwapVelocity < -0.4 &&
+	if vwapVelocity < -0.2 &&
 		(direction == models.DirBearish || direction == models.DirStrongBearish) &&
 		normalizedVwapDist <= -0.1 {
 		return "GO_SHORT"
@@ -88,25 +95,23 @@ func (s *MomentumRunStrategy) CheckTakeProfit(state *InstrumentState, currentSid
 	return state.CurrentPnL >= s.cfg.TakeProfitINR
 }
 
-// CheckStopLoss tracks initial protection alongside our new absolute INR Trailing Stop Loss
+// CheckStopLoss tracks initial protection alongside our absolute INR Trailing Stop Loss
 func (s *MomentumRunStrategy) CheckStopLoss(state *InstrumentState, currentSide string, averagePrice float64, netQty int, profiles map[string]*models.InstrumentProfile) bool {
 	// 1. Core Initial Hard Stop Protection
 	if state.CurrentPnL <= s.cfg.HardStopLossINR {
 		return true
 	}
 
-	// 2. 🟢 Tiered Anti-Bleed Profit Lock Mechanism (Prevents Leaking Money)
-	// We check the peak profit achieved during this position (state.PeakPnL)
+	// 2. Tiered Anti-Bleed Profit Lock Mechanism (Prevents Leaking Money)
 	switch {
-	case state.PeakPnL >= 1800.0:
+	case state.PeakPnL >= 1500.0:
 		// Tier 3: Extreme thrust reached. Tighten the floor aggressively.
-		// Allowing a max give-back of 300 INR. (e.g., peak 1900 exits at 1600)
 		trailingStopFloor := state.PeakPnL - 300.0
 		if state.CurrentPnL < trailingStopFloor {
 			return true
 		}
 
-	case state.PeakPnL >= 1200.0:
+	case state.PeakPnL >= 1000.0:
 		// Tier 2: Solid expansion. Lock in at least half (+600 INR)
 		if state.CurrentPnL < 600.0 {
 			return true

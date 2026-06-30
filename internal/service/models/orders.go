@@ -46,10 +46,13 @@ type Position struct {
 	Side          string  `json:"side"` // LONG, SHORT, or empty "" if flat
 	NetQuantity   int     `json:"net_quantity"`
 	AveragePrice  float64 `json:"average_price"`
+	LTP           float64 `json:"ltp"`
 	RealizedPnL   float64 `json:"realized_pnl"`
 	UnrealizedPnL float64 `json:"unrealized_pnl"`  // Computed dynamically per tick on backend
 	TargetPrice   float64 `json:"target_price"`    // Syncs visual chart target boundaries
 	StopLossPrice float64 `json:"stop_loss_price"` // Syncs visual chart floor boundaries
+
+	EntryTimestamp string `json:"entry_timestamp"`
 
 	// Live Exchange IDs (Ignored by the decoupled front-end interface layout)
 	TargetOrderID   string `json:"-"`
