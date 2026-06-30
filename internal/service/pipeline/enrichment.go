@@ -142,6 +142,12 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 
 		switch {
+		case liveVolume >= baseline.VolumeP99: // 🟢 Added P99 threshold check
+			if liveVolume >= absoluteVolumeVelocityFloor && liveVolume >= globalPaceFloor {
+				volRank = 8
+			} else {
+				volRank = 5
+			}
 		case liveVolume >= baseline.VolumeP97:
 			if liveVolume >= absoluteVolumeVelocityFloor && liveVolume >= globalPaceFloor {
 				volRank = 7
@@ -166,8 +172,11 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			volRank = 1
 		}
 
+		// --- 2. Tick Count Rank Check with P99 addition ---
 		floatTickCount := float64(liveTickCount)
 		switch {
+		case floatTickCount >= baseline.TickCountP99:
+			tickRank = 8
 		case floatTickCount >= baseline.TickCountP97:
 			tickRank = 7
 		case floatTickCount >= baseline.TickCountP90:

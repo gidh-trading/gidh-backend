@@ -232,7 +232,7 @@ func (a *App) initPipeline(
 
 	// 🔥 Step B: Dynamic Strategy Registry Plug-and-Play Initialization Hook!
 	logger.Infof("[System Initialization] Registering multi-strategy algorithms into execution engine matrix...")
-	a.StrategyEngine.ActiveRouter.RegisterStrategy(strategy.NewStructuralReversionStrategy())
+	a.StrategyEngine.ActiveRouter.RegisterStrategy(strategy.NewMomentumRunStrategy())
 
 	// Connect macro streaming listeners
 	barManager.MacroListener = a.StrategyEngine

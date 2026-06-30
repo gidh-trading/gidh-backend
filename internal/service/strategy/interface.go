@@ -4,12 +4,16 @@ import "gidh-backend/internal/service/models"
 
 // Config encapsulates strategy-specific runtime thresholds and risk guardrails.
 type Config struct {
-	StartTradingTime   int     // e.g., 920 (09:20 AM)
-	EndTradingTime     int     // e.g., 955 (09:55 AM)
-	ForceExitTime      int     // e.g., 1015 (10:15 AM)
-	HardStopLossINR    float64 // e.g., -300.0
-	TakeProfitINR      float64 // e.g., 600.0
-	MaximumTradesCount int     // Maximum allowed trades per stock for this explicit strategy today
+	StartTradingTime   int
+	EndTradingTime     int
+	ForceExitTime      int
+	HardStopLossINR    float64
+	TakeProfitINR      float64
+	MaximumTradesCount int
+
+	// 🟢 New Trailing Stop Loss Parameters
+	TrailActivationINR float64
+	TrailCallbackINR   float64
 }
 
 // Strategy isolates execution decisions into clean, distinct logical tracks.

@@ -71,10 +71,11 @@ func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
 
 	// Map out the 4 independent trigger conditions
 	conditions := map[string]bool{
-		"ADR_HIGH_TOUCH":  bar.High >= bar.Analytics.ADRHigh && bar.Analytics.ADRHigh > 0,
-		"ADR_LOW_TOUCH":   bar.Low <= bar.Analytics.ADRLow && bar.Analytics.ADRLow > 0,
-		"VWAP_ALERT_High": bar.Analytics.NormalizedVwapDistance > 0.5,
-		"VWAP_ALERT_Low":  bar.Analytics.NormalizedVwapDistance < -0.5,
+		"ADR_HIGH_TOUCH":      bar.High >= bar.Analytics.ADRHigh && bar.Analytics.ADRHigh > 0,
+		"ADR_LOW_TOUCH":       bar.Low <= bar.Analytics.ADRLow && bar.Analytics.ADRLow > 0,
+		"VWAP_ALERT_High":     bar.Analytics.NormalizedVwapDistance > 0.5,
+		"VWAP_ALERT_Low":      bar.Analytics.NormalizedVwapDistance < -0.5,
+		"FLOW_INTENSITY_HIGH": bar.Analytics.RollingFlowIntensity >= 6,
 	}
 
 	// Trace print to log terminal metrics per evaluation cycle

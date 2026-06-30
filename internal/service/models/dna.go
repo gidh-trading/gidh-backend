@@ -46,6 +46,7 @@ type TimeBucketDNA struct {
 	VolumeP75  float64 `json:"volume_p75"`
 	VolumeP90  float64 `json:"volume_p90"`
 	VolumeP97  float64 `json:"volume_p97"`
+	VolumeP99  float64 `json:"volume_p99"`
 	VolumeStd  float64 `json:"volume_std"`
 	VolumeMean float64 `json:"volume_mean"`
 
@@ -57,6 +58,7 @@ type TimeBucketDNA struct {
 	TickCountP75  float64 `json:"tick_count_p75"`
 	TickCountP90  float64 `json:"tick_count_p90"`
 	TickCountP97  float64 `json:"tick_count_p97"`
+	TickCountP99  float64 `json:"tick_count_p99"`
 	TickCountStd  float64 `json:"tick_count_std"`
 	TickCountMean float64 `json:"tick_count_mean"`
 }

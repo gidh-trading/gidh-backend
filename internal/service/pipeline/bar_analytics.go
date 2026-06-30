@@ -106,7 +106,7 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 	signedExecutionEdge := (0.60 * h.RollingPriceNormalized) + (0.40 * h.RollingEfficiencyRank)
 
 	// --- 6. COMPUTE MOMENTUM SCORE ---
-	flowMultiplier := rollingFlowIntensity / 4.0
+	flowMultiplier := rollingFlowIntensity / 4.5
 	h.RollingMomentumScore = signedExecutionEdge * flowMultiplier
 
 	// --- 7. MAP TO PAYLOAD FOR UI / DB ---
@@ -135,9 +135,9 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *Timefra
 	// 2. Real-Time Composite Compositions
 	projectedFlowIntensity := (0.55 * projectedVolIntensity) + (0.45 * projectedTickRank)
 	projectedExecutionEdge := (0.60 * projectedPriceNorm) + (0.40 * projectedEffRank)
-
+	
 	// 3. Dynamic Real-Time Momentum Score Projection
-	flowMultiplier := projectedFlowIntensity / 4.0
+	flowMultiplier := projectedFlowIntensity / 4.5
 
 	// 4. Map back onto struct targets for serialization
 	bar.Analytics.RollingVolumeIntensity = projectedVolIntensity

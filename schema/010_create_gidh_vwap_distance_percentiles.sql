@@ -21,4 +21,8 @@ CREATE TABLE gidh_vwap_distance_percentiles
     PRIMARY KEY (instrument_token, trading_date)
 );
 
+ALTER TABLE gidh_vwap_distance_percentiles
+    ADD COLUMN pos_max DOUBLE PRECISION DEFAULT 0.0,
+    ADD COLUMN neg_max DOUBLE PRECISION DEFAULT 0.0;
+
 CREATE INDEX idx_gidh_vwap_dist_date ON gidh_vwap_distance_percentiles (trading_date);
