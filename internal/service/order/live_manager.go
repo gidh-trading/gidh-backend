@@ -117,21 +117,46 @@ func (lm *LiveOrderManager) PlaceOrder(ctx context.Context, req models.OrderRequ
 				multiplier = -1
 			}
 
-			localPos.NetQuantity += dryEntry.Qty * multiplier
+			// Local PnL simulation matching paper mechanics
+			oldNetQty := localPos.NetQuantity
+			newNetQty := localPos.NetQuantity + (dryEntry.Qty * multiplier)
+
+			// Check if we are reducing or closing a position
+			if oldNetQty != 0 && ((oldNetQty > 0 && multiplier < 0) || (oldNetQty < 0 && multiplier > 0)) {
+				closedQty := dryEntry.Qty
+				if int(math.Abs(float64(oldNetQty))) < closedQty {
+					closedQty = int(math.Abs(float64(oldNetQty))) // Cap at full position size closure
+				}
+
+				var tradePnL float64
+				if localPos.Side == "LONG" {
+					tradePnL = (ltp - localPos.AveragePrice) * float64(closedQty)
+				} else {
+					tradePnL = (localPos.AveragePrice - ltp) * float64(closedQty)
+				}
+				localPos.RealizedPnL += tradePnL
+				localPos.RealizedPnL = math.Round(localPos.RealizedPnL*100) / 100
+			}
+
+			localPos.NetQuantity = newNetQty
 			if localPos.NetQuantity > 0 {
 				localPos.Side = "LONG"
 			} else if localPos.NetQuantity < 0 {
 				localPos.Side = "SHORT"
 			} else {
 				localPos.Side = "FLAT"
+				localPos.AveragePrice = 0
 			}
-			localPos.AveragePrice = ltp
 
-			netQty, side, avgPrice := localPos.NetQuantity, localPos.Side, localPos.AveragePrice
+			if localPos.NetQuantity != 0 {
+				localPos.AveragePrice = ltp
+			}
+
+			netQty, side, avgPrice, realizedPnL := localPos.NetQuantity, localPos.Side, localPos.AveragePrice, localPos.RealizedPnL
 			lm.mu.Unlock()
 
 			if lm.positionChangeCallback != nil {
-				lm.positionChangeCallback(symbol, netQty, side, avgPrice, 0.0)
+				lm.positionChangeCallback(symbol, netQty, side, avgPrice, realizedPnL)
 			}
 		}(req.Symbol)
 
@@ -649,6 +674,29 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 				lm.activePositions[key] = localPos
 			}
 
+			// Calculate closed trade PnL locally if we are flattening an existing open position
+			if localPos.NetQuantity != 0 {
+				closedQty := int(math.Abs(float64(localPos.NetQuantity)))
+				var tradePnL float64
+
+				// fallback to pos.LastPrice if ticker feed hasn't caught up
+				fillPrice := pos.LastPrice
+				if fillPrice <= 0 {
+					fillPrice = localPos.LTP
+				}
+
+				if localPos.Side == "LONG" {
+					tradePnL = (fillPrice - localPos.AveragePrice) * float64(closedQty)
+				} else if localPos.Side == "SHORT" {
+					tradePnL = (localPos.AveragePrice - fillPrice) * float64(closedQty)
+				}
+				localPos.RealizedPnL += tradePnL
+				localPos.RealizedPnL = math.Round(localPos.RealizedPnL*100) / 100
+			} else if pos.PnL != 0 {
+				// Fallback to broker reality if no local math occurred
+				localPos.RealizedPnL = pos.PnL
+			}
+
 			localPos.NetQuantity = 0
 			localPos.Side = "FLAT"
 			localPos.AveragePrice = 0
@@ -656,7 +704,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			localPos.TargetPrice = 0
 			localPos.StopLossPrice = 0
 			localPos.LastFillQty = 0
-			localPos.RealizedPnL = pos.PnL
+			localPos.EntryTimestamp = ""
 
 			if lm.dbWriter != nil {
 				lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())
@@ -668,7 +716,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 				netQty:      0,
 				side:        "FLAT",
 				avgPrice:    0.0,
-				realizedPnL: pos.PnL,
+				realizedPnL: localPos.RealizedPnL,
 			})
 			continue
 		}
@@ -680,6 +728,34 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			lm.activePositions[key] = localPos
 		}
 
+		// Calculate realized PnL locally if reducing an existing open position
+		incomingQty := pos.Quantity
+		if localPos.NetQuantity != 0 && ((localPos.NetQuantity > 0 && incomingQty < localPos.NetQuantity) || (localPos.NetQuantity < 0 && incomingQty > localPos.NetQuantity)) {
+			// Quantities are changing direction or sizing down
+			oldAbs := math.Abs(float64(localPos.NetQuantity))
+			newAbs := math.Abs(float64(incomingQty))
+
+			if newAbs < oldAbs { // It's a partial reduction
+				closedQty := oldAbs - newAbs
+				fillPrice := pos.LastPrice
+				if fillPrice <= 0 {
+					fillPrice = localPos.LTP
+				}
+
+				var tradePnL float64
+				if localPos.Side == "LONG" {
+					tradePnL = (fillPrice - localPos.AveragePrice) * closedQty
+				} else {
+					tradePnL = (localPos.AveragePrice - fillPrice) * closedQty
+				}
+				localPos.RealizedPnL += tradePnL
+				localPos.RealizedPnL = math.Round(localPos.RealizedPnL*100) / 100
+			}
+		} else if pos.Realised != 0 && localPos.RealizedPnL == 0 {
+			// Sync baseline from broker if local cache is fresh
+			localPos.RealizedPnL = pos.Realised
+		}
+
 		localPos.NetQuantity = pos.Quantity
 		if pos.Quantity > 0 {
 			localPos.Side = "LONG"
@@ -689,6 +765,29 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 
 		localPos.AveragePrice = lm.calculateTrueAveragePrice(symbolKey, pos.Quantity)
 		localPos.RealizedPnL = pos.Realised
+
+		// ⚡ FIX: Recover the initial entry timestamp from local order book logs
+		if localPos.EntryTimestamp == "" {
+			var earliestFill time.Time
+			targetSide := "BUY"
+			if localPos.Side == "SHORT" {
+				targetSide = "SELL"
+			}
+
+			for _, o := range lm.orderBook {
+				if o.Symbol == symbolKey && o.Side == targetSide && o.Status == "COMPLETE" && o.FilledQty > 0 {
+					if earliestFill.IsZero() || o.Timestamp.Before(earliestFill) {
+						earliestFill = o.Timestamp
+					}
+				}
+			}
+
+			if !earliestFill.IsZero() {
+				localPos.EntryTimestamp = earliestFill.UTC().Format(time.RFC3339)
+			} else {
+				localPos.EntryTimestamp = time.Now().UTC().Format(time.RFC3339) // Fallback safety
+			}
+		}
 
 		// ⚡ FIX: Explicitly compute Unrealized PnL during baseline initialization state sync
 		if pos.LastPrice > 0 {
@@ -720,6 +819,7 @@ func (lm *LiveOrderManager) SyncExchangeState(ctx context.Context) error {
 			localPos.AveragePrice = 0
 			localPos.TargetPrice = 0
 			localPos.StopLossPrice = 0
+			localPos.EntryTimestamp = ""
 
 			if lm.dbWriter != nil {
 				lm.dbWriter.PersistPositionSnapshot(localPos, time.Now())

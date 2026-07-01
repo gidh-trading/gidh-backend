@@ -197,7 +197,6 @@ func (pm *PaperPositionManager) UpdatePositionMetadata(symbol string, product st
 	if pos.NetQuantity == 0 {
 		pos.Side = ""
 		pos.AveragePrice = 0
-		pos.RealizedPnL = 0
 		pos.UnrealizedPnL = 0
 		pos.TargetPrice = 0
 		pos.StopLossPrice = 0
