@@ -65,6 +65,11 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 	ts := tick.Raw.Timestamp.In(bm.loc)
 	name := tick.Raw.StockName
 
+	currentHourMinute := (ts.Hour() * 100) + ts.Minute()
+	if currentHourMinute < 915 {
+		return nil
+	}
+
 	if name == "NIFTY50" {
 		prevClose := tick.Raw.LastPrice - tick.Raw.Change
 		if prevClose > 0 {
@@ -82,11 +87,11 @@ func (bm *BarManager) Process(tick *models.EnrichedTick) error {
 		ibs, exists = bm.instruments[token]
 		if !exists {
 			ibs = &InstrumentBarState{
-				state1m:  newCandleState(ts.Truncate(time.Minute), price, token, name, "1m"),
-				state3m:  newCandleState(ts.Truncate(3*time.Minute), price, token, name, "3m"),
-				state5m:  newCandleState(ts.Truncate(5*time.Minute), price, token, name, "5m"),
-				state10m: newCandleState(ts.Truncate(10*time.Minute), price, token, name, "10m"),
-				state15m: newCandleState(ts.Truncate(15*time.Minute), price, token, name, "15m"),
+				state1m:  newCandleState(marketTruncate(ts, time.Minute), price, token, name, "1m"),
+				state3m:  newCandleState(marketTruncate(ts, 3*time.Minute), price, token, name, "3m"),
+				state5m:  newCandleState(marketTruncate(ts, 5*time.Minute), price, token, name, "5m"),
+				state10m: newCandleState(marketTruncate(ts, 10*time.Minute), price, token, name, "10m"),
+				state15m: newCandleState(marketTruncate(ts, 15*time.Minute), price, token, name, "15m"),
 			}
 			bm.instruments[token] = ibs
 		}
@@ -156,6 +161,21 @@ func (bm *BarManager) ClearState() {
 	bm.mu.Unlock()
 
 	logger.Info("Bar Manager historical window cache states wiped cleanly.")
+}
+
+func marketTruncate(ts time.Time, d time.Duration) time.Time {
+	// Set market open anchor point for the same day
+	marketOpen := time.Date(ts.Year(), ts.Month(), ts.Day(), 9, 15, 0, 0, ts.Location())
+
+	if ts.Before(marketOpen) {
+		return marketOpen
+	}
+
+	// Calculate minutes elapsed since 9:15 AM
+	diff := ts.Sub(marketOpen)
+	intervals := diff / d
+
+	return marketOpen.Add(intervals * d)
 }
 
 func newCandleState(ts time.Time, price float64, token uint32, name, timeframe string) *candleState {
