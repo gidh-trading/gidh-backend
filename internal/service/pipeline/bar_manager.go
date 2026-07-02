@@ -259,14 +259,29 @@ func (bm *BarManager) updateTimeframe(
 	var cs *candleState
 	switch timeframe {
 	case "1m":
+		if ibs.state1m == nil {
+			ibs.state1m = newCandleState(marketTruncate(ts, duration), price, token, tick.Raw.StockName, timeframe)
+		}
 		cs = ibs.state1m
 	case "3m":
+		if ibs.state3m == nil {
+			ibs.state3m = newCandleState(marketTruncate(ts, duration), price, token, tick.Raw.StockName, timeframe)
+		}
 		cs = ibs.state3m
 	case "5m":
+		if ibs.state5m == nil {
+			ibs.state5m = newCandleState(marketTruncate(ts, duration), price, token, tick.Raw.StockName, timeframe)
+		}
 		cs = ibs.state5m
 	case "10m":
+		if ibs.state10m == nil {
+			ibs.state10m = newCandleState(marketTruncate(ts, duration), price, token, tick.Raw.StockName, timeframe)
+		}
 		cs = ibs.state10m
 	case "15m":
+		if ibs.state15m == nil {
+			ibs.state15m = newCandleState(marketTruncate(ts, duration), price, token, tick.Raw.StockName, timeframe)
+		}
 		cs = ibs.state15m
 	}
 
