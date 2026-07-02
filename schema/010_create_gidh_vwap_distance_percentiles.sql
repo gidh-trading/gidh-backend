@@ -25,4 +25,8 @@ ALTER TABLE gidh_vwap_distance_percentiles
     ADD COLUMN pos_max DOUBLE PRECISION DEFAULT 0.0,
     ADD COLUMN neg_max DOUBLE PRECISION DEFAULT 0.0;
 
+ALTER TABLE gidh_vwap_distance_percentiles
+    ADD COLUMN max_pos_change_pct NUMERIC,
+    ADD COLUMN max_neg_change_pct NUMERIC;
+
 CREATE INDEX idx_gidh_vwap_dist_date ON gidh_vwap_distance_percentiles (trading_date);
