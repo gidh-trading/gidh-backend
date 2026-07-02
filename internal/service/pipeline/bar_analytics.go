@@ -110,7 +110,7 @@ func (bae *BarAnalyticsEngine) AnalyzeClose(bar *models.Bar, h *TimeframeAnalyti
 	}
 
 	// --- 5. COMPUTE COMPOSITES ---
-	rollingFlowIntensity := (0.55 * h.RollingVolumeIntensity) + (0.45 * h.RollingTickRank)
+	rollingFlowIntensity := (0.75 * h.RollingVolumeIntensity) + (0.25 * h.RollingTickRank)
 	signedExecutionEdge := (0.60 * h.RollingPriceNormalized) + (0.40 * h.RollingEfficiencyRank)
 
 	// --- 6. COMPUTE MOMENTUM SCORE ---
@@ -149,7 +149,7 @@ func (bae *BarAnalyticsEngine) PopulateLiveAnalytics(bar *models.Bar, h *Timefra
 	}
 
 	// 2. Real-Time Composite Compositions
-	projectedFlowIntensity := (0.55 * projectedVolIntensity) + (0.45 * projectedTickRank)
+	projectedFlowIntensity := (0.75 * projectedVolIntensity) + (0.25 * projectedTickRank)
 	projectedExecutionEdge := (0.60 * projectedPriceNorm) + (0.40 * projectedEffRank)
 
 	// 3. Dynamic Real-Time Momentum Score Projection

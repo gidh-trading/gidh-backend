@@ -21,8 +21,8 @@ type ScoutHistoricalSnapshot struct {
 	ADRHigh          float64   `json:"adr_high"`
 	ADRLow           float64   `json:"adr_low"`
 	VwapDistance     float64   `json:"vwap_distance"`
-	VolumeRank       int32     `json:"volume_rank"`
-	PriceRank        int32     `json:"price_rank"`
+	VwapPoints       float64   `json:"vwap_points"`
+	FlowIntensity    float64   `json:"flow_intensity"`
 	Nifty50ChangePct float64   `json:"nifty50_change_pct"`
 	Active           bool      `json:"active"`
 }
@@ -75,7 +75,7 @@ func (s *ScoutStage) ProcessClosedBar(bar *models.Bar) error {
 		"ADR_LOW_TOUCH":       bar.Low <= bar.Analytics.ADRLow && bar.Analytics.ADRLow > 0,
 		"VWAP_ALERT_High":     bar.Analytics.NormalizedVwapDistance > 0.5,
 		"VWAP_ALERT_Low":      bar.Analytics.NormalizedVwapDistance < -0.5,
-		"FLOW_INTENSITY_HIGH": bar.Analytics.RollingFlowIntensity >= 6,
+		"FLOW_INTENSITY_HIGH": bar.Analytics.RollingFlowIntensity > 5.5,
 	}
 
 	// Trace print to log terminal metrics per evaluation cycle
@@ -185,13 +185,13 @@ func (s *ScoutStage) compileSnapshot(bar *models.Bar, trigger string, isActive b
 		StockName:        bar.StockName,
 		TriggerType:      trigger,
 		Price:            bar.Close,
-		VolumeRank:       int32(bar.Analytics.VolumeRank),
-		PriceRank:        int32(bar.Analytics.PriceRank),
+		FlowIntensity:    bar.Analytics.RollingFlowIntensity,
 		ChangePct:        bar.ChangePct,
 		Nifty50ChangePct: bar.Analytics.Nifty50ChangePct,
 		ADRHigh:          bar.Analytics.ADRHigh,
 		ADRLow:           bar.Analytics.ADRLow,
 		VwapDistance:     bar.Analytics.NormalizedVwapDistance,
+		VwapPoints:       bar.Close - bar.VWAP,
 		Active:           isActive,
 	}
 }

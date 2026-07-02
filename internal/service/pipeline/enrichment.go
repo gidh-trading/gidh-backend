@@ -138,7 +138,7 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 			case currentHourMinute >= 915 && currentHourMinute < 1030:
 				sessionMultiplier = 0.97
 			case currentHourMinute >= 1030 && currentHourMinute < 1415:
-				sessionMultiplier = 0.70
+				sessionMultiplier = 0.85
 			case currentHourMinute >= 1415 && currentHourMinute <= 1530:
 				sessionMultiplier = 0.97
 			}
@@ -147,9 +147,29 @@ func (es *EnrichmentStage) Process(tick *models.EnrichedTick) error {
 		}
 
 		switch {
-		case liveVolume >= baseline.VolumeP99: // 🟢 Added P99 threshold check
+		case liveVolume >= baseline.VolumeP99:
 			if liveVolume >= absoluteVolumeVelocityFloor && liveVolume >= globalPaceFloor {
-				volRank = 8
+				// 1. Establish the base rank for clearing the P99 threshold
+				baseRank := 6.0
+
+				// 2. Calculate how far the volume has overshot its P99 baseline.
+				// If VolumeP99 is 10k and liveVolume is 10k: overshotRatio = 0.0
+				// If VolumeP99 is 10k and liveVolume is 40k: overshotRatio = 3.0
+				var bonusRank float64 = 0.0
+				if baseline.VolumeP99 > 0 {
+					overshotRatio := (liveVolume - baseline.VolumeP99) / baseline.VolumeP99
+
+					// Using logarithmic scaling (math.Log1p) handles extreme anomalies
+					// smoothly, allowing large scale values without letting a single
+					// corrupted bad tick break the math model.
+					bonusRank = math.Log1p(overshotRatio) * 0.65
+				}
+
+				// 3. Cap the absolute mathematical ceiling strictly at 8.0
+				finalRank := math.Min(8.0, baseRank+bonusRank)
+
+				// 4. Round to the nearest integer to safely preserve your int type
+				volRank = int(math.Round(finalRank))
 			} else {
 				volRank = 5
 			}
